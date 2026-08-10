@@ -130,6 +130,8 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   They also refuse, before any endpoint exists, a project repository with no
+#   commits: it has no default branch for a worktree to be based on.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1595,6 +1597,21 @@ if [ "$KIND" = ship ]; then
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
+fi
+
+# Commitless-repository refusal, checked before any endpoint exists.
+# A repository with no commits has no default branch, so there is no
+# refs/remotes/origin/<default> for treehouse get (or Orca's own worktree
+# create) to base a worktree on: the acquisition fails immediately and the
+# pane just stays in the project, which the settle loop below can only report
+# as an elapsed deadline. Naming the cause here also means no window, no
+# worktree, and no state/<id>.meta are created for a task that cannot run.
+# A secondmate's PROJ_ABS is a firstmate home, validated as a worktree above.
+if [ "$KIND" != secondmate ] \
+   && git -C "$PROJ_ABS" rev-parse --git-dir >/dev/null 2>&1 \
+   && ! git -C "$PROJ_ABS" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+  echo "error: refusing to launch $ID: the repository at $PROJ_ABS has no commits, so it has no default branch to make an isolated copy from. Give it one initial commit pushed to its default branch, then dispatch again" >&2
+  exit 1
 fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)

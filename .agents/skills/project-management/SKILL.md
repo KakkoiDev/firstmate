@@ -70,6 +70,9 @@ After remote creation succeeds, clone it locally, add the registry entry, and in
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
 
+Either way, give the new repository one initial commit on its default branch, pushed where a remote exists, before registering it as dispatchable.
+A repository with no commits has no default branch to make an isolated copy from, so every worker dispatched into it is refused.
+
 ## Initialize
 
 Run no-mistakes initialization only for `no-mistakes` and `no-mistakes-prod-only` projects:
