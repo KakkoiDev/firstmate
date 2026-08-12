@@ -869,6 +869,98 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# A task whose worker stopped with work still in its worktree must resume in THAT
+# worktree. `treehouse get` only hands out pool worktrees treehouse reports as
+# available, and a worktree holding uncommitted work reads dirty, so a plain
+# re-spawn is handed a different one: the task's branch and commits stay stranded
+# in the old worktree, and git refuses a second checkout of the same branch, so
+# the relaunch fails at the brief's first step. Resolve the recorded worktree back
+# to its pool name here, before any endpoint exists, so RESUME_WT_NAME can replace
+# `treehouse get` below. Every step is verified against the live pool rather than
+# parsed and trusted; an unproven record falls through to a fresh allocation,
+# which is safe precisely because nothing of this task's is recorded there.
+resume_meta_field() {  # <key> -> its single recorded value on stdout
+  local meta=$STATE/$ID.meta
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  [ "$(grep -c "^$1=" "$meta" 2>/dev/null || true)" = 1 ] || return 1
+  grep "^$1=" "$meta" | cut -d= -f2-
+}
+
+resume_worktree_name() {  # -> pool name on stdout
+  local meta=$STATE/$ID.meta recorded recorded_real name resolved
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  [ "$(grep -c '^worktree=' "$meta" 2>/dev/null || true)" = 1 ] || return 1
+  recorded=$(grep '^worktree=' "$meta" | cut -d= -f2-)
+  [ -n "$recorded" ] && [ -d "$recorded" ] || return 1
+  recorded_real=$(cd "$recorded" 2>/dev/null && pwd -P) || return 1
+  [ "$recorded_real" = "$PROJ_ABS_REAL" ] && return 1
+  # Same repository, so a stale or hand-edited record can never enter another
+  # project's worktree: compare the shared git dir both checkouts point at.
+  local wt_common proj_common
+  wt_common=$(cd "$recorded_real" && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || return 1
+  proj_common=$(cd "$PROJ_ABS_REAL" && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || return 1
+  [ "$wt_common" = "$proj_common" ] || return 1
+  # treehouse addresses pool worktrees by name, so confirm the name derived from
+  # the recorded path resolves back to that exact path in the live pool.
+  name=$(basename "$(dirname "$recorded_real")")
+  [ -n "$name" ] || return 1
+  resolved=$(cd "$PROJ_ABS_REAL" && treehouse enter --print-path "$name" 2>/dev/null) || return 1
+  resolved=$(cd "$resolved" 2>/dev/null && pwd -P) || return 1
+  [ "$resolved" = "$recorded_real" ] || return 1
+  printf '%s\n' "$name"
+}
+
+# Two tasks recorded in one worktree is a tangle, not a resume: entering it would
+# put this task's branch where another unfinished task's branch is checked out, and
+# git refuses that. Name both tasks and stop rather than guess which one owns it.
+resume_other_task_claiming() {  # <worktree-real> -> conflicting task id on stdout
+  local wt=$1 meta claim_id claim_wt
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    claim_id=$(basename "$meta" .meta)
+    [ "$claim_id" != "$ID" ] || continue
+    [ "$(grep -c '^worktree=' "$meta" 2>/dev/null || true)" = 1 ] || continue
+    claim_wt=$(grep '^worktree=' "$meta" | cut -d= -f2-)
+    [ -n "$claim_wt" ] || continue
+    if [ "$(real_path_or_raw "$claim_wt")" = "$wt" ]; then
+      printf '%s\n' "$claim_id"
+      return 0
+    fi
+  done
+  return 1
+}
+
+RESUME_WT_NAME=""
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  RESUME_WT_NAME=$(resume_worktree_name || true)
+  if [ -n "$RESUME_WT_NAME" ]; then
+    resume_wt_real=$(real_path_or_raw "$(resume_meta_field worktree)")
+    if resume_conflict=$(resume_other_task_claiming "$resume_wt_real"); then
+      echo "error: task $ID and task $resume_conflict are both recorded in worktree $resume_wt_real; refusing to launch into a worktree another unfinished task claims. Resolve that overlap first (stuck-crewmate-recovery)" >&2
+      exit 1
+    fi
+    # Resuming shares one worktree with whatever already runs there, so anything
+    # short of a positively gone worker must stop the spawn: two agents editing
+    # one copy is worse than the stranding this resume path exists to prevent.
+    # fm_backend_agent_state, not the cheap presence read: only its `dead` and
+    # `missing` results license recovery, and every ambiguous or unreadable
+    # answer keeps the recorded worker's claim on the worktree.
+    resume_window=$(resume_meta_field window || true)
+    resume_backend=$(resume_meta_field backend || true)
+    [ -n "$resume_backend" ] || resume_backend=tmux
+    if [ -n "$resume_window" ]; then
+      resume_state=$(fm_backend_agent_state "$resume_backend" "$resume_window" 2>/dev/null || true)
+      case "$resume_state" in
+        dead|missing) ;;
+        *)
+          echo "error: task $ID is recorded on $resume_window holding worktree $(resume_meta_field worktree), and that worker reads '${resume_state:-unreadable}' rather than gone; refusing to launch a second agent into one worktree. Reconcile that worker first (stuck-crewmate-recovery)" >&2
+          exit 1
+          ;;
+      esac
+    fi
+  fi
+fi
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -1293,7 +1385,12 @@ kimi_spawn_fail() {  # <detail>
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  if [ -n "$RESUME_WT_NAME" ]; then
+    WT_SOURCE="treehouse enter $RESUME_WT_NAME"
+  else
+    WT_SOURCE="treehouse get"
+  fi
+  spawn_send_text_line "$WT_TARGET" "$WT_SOURCE"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -1335,11 +1432,16 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: $WT_SOURCE did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_worktree "$WT_SOURCE" "$T"
+  if [ -n "$RESUME_WT_NAME" ] \
+     && [ "$(real_path_or_raw "$WT")" != "$(real_path_or_raw "$(resume_meta_field worktree)")" ]; then
+    echo "error: $WT_SOURCE landed in '$WT' but task $ID is recorded in '$(resume_meta_field worktree)'; refusing to launch so the recorded work is not stranded. Inspect target $T" >&2
+    exit 1
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
