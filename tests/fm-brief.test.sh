@@ -725,6 +725,50 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# The AC gate must appear in every ship scaffold (all three delivery modes)
+# and must be absent from scout and secondmate scaffolds, whose deliverable is
+# a report or a charter rather than a merge.
+test_ac_gate_ship_only() {
+  local home id mode brief
+  home="$TMP_ROOT/ac-gate-home"
+  mkdir -p "$home/data"
+
+  for mode in no-mistakes direct-PR local-only; do
+    id="ac-gate-ship-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Acceptance-criteria gate" "$brief" \
+      "ship brief (mode=$mode) missing the acceptance-criteria gate section"
+    assert_grep "fetch this task's acceptance criteria from the source named in the Task section above" "$brief" \
+      "ship brief (mode=$mode) AC gate missing the fetch-and-quote instruction"
+    assert_grep "Quote each criterion verbatim in a numbered AC inventory." "$brief" \
+      "ship brief (mode=$mode) AC gate missing the verbatim numbered inventory instruction"
+    assert_grep "OK, CONTRADICTORY" "$brief" \
+      "ship brief (mode=$mode) AC gate missing the classification taxonomy"
+    assert_grep "name the concrete test (file and case) that will pin it" "$brief" \
+      "ship brief (mode=$mode) AC gate missing the per-criterion test-naming instruction"
+    assert_grep "append \`needs-decision: {summary}\` and stop before implementing" "$brief" \
+      "ship brief (mode=$mode) AC gate missing the stop-before-implementing instruction"
+    assert_grep "supplies no acceptance criteria and names no source, write the inventory as your own restatement" "$brief" \
+      "ship brief (mode=$mode) AC gate missing the no-ticket fallback"
+  done
+
+  id="ac-gate-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "# Acceptance-criteria gate" "$brief" \
+    "scout brief must not carry the ship-only acceptance-criteria gate"
+
+  id="ac-gate-secondmate"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate alpha >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "# Acceptance-criteria gate" "$brief" \
+    "secondmate charter must not carry the ship-only acceptance-criteria gate"
+
+  pass "fm-brief.sh: acceptance-criteria gate appears only in ship briefs, in every delivery mode"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -767,4 +811,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_ac_gate_ship_only
 test_scout_and_secondmate_scaffold
