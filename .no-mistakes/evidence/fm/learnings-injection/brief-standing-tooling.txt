@@ -1,0 +1,49 @@
+## Scout brief, lines around # Task (learnings.md has a '## Standing tooling' section)
+3:# Task
+4-{TASK}
+5-
+6-# Standing tooling (home-local, from data/learnings.md)
+7-- Datadog via the pup CLI, never a browser or chrome-devtools-axi.
+8-- Browsing via ego-browser.
+9-
+10-# Herdr lifecycle declaration - NOT ENABLED
+11-**HARD SAFETY GATE:** this scaffold cannot inspect the task text filled in above.
+
+## Ship brief, lines around # Task
+3:# Task
+4-{TASK}
+5-
+6-# Standing tooling (home-local, from data/learnings.md)
+7-- Datadog via the pup CLI, never a browser or chrome-devtools-axi.
+8-- Browsing via ego-browser.
+9-
+10-# Herdr lifecycle declaration - NOT ENABLED
+11-**HARD SAFETY GATE:** this scaffold cannot inspect the task text filled in above.
+
+## Secondmate charter: occurrences of 'Standing tooling' (expected 0)
+0
+
+## Unrelated sections leaked into ship/scout briefs (expected 0)
+/tmp/fm-e2e.wuP8/data/e2e-ship/brief.md:0
+/tmp/fm-e2e.wuP8/data/e2e-scout/brief.md:0
+## Diff of scout brief: no learnings.md (left) vs learnings.md with standing section (right)
+5a6,9
+> # Standing tooling (home-local, from data/learnings.md)
+> - Datadog via the pup CLI, never a browser or chrome-devtools-axi.
+> - Browsing via ego-browser.
+> 
+22c26
+<    `echo "{state}: {one short line}" >> '/tmp/fm-e2e2.W2qH/state/e2e-scout.status'`
+---
+>    `echo "{state}: {one short line}" >> '/tmp/fm-e2e.wuP8/state/e2e-scout.status'`
+41,42c45,46
+< Firstmate steers you through durable message files in '/tmp/fm-e2e2.W2qH/state/e2e-scout.inbox'.
+< When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list '/tmp/fm-e2e2.W2qH/state/e2e-scout.inbox'/*.msg, read and act on each message in numeric order, then acknowledge each handled message by moving it: `mv '/tmp/fm-e2e2.W2qH/state/e2e-scout.inbox'/NNN.msg '/tmp/fm-e2e2.W2qH/state/e2e-scout.inbox'/handled/`.
+---
+> Firstmate steers you through durable message files in '/tmp/fm-e2e.wuP8/state/e2e-scout.inbox'.
+> When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list '/tmp/fm-e2e.wuP8/state/e2e-scout.inbox'/*.msg, read and act on each message in numeric order, then acknowledge each handled message by moving it: `mv '/tmp/fm-e2e.wuP8/state/e2e-scout.inbox'/NNN.msg '/tmp/fm-e2e.wuP8/state/e2e-scout.inbox'/handled/`.
+46c50
+< Write your findings to `/tmp/fm-e2e2.W2qH/data/e2e-scout/report.md`.
+---
+> Write your findings to `/tmp/fm-e2e.wuP8/data/e2e-scout/report.md`.
+(diff rc=1, only the inserted section differs)

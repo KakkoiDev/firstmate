@@ -1,0 +1,37 @@
+## learnings.md
+# Learnings
+- 2026-08-20 Datadog sits behind a login wall: query it with the pup CLI, never a browser.
+- 2026-08-01 Backlog retention keeps only the configured recent Done entries.
+- 2026-08-22 Browsing: use ego-browser, it reuses the captain login state.
+
+## status files
+dd-scout.status: blocked: datadog login wall reached in the browser
+portal.status: needs-decision [key=browse]: browsing the vendor portal hit a login wall
+quiet.status: working: implementing the datadog login wall workaround
+
+## bin/fm-wake-drain.sh stdout (FM_HOME with learnings.md)
+1787616230	1	signal	dd-scout.status	signal: /tmp/fm-drain.VFl7/state/dd-scout.status
+1787616230	2	signal	portal.status	signal: /tmp/fm-drain.VFl7/state/portal.status
+1787616230	3	signal	quiet.status	signal: /tmp/fm-drain.VFl7/state/quiet.status
+wake annotation: latest wake-EVENT observed at drain, not current state: dd-scout.status: blocked: datadog login wall reached in the browser
+learnings hint (4 match): - 2026-08-20 Datadog sits behind a login wall: query it with the pup CLI, never a browser.
+learnings hint (2 match): - 2026-08-22 Browsing: use ego-browser, it reuses the captain login state.
+wake annotation: latest wake-EVENT observed at drain, not current state: portal.status: needs-decision [key=browse]: browsing the vendor portal hit a login wall
+learnings hint (3 match): - 2026-08-20 Datadog sits behind a login wall: query it with the pup CLI, never a browser.
+learnings hint (3 match): - 2026-08-22 Browsing: use ego-browser, it reuses the captain login state.
+wake annotation: latest wake-EVENT observed at drain, not current state: quiet.status: working: implementing the datadog login wall workaround
+OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):
+dd-scout blocked: datadog login wall reached in the browser
+portal [key=browse] needs-decision: browsing the vendor portal hit a login wall
+OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'
+(exit 0)
+
+## same drain, learnings.md removed
+1787616233	4	signal	dd-scout.status	signal: /tmp/fm-drain.VFl7/state/dd-scout.status
+1787616230	2	signal	portal.status	signal: /tmp/fm-drain.VFl7/state/portal.status
+1787616230	3	signal	quiet.status	signal: /tmp/fm-drain.VFl7/state/quiet.status
+OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):
+dd-scout blocked: datadog login wall reached in the browser
+portal [key=browse] needs-decision: browsing the vendor portal hit a login wall
+OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'
+(exit 0)
