@@ -410,6 +410,12 @@ The report is the only thing that survives, so anything worth keeping must be in
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Never spawn sub-workers, subagents, background agents, teammates, or parallel review
+   ensembles, by any tool or skill. You do the work yourself in this one session. A skill that
+   fans out (for example an ensemble review) must be run single-pass or not at all. If a task
+   genuinely cannot be done without fanning out, append \`blocked: {why}\` and stop.
+9. Never raise your own reasoning effort above the level firstmate launched you with, and never
+   use xhigh or max.
 
 $INBOX_SECTION
 
@@ -501,6 +507,12 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Never spawn sub-workers, subagents, background agents, teammates, or parallel review
+   ensembles, by any tool or skill. You do the work yourself in this one session. A skill that
+   fans out (for example an ensemble review) must be run single-pass or not at all. If a task
+   genuinely cannot be done without fanning out, append \`blocked: {why}\` and stop.
+9. Never raise your own reasoning effort above the level firstmate launched you with, and never
+   use xhigh or max.
 
 $INBOX_SECTION
 
