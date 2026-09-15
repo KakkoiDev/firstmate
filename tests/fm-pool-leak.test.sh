@@ -102,7 +102,6 @@ test_claim_with_no_record_and_an_unreadable_claim_are_reported_differently() {
   # Discovery runs over this home's records, so the neighbour record is what
   # keeps the pool discoverable once the claimant's own record is gone, and is
   # what makes this case reachable at all.
-  mkdir -p "$dir/other/project"
   git -C "$dir/project" worktree add -q --detach "$dir/pool/2/project" 2>/dev/null \
     || mkdir -p "$dir/pool/2"
   fm_write_meta "$dir/home/state/neighbour.meta" \
@@ -125,6 +124,22 @@ test_claim_with_no_record_and_an_unreadable_claim_are_reported_differently() {
   assert_contains "$out" "$dir/pool/1/.fm-slot-owner" \
     "an unreadable claim should name the file to inspect"
   pass "pool leak: a claim with no record, and a claim that cannot be read, each report their own remediation"
+}
+
+test_unresolvable_backend_reports_unknown_liveness_without_a_command() {
+  local dir out id=herdr-task
+  dir=$(make_pool_case backend-unresolvable)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "backend=herdr" \
+    "worktree=$dir/pool/1/project" "project=$dir/project" "kind=ship"
+  claim_slot "$dir" "$id" "$dir/home"
+
+  out=$(run_detect "$dir")
+  assert_contains "$out" "whether its worker is still running is unknown" \
+    "a backend whose CLI cannot be resolved must not be reported as a gone worker"
+  assert_not_contains "$out" "fm-teardown.sh $id" \
+    "no cleanup command may be offered for a liveness state that could not be read"
+  pass "pool leak: a record whose backend CLI is unresolvable reports unknown liveness, not a dead worker"
 }
 
 test_unclaimed_slot_reports_nothing() {
@@ -170,5 +185,6 @@ test_claim_with_no_home_is_reported_and_a_foreign_home_stays_silent() {
 test_finished_task_still_holding_its_slot_is_named_with_its_cleanup_command
 test_slot_held_by_a_live_worker_is_silent
 test_claim_with_no_record_and_an_unreadable_claim_are_reported_differently
+test_unresolvable_backend_reports_unknown_liveness_without_a_command
 test_unclaimed_slot_reports_nothing
 test_claim_with_no_home_is_reported_and_a_foreign_home_stays_silent

@@ -103,8 +103,10 @@ test_fresh_spawn_proceeds_when_the_recorded_slot_was_already_reassigned() {
   read_clobber_case "$rec"
   seed_held_slot "$id" "some-other-task"
 
+  set +e
   out=$(run_clobber_spawn "$id")
   status=$?
+  set -e
   expect_code 0 "$status" "a record whose slot was already reassigned should still spawn"$'\n'"$out"
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
     "the spawn did not record its new worktree"
