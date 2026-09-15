@@ -72,7 +72,7 @@ test_finished_task_still_holding_its_slot_is_named_with_its_cleanup_command() {
   out=$(run_detect "$dir")
   assert_contains "$out" "POOL_LEAK: $dir/pool slot 1 is still held by task $id" \
     "a slot held by a task with no worker should be reported"
-  assert_contains "$out" "FM_HOME=$dir/home bin/fm-teardown.sh $id" \
+  assert_contains "$out" "FM_HOME=$dir/home $ROOT/bin/fm-teardown.sh $id" \
     "the report should print the exact command that returns the slot"
   # Detection only: the slot, its claim, and its copy are untouched.
   assert_present "$dir/pool/1/.fm-slot-owner" "the check removed a slot claim"

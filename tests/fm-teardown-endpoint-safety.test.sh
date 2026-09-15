@@ -1034,6 +1034,24 @@ test_slot_claim_breaks_the_two_record_deadlock() {
   [ ! -s "$dir/runtime.log" ] \
     || fail "same-id collision reached the runtime: $(cat "$dir/runtime.log")"
 
+  # A secondmate home is leased straight from the pool and writes no claim, so a
+  # record naming this slot as its home= is never the record the claim outranks.
+  # Returning the slot there would hard-reset a live home, so it still refuses.
+  dir=$(make_case slot-deadlock-home-field)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$live.meta" \
+    "window=firstmate:fm-$live" "endpoint_task_id=$live" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/seeded-mate.meta" \
+    "window=firstmate:fm-seeded-mate" "endpoint_task_id=seeded-mate" \
+    "home=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$live"
+
+  assert_refused_without_mutation "$dir" "$live" "home= collision with no claim of its own"
+  assert_present "$dir/pool/1/.fm-slot-owner" "home= collision cleared the slot claim"
+  assert_contains "$(cat "$dir/stderr")" "recorded worktree" \
+    "the home= collision should refuse rather than warn and continue"
+
   pass "fm-teardown: a slot claim breaks the stale-record/live-record teardown deadlock in both directions"
 }
 

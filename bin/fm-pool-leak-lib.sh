@@ -26,6 +26,8 @@
 # Pure detection: no locks, no writes, and no network. Every line is prefixed
 # POOL_LEAK: and is safe to print in a read-only session.
 
+_FM_POOL_LEAK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Pools reachable from one home's task records, one absolute path per line.
 fm_pool_leak_pools() {  # <state-dir>
   local state=$1 meta worktree project slot pool
@@ -84,7 +86,7 @@ fm_pool_leak_report() {  # <state-dir>
       case "$rc" in
         0) continue ;;
         1)
-          echo "POOL_LEAK: $pool slot $name is still held by task $claim_id, whose worker is gone; return it with: FM_HOME=$claim_home bin/fm-teardown.sh $claim_id"
+          echo "POOL_LEAK: $pool slot $name is still held by task $claim_id, whose worker is gone; return it with: FM_HOME=$claim_home $_FM_POOL_LEAK_LIB_DIR/fm-teardown.sh $claim_id"
           ;;
         2)
           echo "POOL_LEAK: $pool slot $name claims task $claim_id, but home $claim_home holds no record for it, so no cleanup command can return that slot; inspect $slot for unlanded work, then clear the claim by hand"

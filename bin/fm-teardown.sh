@@ -2180,9 +2180,13 @@ EXCLUSIVE_SCAN_RECORD_ID=
 # (observed 2026-09-15, where two stale records had to be moved aside by hand
 # before either slot could be returned). The claim cannot separate two records
 # that carry the SAME task id in different homes, so that collision still
-# refuses.
-exclusive_scan_claim_outranks() {  # <other-id>
-  local other_id=$1
+# refuses. It is also confined to a colliding worktree= field: a secondmate
+# home is leased straight from the pool (bin/fm-home-seed.sh) and writes no
+# claim, so a record naming this slot as its home= is never outranked by a
+# claim and still refuses.
+exclusive_scan_claim_outranks() {  # <field> <other-id>
+  local field=$1 other_id=$2
+  [ "$field" = worktree ] || return 1
   [ "$EXCLUSIVE_SCAN_CLAIM" = mine ] || return 1
   [ "$other_id" != "$EXCLUSIVE_SCAN_RECORD_ID" ] || return 1
 }
@@ -2205,7 +2209,7 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
-        if exclusive_scan_claim_outranks "$other_id"; then
+        if exclusive_scan_claim_outranks "$field" "$other_id"; then
           echo "warning: task $other_id's record also names $slot, but that slot's own claim names $record_id, so $other_id lost the slot before $record_id took it; its record is stale and $record_id's cleanup proceeds. Clear $other_id's record with its own teardown." >&2
           continue
         fi
