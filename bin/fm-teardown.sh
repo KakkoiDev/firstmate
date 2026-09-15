@@ -2170,20 +2170,19 @@ collect_local_firstmate_states() {
 EXCLUSIVE_SCAN_CLAIM=absent
 EXCLUSIVE_SCAN_RECORD_ID=
 
-# A colliding record the slot's own claim outranks. The claim names the task
-# that took the slot through bin/fm-spawn.sh, written under the project lock
-# that allocates it, so when it names THIS record every record naming a
-# DIFFERENT task held the slot before this one and is not the live holder the
-# refusal below protects - as far as the claim can tell. It separates records
-# only for takers that write a claim: a slot taken before claims existed, or by
-# a home whose firstmate predates them, leaves the previous claim in place and
-# is not distinguished here. Without this, a long-dead record and its live
-# successor refused each other forever: the successor was blocked by the stale
-# record, and the stale record's own records-only path sat behind this very
-# scan (observed 2026-09-15, where two stale records had to be moved aside by
-# hand before either slot could be returned). The claim cannot separate two
-# records that carry the SAME task id in different homes, so that collision
-# still refuses. It is also confined to a colliding worktree= field: a
+# A colliding record the slot's claim outranks. Both records name the SAME slot,
+# so there is one claim file for the pair: when it names THIS record, the
+# colliding record is the one that does not hold the claim. That separates
+# records only for takers that write a claim. A slot taken before claims
+# existed, or by a home whose firstmate predates them, leaves the previous
+# claim in place, and no evidence at the slot or in either record distinguishes
+# that taker from a record that lost the slot. Without the bypass a long-dead
+# record and its live successor refused each other forever: the successor was
+# blocked by the stale record, and the stale record's own records-only path sat
+# behind this very scan (observed 2026-09-15, where two stale records had to be
+# moved aside by hand before either slot could be returned). The claim cannot
+# separate two records that carry the SAME task id in different homes, so that
+# collision still refuses. It is also confined to a colliding worktree= field: a
 # secondmate home is leased straight from the pool (bin/fm-home-seed.sh) and
 # writes no claim, so a record naming this slot as its home= is never outranked
 # by a claim and still refuses.

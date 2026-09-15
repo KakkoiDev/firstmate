@@ -1052,6 +1052,23 @@ test_slot_claim_breaks_the_two_record_deadlock() {
   assert_contains "$(cat "$dir/stderr")" "recorded worktree" \
     "the home= collision should refuse rather than warn and continue"
 
+  # A colliding record whose slot carries no claim at all is not provably stale:
+  # nothing says which of the two records took the slot last, which is the state
+  # of every slot handed out before claims existed. It refuses.
+  dir=$(make_case slot-deadlock-unclaimed)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$live.meta" \
+    "window=firstmate:fm-$live" "endpoint_task_id=$live" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$stale.meta" \
+    "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  rm -f "$dir/pool/1/.fm-slot-owner"
+
+  assert_refused_without_mutation "$dir" "$live" "two records on an unclaimed slot"
+  assert_present "$dir/home/state/$stale.meta" \
+    "an unclaimed-slot collision removed the colliding record"
+
   pass "fm-teardown: a slot claim breaks the stale-record/live-record teardown deadlock in both directions"
 }
 
