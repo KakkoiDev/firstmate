@@ -16,8 +16,9 @@
 # against the claim each slot carries (bin/fm-treehouse-slot-lib.sh). A claim
 # names the task AND the home that took the slot, so the record it points at is
 # read in that home rather than by searching every home on the machine. A claim
-# whose home is not a directory here belongs to another machine and is left
-# alone. A slot carrying NO claim is reported by nothing: claims arrived on
+# whose home is a directory that does not exist here belongs to another machine
+# and is left alone; a claim carrying no home at all names no record anywhere and
+# is reported. A slot carrying NO claim is reported by nothing: claims arrived on
 # 2026-09-07, so an unclaimed slot was taken before them, and nothing in the
 # slot says which of the records naming it is its current holder - the same
 # reason cleanup refuses one. Those are a closed, shrinking set.
@@ -73,7 +74,11 @@ fm_pool_leak_report() {  # <state-dir>
       esac
       claim_id=$FM_TREEHOUSE_SLOT_CLAIM_ID
       claim_home=$FM_TREEHOUSE_SLOT_CLAIM_HOME
-      [ -n "$claim_home" ] && [ -d "$claim_home" ] || continue
+      if [ -z "$claim_home" ]; then
+        echo "POOL_LEAK: $pool slot $name claims task $claim_id, but its claim records no home, so nothing can find the record whose cleanup returns that slot; inspect $slot for unlanded work, then repair or clear $slot/.fm-slot-owner by hand"
+        continue
+      fi
+      [ -d "$claim_home" ] || continue
       rc=0
       fm_pool_leak_task_state "$claim_home" "$claim_id" || rc=$?
       case "$rc" in

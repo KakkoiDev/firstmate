@@ -73,15 +73,6 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
   mv -f "$tmp" "$marker" 2>/dev/null || { rm -f "$tmp"; return 1; }
 }
 
-# Read the claim on a pool slot and compare it with a task id.
-# Sets FM_TREEHOUSE_SLOT_OWNER to one of:
-#   mine   - the claim names this task
-#   other  - the claim names a different task, so the slot was reassigned
-#   absent - no claim: the slot was taken before claims existed, or returned since
-#   unsafe - a claim file exists but cannot be read as a claim
-# FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
-# claimant as evidence. The home is reported, never matched: a home that moved
-# must not turn a task's own slot into a refusal.
 # The claim beside one pool slot directory, parsed once for every reader.
 # Sets FM_TREEHOUSE_SLOT_CLAIM_ID and FM_TREEHOUSE_SLOT_CLAIM_HOME and returns
 # 0 when a claim was read, 1 when the slot carries none, and 2 when something
@@ -109,6 +100,15 @@ fm_treehouse_slot_claim_read() {  # <slot-dir>
   return 0
 }
 
+# Read the claim on a pool slot and compare it with a task id.
+# Sets FM_TREEHOUSE_SLOT_OWNER to one of:
+#   mine   - the claim names this task
+#   other  - the claim names a different task, so the slot was reassigned
+#   absent - no claim: the slot was taken before claims existed, or returned since
+#   unsafe - a claim file exists but cannot be read as a claim
+# FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
+# claimant as evidence. The home is reported, never matched: a home that moved
+# must not turn a task's own slot into a refusal.
 fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   local worktree=$1 id=$2 marker rc=0
   FM_TREEHOUSE_SLOT_OWNER=unsafe

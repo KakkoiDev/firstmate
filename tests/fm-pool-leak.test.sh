@@ -139,7 +139,35 @@ test_unclaimed_slot_reports_nothing() {
   pass "pool leak: a slot carrying no claim reports nothing"
 }
 
+
+test_claim_with_no_home_is_reported_and_a_foreign_home_stays_silent() {
+  local dir out id=homeless-task
+  dir=$(make_pool_case claim-without-home)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/pool/1/project" "project=$dir/project" "kind=ship"
+  printf 'task=%s\nhome=\n' "$id" > "$dir/pool/1/.fm-slot-owner"
+
+  out=$(run_detect "$dir")
+  assert_contains "$out" "POOL_LEAK: $dir/pool slot 1 claims task $id" \
+    "a claim naming a task but no home must still name the held slot"
+  assert_contains "$out" "records no home" \
+    "the report should say the claim carries no home"
+
+  dir=$(make_pool_case claim-from-another-machine)
+  fm_write_meta "$dir/home/state/neighbour.meta" \
+    "window=firstmate:fm-neighbour" "endpoint_task_id=neighbour" \
+    "worktree=$dir/pool/1/project" "project=$dir/project" "kind=ship"
+  claim_slot "$dir" "foreign-task" "$dir/absent-home"
+
+  out=$(run_detect "$dir")
+  assert_not_contains "$out" "POOL_LEAK:" \
+    "a claim whose home does not exist here belongs to another machine and must stay silent"
+  pass "pool leak: a claim with no home is reported, a claim from a home absent here is not"
+}
+
 test_finished_task_still_holding_its_slot_is_named_with_its_cleanup_command
 test_slot_held_by_a_live_worker_is_silent
 test_claim_with_no_record_and_an_unreadable_claim_are_reported_differently
 test_unclaimed_slot_reports_nothing
+test_claim_with_no_home_is_reported_and_a_foreign_home_stays_silent
