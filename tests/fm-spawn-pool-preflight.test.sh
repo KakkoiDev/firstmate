@@ -8,8 +8,9 @@
 # isolated worktree" timeout naming only the directory the shell was still in.
 # The cases below pin the two proven causes refusing before any endpoint or
 # record exists, a failing get in the pane being reported as soon as it fails,
-# and the timeout still standing as the backstop for a pane that hangs with
-# nothing to say.
+# the timeout still standing as the backstop for a pane that hangs with nothing
+# to say, and the preflight's own pool read staying bounded so it cannot become
+# a new way for a launch to hang.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -118,6 +119,9 @@ test_full_pool_refuses_with_an_actionable_report() {
   status=$?
 
   [ "$status" -ne 0 ] || fail "spawn launched a worker into a pool with no obtainable copy"$'\n'"$out"
+  assert_not_contains "$out" "did not enter an isolated worktree" \
+    "the spawn waited for a pane instead of refusing before it launched anything"
+  assert_no_task_state "$HOME_DIR" "$id" "the pool-full refusal"
   assert_contains "$out" "all 2 of 2 worktrees in the pool are in use or dirty (max_trees = 2)" \
     "the refusal did not name the real cause and the cap"
   assert_contains "$out" "0 held by a running worker, 0 held by a durable lease, 2 blocked by leftovers" \
@@ -134,7 +138,6 @@ test_full_pool_refuses_with_an_actionable_report() {
     "the refusal did not say where the cap is read from"
   assert_contains "$out" "a second max_trees key makes treehouse refuse the file entirely" \
     "the refusal did not warn against appending a duplicate cap key"
-  assert_no_task_state "$HOME_DIR" "$id" "the pool-full refusal"
   pass "a pool with no obtainable copy refuses before any record exists, naming cause and remedy"
 }
 
@@ -156,6 +159,8 @@ test_unlanded_slot_is_reported_without_a_clearing_command() {
   status=$?
 
   [ "$status" -ne 0 ] || fail "spawn launched a worker into a pool with no obtainable copy"$'\n'"$out"
+  assert_not_contains "$out" "did not enter an isolated worktree" \
+    "the spawn waited for a pane instead of refusing before it launched anything"
   assert_contains "$out" "unlanded work: 1 commit(s) not on" \
     "the refusal did not distinguish the slot holding real unlanded work"
   assert_not_contains "$out" "treehouse return --force '$SLOT1'" \
@@ -178,11 +183,13 @@ test_unloadable_config_refuses_naming_file_and_line() {
   status=$?
 
   [ "$status" -ne 0 ] || fail "spawn launched a worker although treehouse cannot load its config"$'\n'"$out"
+  assert_not_contains "$out" "did not enter an isolated worktree" \
+    "the spawn waited for a pane instead of refusing before it launched anything"
+  assert_no_task_state "$HOME_DIR" "$id" "the unloadable-config refusal"
   assert_contains "$out" "treehouse cannot load $PROJ_DIR/treehouse.toml" \
     "the refusal did not name the config file treehouse rejected"
   assert_contains "$out" 'toml: line 3 (last key "max_trees"): Key' \
     "the refusal did not repeat treehouse's own diagnosis"
-  assert_no_task_state "$HOME_DIR" "$id" "the unloadable-config refusal"
   pass "an unloadable treehouse.toml refuses naming the file, the line, and the problem"
 }
 
@@ -247,10 +254,42 @@ test_hanging_pane_still_hits_the_timeout_backstop() {
   pass "a pane that hangs with nothing to report still fails at the wait's deadline"
 }
 
+# Reading the pool means a git status of every worktree in it, and the preflight
+# runs ahead of every spawn, so a pool read that never returns would be a new way
+# for a launch to hang - the exact failure this work exists to remove. The read is
+# bounded, and hitting that bound is an unsettled question: the spawn proceeds and
+# the ordinary wait stays the backstop.
+test_an_unreadable_pool_bounds_its_read_instead_of_hanging_the_spawn() {
+  local rec id out status started elapsed
+  id='pool-slow-p6'
+  rec=$(make_pool_case pool-slow "$id")
+  read_pool_record "$rec"
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = status ] && /bin/sleep 120
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/treehouse"
+
+  started=$(date +%s)
+  out=$(FM_TREEHOUSE_POOL_TIMEOUT=1 FM_SPAWN_WORKTREE_WAIT=3 run_pool_spawn "$id")
+  status=$?
+  elapsed=$(( $(date +%s) - started ))
+
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the project"$'\n'"$out"
+  [ "$elapsed" -lt 60 ] || fail "the spawn waited ${elapsed}s on a pool read that never returns"
+  assert_contains "$out" "did not finish within 1s" \
+    "the spawn did not say that reading the pool is what it could not settle"
+  assert_no_task_meta "$HOME_DIR" "$id" "the bounded-pool-read refusal"
+  pass "a pool read that never returns is bounded, and the spawn falls back to its ordinary wait"
+}
+
 test_full_pool_refuses_with_an_actionable_report
 test_unlanded_slot_is_reported_without_a_clearing_command
 test_unloadable_config_refuses_naming_file_and_line
 test_failing_treehouse_get_is_reported_verbatim
 test_hanging_pane_still_hits_the_timeout_backstop
+test_an_unreadable_pool_bounds_its_read_instead_of_hanging_the_spawn
 
 echo "# all fm-spawn-pool-preflight tests passed"

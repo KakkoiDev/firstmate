@@ -3118,7 +3118,7 @@ SPAWN_TREEHOUSE_FAIL_PREFIX='FM_TREEHOUSE_GET_'
 spawn_treehouse_get_exit_status() {
   local line
   line=$(fm_backend_capture "$BACKEND" "$T" 40 "$W" 2>/dev/null \
-    | grep "^${SPAWN_TREEHOUSE_FAIL_PREFIX}FAILED [0-9]" | tail -n 1) || true
+    | grep -o "${SPAWN_TREEHOUSE_FAIL_PREFIX}FAILED [0-9][0-9]*" | tail -n 1) || true
   [ -n "$line" ] || return 1
   printf '%s\n' "${line##* }"
 }
@@ -3135,7 +3135,7 @@ spawn_treehouse_get_diagnosis() {
   fi
   printf 'the pool reports a copy is obtainable, so this is what the task terminal last showed:\n'
   fm_backend_capture "$BACKEND" "$T" 40 "$W" 2>/dev/null \
-    | grep -v "^${SPAWN_TREEHOUSE_FAIL_PREFIX}FAILED [0-9]" | grep . | tail -n 12 \
+    | grep -v "${SPAWN_TREEHOUSE_FAIL_PREFIX}FAILED [0-9]" | grep . | tail -n 12 \
     | sed 's/^/  /'
 }
 

@@ -10,6 +10,8 @@
 # why - from `treehouse status --json`, which reports the same pool the pane's
 # `treehouse get` would draw from.
 #
+# FM_TREEHOUSE_POOL_TIMEOUT bounds the pool read in seconds (default 45).
+#
 # fm_treehouse_pool_inspect <project-dir> always returns 0 and sets:
 #   FM_TREEHOUSE_POOL_VERDICT  available | full | config | unknown
 #   FM_TREEHOUSE_POOL_DETAIL   the report body for every verdict but `available`
@@ -24,6 +26,15 @@
 FM_TREEHOUSE_POOL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-tangle-lib.sh
 . "$FM_TREEHOUSE_POOL_LIB_DIR/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_TREEHOUSE_POOL_LIB_DIR/fm-timeout-lib.sh"
+
+# Seconds the pool read may take before the inspection gives up on it. Reading
+# the pool means a git status of every worktree in it, which on a large
+# repository is slow and, on a wedged filesystem, unbounded. This runs ahead of
+# every spawn, so it is bounded: hitting the bound is an unsettled question, not
+# a refusal, and the spawn proceeds exactly as it did before.
+FM_TREEHOUSE_POOL_TIMEOUT=${FM_TREEHOUSE_POOL_TIMEOUT:-45}
 
 # treehouse's own default when treehouse.toml sets no max_trees, as written by
 # `treehouse init`. Only ever used to decide that a pool is AT its cap, so a
@@ -130,12 +141,17 @@ fm_treehouse_pool_inspect() {  # <project-dir>
   fi
   toml="$root/treehouse.toml"
 
-  err=$(mktemp) || return 0
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-treehouse-status.XXXXXX") || return 0
   # Split across the || so a non-zero status is captured rather than aborting a
   # caller that runs under set -e.
-  out=$(cd "$project" && treehouse status --json 2>"$err") && rc=0 || rc=$?
+  out=$(cd "$project" && fm_run_timed "$FM_TREEHOUSE_POOL_TIMEOUT" treehouse status --json 2>"$err") \
+    && rc=0 || rc=$?
   if [ "$rc" -ne 0 ]; then
     err=$(cat "$err"; rm -f "$err")
+    if [ "$rc" -eq 124 ]; then
+      FM_TREEHOUSE_POOL_DETAIL="reading the worktree pool for $project did not finish within ${FM_TREEHOUSE_POOL_TIMEOUT}s"
+      return 0
+    fi
     case "$err" in
       *'failed to load config'*)
         FM_TREEHOUSE_POOL_VERDICT=config
