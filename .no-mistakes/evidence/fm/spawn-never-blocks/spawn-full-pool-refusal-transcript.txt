@@ -1,0 +1,23 @@
+$ bin/fm-spawn.sh meetsone-repro <project> --mode no-mistakes --yolo off
+error: task meetsone-repro cannot be given an isolated copy of <tmp>/project, so it was not launched:
+all 2 of 2 worktrees in the pool are in use or dirty (max_trees = 2)
+  pool: <tmp>/pool
+  0 held by a running worker, 0 held by a durable lease, 2 blocked by leftovers
+  slot 1  <tmp>/pool/1/repo
+    leftovers only: 0 modified tracked file(s), 1 untracked path(s), no commits off origin/main
+      preserve first: (cd '<tmp>/pool/1/repo' && git add -A && git commit -q -m 'wip: firstmate reclaim of pool slot 1' && git branch "fm-reclaim/1-$(date +%s)")
+      then clear:     treehouse return --force '<tmp>/pool/1/repo'
+  slot 2  <tmp>/pool/2/repo
+    leftovers only: 0 modified tracked file(s), 1 untracked path(s), no commits off origin/main
+      preserve first: (cd '<tmp>/pool/2/repo' && git add -A && git commit -q -m 'wip: firstmate reclaim of pool slot 2' && git branch "fm-reclaim/2-$(date +%s)")
+      then clear:     treehouse return --force '<tmp>/pool/2/repo'
+  to raise the cap instead: edit line 1 of <tmp>/project/treehouse.toml, which reads "max_trees = 2", to a larger number - a second max_trees key makes treehouse refuse the file entirely
+exit status: 1
+
+# Same pool, but treehouse.toml has a duplicate max_trees key (the third failure mode from the incident):
+$ bin/fm-spawn.sh meetsone-repro-cfg <project> --mode no-mistakes --yolo off
+error: task meetsone-repro-cfg cannot be given an isolated copy of <tmp>/project, so it was not launched:
+treehouse cannot load <tmp>/project/treehouse.toml, so no worktree can be handed out:
+  failed to load config: toml: line 3 (last key "max_trees"): Key 'max_trees' has already been defined.
+Fix that file before any spawn; treehouse reads it only at the repository root.
+exit status: 1

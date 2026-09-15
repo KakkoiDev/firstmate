@@ -1,0 +1,7 @@
+ok - a pool with no obtainable copy refuses before any record exists, naming cause and remedy
+ok - a slot holding unlanded commits is reported as work, with no command that would discard it
+ok - an unloadable treehouse.toml refuses naming the file, the line, and the problem
+ok - a treehouse get that fails in the pane is reported at once, in its own words
+ok - a pane that hangs with nothing to report still fails at the wait's deadline
+ok - a pool read that never returns is bounded, and the spawn falls back to its ordinary wait
+not ok - a symlinked cap was ignored and the spawn waited for a pane instead of refusing (unexpected: 'did not enter an isolated worktree')

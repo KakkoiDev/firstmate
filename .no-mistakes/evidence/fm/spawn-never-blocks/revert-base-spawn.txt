@@ -1,0 +1,4 @@
+not ok - the spawn waited for a pane instead of refusing before it launched anything (unexpected: 'did not enter an isolated worktree')
+--- output ---
+warning: /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-spawn-pool-preflight.wzfC95/pool-full/home/data/pool-full-p1/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+error: treehouse get did not enter an isolated worktree within 60s (last seen '/private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-spawn-pool-preflight.wzfC95/pool-full/project': it is the spawning project itself; spawning project '/private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-spawn-pool-preflight.wzfC95/pool-full/project'); inspect window firstmate:fm-pool-full-p1
