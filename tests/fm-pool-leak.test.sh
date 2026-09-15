@@ -99,8 +99,9 @@ test_claim_with_no_record_and_an_unreadable_claim_are_reported_differently() {
   local dir out id=vanished-task
   dir=$(make_pool_case claim-without-record)
   claim_slot "$dir" "$id" "$dir/home"
-  # A second record keeps the pool discoverable from this home once the
-  # claimant's own record is gone.
+  # Discovery runs over this home's records, so the neighbour record is what
+  # keeps the pool discoverable once the claimant's own record is gone, and is
+  # what makes this case reachable at all.
   mkdir -p "$dir/other/project"
   git -C "$dir/project" worktree add -q --detach "$dir/pool/2/project" 2>/dev/null \
     || mkdir -p "$dir/pool/2"

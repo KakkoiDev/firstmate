@@ -29,6 +29,9 @@
 _FM_POOL_LEAK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Pools reachable from one home's task records, one absolute path per line.
+# Discovery reads only this home's state/*.meta records carrying both worktree=
+# and project=, so a pool no surviving record names is not discovered and none
+# of its slots are examined.
 fm_pool_leak_pools() {  # <state-dir>
   local state=$1 meta worktree project slot pool
   for meta in "$state"/*.meta; do
