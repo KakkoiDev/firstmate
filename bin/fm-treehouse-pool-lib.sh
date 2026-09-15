@@ -64,7 +64,7 @@ fm_treehouse_pool_read_cap() {  # <toml>
   local toml=$1 hits
   FM_TREEHOUSE_POOL_CAP=$FM_TREEHOUSE_DEFAULT_MAX_TREES
   FM_TREEHOUSE_POOL_CAP_LINE=0
-  [ -f "$toml" ] && [ ! -L "$toml" ] || return 0
+  [ -f "$toml" ] || return 0
   hits=$(awk '
     /^[[:space:]]*\[/ { intable = 1 }
     intable { next }

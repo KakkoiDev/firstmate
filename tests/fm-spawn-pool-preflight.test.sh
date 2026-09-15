@@ -285,11 +285,83 @@ SH
   pass "a pool read that never returns is bounded, and the spawn falls back to its ordinary wait"
 }
 
+# link_cap <project> <max_trees>: replace the repo's treehouse.toml with a
+# symlink to a config setting that cap, the shape a dotfiles-managed config has.
+# treehouse itself reads the file through the link, so the preflight must too.
+link_cap() {
+  local proj=$1 cap=$2
+  printf 'max_trees = %s\nroot = ""\n' "$cap" > "$proj.linked.toml"
+  ln -sf "$proj.linked.toml" "$proj/treehouse.toml"
+}
+
+# A symlinked treehouse.toml is the file treehouse reads, so a cap it lowers
+# must still refuse a pool that is at that cap. Ignoring the link would fall
+# back to the default of 16, call a two-slot pool of two dirty copies
+# obtainable, and hand the launch back to the timeout this work removes.
+test_symlinked_lower_cap_is_read() {
+  local rec id out status
+  id='pool-linklow-p7'
+  rec=$(make_pool_case pool-linklow "$id")
+  read_pool_record "$rec"
+  link_cap "$PROJ_DIR" 2
+  printf 'leftover\n' >> "$SLOT1/README.md"
+  printf 'leftover\n' >> "$SLOT2/README.md"
+
+  out=$(FM_FAKE_TREEHOUSE_JSON="[$(slot_json 1 "$SLOT1" dirty),$(slot_json 2 "$SLOT2" dirty)]" \
+    FM_SPAWN_WORKTREE_WAIT=3 run_pool_spawn "$id")
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "spawn launched a worker into a pool with no obtainable copy"$'\n'"$out"
+  assert_not_contains "$out" "did not enter an isolated worktree" \
+    "a symlinked cap was ignored and the spawn waited for a pane instead of refusing"
+  assert_no_task_state "$HOME_DIR" "$id" "the symlinked-cap refusal"
+  assert_contains "$out" "all 2 of 2 worktrees in the pool are in use or dirty (max_trees = 2)" \
+    "the refusal did not read the cap through the symlink"
+  assert_contains "$out" "edit line 1 of $PROJ_DIR/treehouse.toml" \
+    "the refusal did not point at the linked file's max_trees line"
+  pass "a max_trees lowered through a symlinked treehouse.toml still refuses a pool at that cap"
+}
+
+# The inverse: a symlinked treehouse.toml raising the cap above treehouse's
+# default means a pool of 16 dirty copies is not full, and treehouse get would
+# create a 17th. Ignoring the link would refuse with an invented "max_trees = 16"
+# and tell the captain to add a cap line to a file that already has one.
+test_symlinked_higher_cap_does_not_invent_a_full_pool() {
+  local rec id out status i pool json=''
+  id='pool-linkhigh-p8'
+  rec=$(make_pool_case pool-linkhigh "$id")
+  read_pool_record "$rec"
+  link_cap "$PROJ_DIR" 32
+  pool=$(dirname "$(dirname "$SLOT1")")
+  for i in $(seq 3 16); do
+    mkdir -p "$pool/$i"
+    git -C "$PROJ_DIR" worktree add --quiet --detach "$pool/$i/repo"
+  done
+  for i in $(seq 1 16); do
+    printf 'leftover\n' >> "$pool/$i/repo/README.md"
+    json+="${json:+,}$(slot_json "$i" "$pool/$i/repo" dirty)"
+  done
+
+  out=$(FM_FAKE_TREEHOUSE_JSON="[$json]" FM_SPAWN_WORKTREE_WAIT=3 run_pool_spawn "$id")
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the project"$'\n'"$out"
+  assert_not_contains "$out" "worktrees in the pool are in use or dirty" \
+    "the preflight refused a pool that is below the cap the symlinked config sets"
+  assert_not_contains "$out" "max_trees = 16" \
+    "the refusal reported treehouse's default cap instead of the symlinked one"
+  assert_contains "$out" "the pool reports a copy is obtainable" \
+    "the spawn did not read the pool as obtainable under the symlinked cap"
+  pass "a max_trees raised through a symlinked treehouse.toml does not invent a full-pool refusal"
+}
+
 test_full_pool_refuses_with_an_actionable_report
 test_unlanded_slot_is_reported_without_a_clearing_command
 test_unloadable_config_refuses_naming_file_and_line
 test_failing_treehouse_get_is_reported_verbatim
 test_hanging_pane_still_hits_the_timeout_backstop
 test_an_unreadable_pool_bounds_its_read_instead_of_hanging_the_spawn
+test_symlinked_lower_cap_is_read
+test_symlinked_higher_cap_does_not_invent_a_full_pool
 
 echo "# all fm-spawn-pool-preflight tests passed"
