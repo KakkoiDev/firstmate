@@ -48,15 +48,19 @@ fm_pool_leak_pools() {  # <state-dir>
 
 # Whether the task a claim names still has a worker running.
 # 0 = a live endpoint, 1 = no live endpoint, 2 = no record to tear down,
-# 3 = the record's backend CLI is not resolvable here, so liveness is unknown.
+# 3 = a tool the record's backend needs is not resolvable here, so liveness is
+#     unknown.
 fm_pool_leak_task_state() {  # <home> <task-id>
-  local home=$1 id=$2 meta window target backend
+  local home=$1 id=$2 meta window target backend tool tools
   meta="$home/state/$id.meta"
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 2
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || return 1
   backend=$(fm_backend_of_meta "$meta")
-  fm_backend_required_tool_available "$backend" "$backend" || return 3
+  tools=$(fm_backend_required_tools "$backend") || return 3
+  for tool in $tools; do
+    fm_backend_required_tool_available "$backend" "$tool" || return 3
+  done
   target=$(fm_backend_target_of_meta "$meta")
   fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id" || return 1
   return 0
@@ -97,7 +101,7 @@ fm_pool_leak_report() {  # <state-dir>
           echo "POOL_LEAK: $pool slot $name claims task $claim_id, but home $claim_home holds no record for it, so no cleanup command can return that slot; inspect $slot for unlanded work, then clear the claim by hand"
           ;;
         3)
-          echo "POOL_LEAK: $pool slot $name is held by task $claim_id, whose record names a backend this session cannot resolve, so whether its worker is still running is unknown; resolve that backend's CLI and re-check before tearing the task down"
+          echo "POOL_LEAK: $pool slot $name is held by task $claim_id, whose record names a backend whose tools this session cannot all resolve, so whether its worker is still running is unknown; resolve that backend's tools and re-check before tearing the task down"
           ;;
       esac
     done

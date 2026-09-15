@@ -142,6 +142,36 @@ test_unresolvable_backend_reports_unknown_liveness_without_a_command() {
   pass "pool leak: a record whose backend CLI is unresolvable reports unknown liveness, not a dead worker"
 }
 
+test_a_missing_adapter_dependency_is_unknown_liveness_not_a_dead_worker() {
+  local dir rc probe tool
+  dir=$(make_pool_case backend-missing-jq)
+  fm_write_meta "$dir/home/state/herdr-task.meta" \
+    "window=firstmate:fm-herdr-task" "endpoint_task_id=herdr-task" "backend=herdr" \
+    "worktree=$dir/pool/1/project" "project=$dir/project" "kind=ship"
+  fm_fake_exit0 "$dir/fakebin" herdr
+  ln -sf /usr/bin/true "$dir/fakebin/treehouse"
+  for tool in dirname basename; do
+    ln -sf "$(command -v "$tool")" "$dir/fakebin/$tool"
+  done
+  probe='. "$1/bin/fm-backend.sh"; . "$1/bin/fm-treehouse-slot-lib.sh"; . "$1/bin/fm-pool-leak-lib.sh"; fm_pool_leak_task_state "$2" herdr-task'
+
+  # herdr resolves, jq does not: the adapter parses its session list with jq, so
+  # the liveness read cannot be trusted and must not read as a gone worker.
+  rc=0
+  PATH="$dir/fakebin" "$BASH" -c "$probe" _ "$ROOT" "$dir/home" || rc=$?
+  [ "$rc" -eq 3 ] \
+    || fail "a backend missing its jq dependency reported liveness state $rc instead of unknown"
+
+  # The same record with every tool the adapter needs resolvable is a real
+  # liveness read again, not the unknown state.
+  ln -sf "$(command -v jq)" "$dir/fakebin/jq"
+  rc=0
+  PATH="$dir/fakebin" "$BASH" -c "$probe" _ "$ROOT" "$dir/home" || rc=$?
+  [ "$rc" -ne 3 ] \
+    || fail "a backend with every required tool present still reported unknown liveness"
+  pass "pool leak: a missing adapter dependency reads as unknown liveness, not a dead worker"
+}
+
 test_unclaimed_slot_reports_nothing() {
   local dir out id=preclaim-task
   dir=$(make_pool_case unclaimed-slot)
@@ -186,5 +216,6 @@ test_finished_task_still_holding_its_slot_is_named_with_its_cleanup_command
 test_slot_held_by_a_live_worker_is_silent
 test_claim_with_no_record_and_an_unreadable_claim_are_reported_differently
 test_unresolvable_backend_reports_unknown_liveness_without_a_command
+test_a_missing_adapter_dependency_is_unknown_liveness_not_a_dead_worker
 test_unclaimed_slot_reports_nothing
 test_claim_with_no_home_is_reported_and_a_foreign_home_stays_silent
