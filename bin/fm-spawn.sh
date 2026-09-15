@@ -118,8 +118,12 @@
 #   task metadata publication. Teardown holds that same lock while proving and
 #   returning a slot, so allocation cannot reuse a slot before its owner record
 #   is published. Under that same lock it writes the slot's owner claim, which is
-#   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
-#   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
+#   what lets teardown leave a slot reassigned since untouched;
+#   bin/fm-treehouse-slot-lib.sh owns the claim and bin/fm-teardown.sh owns what
+#   it protects. A fresh spawn onto a task whose existing record still holds a
+#   slot that claim names refuses, because publishing over that record would
+#   leave the slot claimed by a task no record names and no cleanup can reach.
+#   A slot that
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
 #   could later be released out from under its successor. A spawn that aborts
 #   while it still holds the allocation lock drops its own claim; an abort after
@@ -2934,6 +2938,27 @@ fi
 if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
   exit 1
+fi
+
+# A fresh spawn publishes its record over whatever is already there. When the
+# record it would replace names a pool slot this very task still holds, that
+# replacement is the one leak cleanup can never undo: the new record names the
+# new slot, and the old slot keeps a claim no record points at any more, so no
+# teardown command can ever return it. Scoped to exactly that case - this task's
+# own live claim - so a record with no slot, a slot already reassigned, and an
+# unclaimed slot all spawn as before.
+if [ "$RELAUNCH" -ne 1 ] && [ "$KIND" != secondmate ] \
+  && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
+  SPAWN_HELD_WT=$(fm_meta_get "$STATE/$ID.meta" worktree 2>/dev/null || true)
+  SPAWN_HELD_PROJ=$(fm_meta_get "$STATE/$ID.meta" project 2>/dev/null || true)
+  if [ -n "$SPAWN_HELD_WT" ] && [ -n "$SPAWN_HELD_PROJ" ] \
+    && fm_treehouse_pool_slot "$SPAWN_HELD_PROJ" "$SPAWN_HELD_WT"; then
+    fm_treehouse_slot_owner_state "$SPAWN_HELD_WT" "$ID"
+    if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]; then
+      echo "error: task $ID still holds the pool slot at $SPAWN_HELD_WT, and a fresh spawn would replace the only record that can return it; run FM_HOME=$FM_HOME $SCRIPT_DIR/fm-teardown.sh $ID first, or resume this task with --relaunch" >&2
+      exit 1
+    fi
+  fi
 fi
 
 W="fm-$ID"
