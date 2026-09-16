@@ -115,5 +115,31 @@ test_fresh_spawn_proceeds_when_the_recorded_slot_was_already_reassigned() {
   pass "fm-spawn: a record whose pool slot was already reassigned still spawns"
 }
 
+test_fresh_spawn_refuses_to_replace_a_record_that_still_holds_its_slot_claim_unreadable() {
+  local rec id=unreadable-claim-task out status
+
+  rec=$(make_clobber_case clobber-unreadable "$id")
+  read_clobber_case "$rec"
+  seed_held_slot "$id" "$id"
+  # Truncation IS the condition under test, so this claim file is deliberately
+  # the one fixture that does not carry the shape the real writer produces.
+  printf 'task=\n' > "$CASE_DIR/pool/1/.fm-slot-owner"
+
+  set +e
+  out=$(run_clobber_spawn "$id")
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] \
+    || fail "a fresh spawn replaced a record whose slot claim could not be read:"$'\n'"$out"
+  assert_contains "$out" "could not be read" \
+    "the refusal should say the slot claim could not be read"
+  assert_contains "$out" "$CASE_DIR/pool/1/project" \
+    "the refusal should name the slot whose claim could not be read"
+  assert_grep "worktree=$CASE_DIR/pool/1/project" "$HOME_DIR/state/$id.meta" \
+    "the refused spawn rewrote the record it was protecting"
+  pass "fm-spawn: a fresh spawn refuses when the held slot's claim cannot be read"
+}
+
 test_fresh_spawn_refuses_to_replace_a_record_that_still_holds_its_slot
 test_fresh_spawn_proceeds_when_the_recorded_slot_was_already_reassigned
+test_fresh_spawn_refuses_to_replace_a_record_that_still_holds_its_slot_claim_unreadable

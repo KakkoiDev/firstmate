@@ -81,15 +81,17 @@ fm_pool_leak_pool_slots() {  # <pool>
     "$state" 2>/dev/null) || return 2
   while IFS=$'\t' read -r path pid started; do
     [ -n "$path" ] || continue
-    dir=$(CDPATH='' cd -- "$(dirname "$path")" 2>/dev/null && pwd -P) || continue
+    dir=$(CDPATH='' cd -- "$(dirname "$path")" 2>/dev/null && pwd -P) \
+      || dir=$(dirname "$path")
     printf '%s\t%s\t%s\n' "$dir" "$pid" "$started"
   done <<EOF
 $raw
 EOF
 }
 
-# 0 = the pool records this slot, and prints its "<pid><tab><started at>";
-# 1 = the pool no longer records this slot.
+# 0 = the pool records a worktree under this slot, and prints its
+#     "<pid><tab><started at>";
+# 1 = the pool's own record lists no worktree under this slot directory.
 fm_pool_leak_slot_pool_entry() {  # <slot-lines> <slot>
   local lines=$1 slot=$2 line
   while IFS= read -r line; do
@@ -128,9 +130,15 @@ fm_pool_leak_slot_in_use() {  # <pid> <started-at-ms>
 # 3 = a tool the record's backend needs is not resolvable here, so liveness is
 #     unknown.
 fm_pool_leak_task_state() {  # <home> <task-id>
-  local home=$1 id=$2 meta window target backend tool tools
-  meta="$home/state/$id.meta"
+  fm_pool_leak_meta_state "$1/state/$2.meta"
+}
+
+# The same determination for a record already located by path, for callers that
+# hold the .meta itself rather than a home and an id.
+fm_pool_leak_meta_state() {  # <meta>
+  local meta=$1 id window target backend tool tools
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 2
+  id=$(basename "$meta" .meta)
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || return 1
   backend=$(fm_backend_of_meta "$meta")
@@ -145,7 +153,7 @@ fm_pool_leak_task_state() {  # <home> <task-id>
 
 # One POOL_LEAK line per held slot, or nothing at all.
 fm_pool_leak_report() {  # <state-dir>
-  local state=$1 pool slot claim_home claim_id rc name
+  local state=$1 pool slot claim_home claim_id rc name known
   local pool_slots pool_rc entry entry_rc slot_pid slot_started
   while IFS= read -r pool; do
     [ -n "$pool" ] || continue
@@ -186,13 +194,17 @@ fm_pool_leak_report() {  # <state-dir>
       entry_rc=0
       entry=$(fm_pool_leak_slot_pool_entry "$pool_slots" "$slot") || entry_rc=$?
       if [ "$entry_rc" -ne 0 ]; then
-        echo "POOL_LEAK: $pool slot $name claims task $claim_id, but this pool no longer records that slot, so returning it is not the fix; inspect $slot for unlanded work, then clear $slot/.fm-slot-owner by hand"
+        echo "POOL_LEAK: $pool slot $name claims task $claim_id, but this pool's own $pool/treehouse-state.json lists no worktree under that slot directory, so returning it is not the fix; inspect $slot for unlanded work, then clear $slot/.fm-slot-owner by hand"
         continue
       fi
       slot_pid=${entry%%$'\t'*}
       slot_started=${entry#*$'\t'}
       if fm_pool_leak_slot_in_use "$slot_pid" "$slot_started"; then
-        echo "POOL_LEAK: $pool slot $name is claimed by task $claim_id, whose worker is gone, but the pool records process $slot_pid running under that slot; the pool records no task identity, so whether that process is a successor's cannot be told from it - no command is offered, inspect process $slot_pid and $slot by hand"
+        case "$rc" in
+          1) known="whose worker is gone" ;;
+          *) known="for which home $claim_home holds no record at all, so nothing was read about that task's worker" ;;
+        esac
+        echo "POOL_LEAK: $pool slot $name is claimed by task $claim_id, $known, but the pool records process $slot_pid running under that slot; the pool records no task identity, so whether that process is a successor's cannot be told from it - no command is offered, inspect process $slot_pid and $slot by hand"
         continue
       fi
       case "$rc" in

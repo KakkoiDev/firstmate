@@ -2946,7 +2946,9 @@ fi
 # new slot, and the old slot keeps a claim no record points at any more, so no
 # teardown command can ever return it. Scoped to exactly that case - this task's
 # own live claim - so a record with no slot, a slot already reassigned, and an
-# unclaimed slot all spawn as before.
+# unclaimed slot all spawn as before. A claim that exists but cannot be READ
+# proves nothing either way, so it refuses too: falling through would leave the
+# slot carrying an unreadable claim no record names, the same leak.
 if [ "$RELAUNCH" -ne 1 ] && [ "$KIND" != secondmate ] \
   && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
   SPAWN_HELD_WT=$(fm_meta_get "$STATE/$ID.meta" worktree 2>/dev/null || true)
@@ -2956,6 +2958,10 @@ if [ "$RELAUNCH" -ne 1 ] && [ "$KIND" != secondmate ] \
     fm_treehouse_slot_owner_state "$SPAWN_HELD_WT" "$ID"
     if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]; then
       echo "error: task $ID still holds the pool slot at $SPAWN_HELD_WT, and a fresh spawn would replace the only record that can return it; run FM_HOME=$FM_HOME $SCRIPT_DIR/fm-teardown.sh $ID first, or resume this task with --relaunch" >&2
+      exit 1
+    fi
+    if [ "$FM_TREEHOUSE_SLOT_OWNER" = unsafe ]; then
+      echo "error: the slot claim on task $ID's recorded pool slot at $SPAWN_HELD_WT could not be read, so nothing can prove that slot was reassigned, and a fresh spawn would replace the only record that can return it; this is a different problem from a claim naming another task - inspect or repair the claim file (task= and home= lines) beside $SPAWN_HELD_WT, then re-run, or resume this task with --relaunch" >&2
       exit 1
     fi
   fi

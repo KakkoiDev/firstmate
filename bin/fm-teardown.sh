@@ -100,17 +100,21 @@
 # is the stronger evidence and because gating it behind the scan deadlocked a
 # stale record against its own live successor: neither could be torn down while
 # the other's record existed (observed 2026-09-15).
-# The scan itself does NOT consult the claim, and a record-vs-record collision
-# refuses in both directions even when the slot's claim names one of them. That
-# shape is two records naming one slot - a task that finished without cleanup,
-# and the task Treehouse handed the slot to next - and the claim cannot settle
-# it: a claim belongs to the slot, not to a record, so there is one claim file
-# for the pair and nothing in it distinguishes a record that lost the slot from
-# one that took it without ever writing a claim (every slot handed out before
-# 2026-09-07, and any home whose firstmate predates claims). Continuing on that
-# evidence would reap the processes and hard-reset the copy of whichever record
-# is in fact live. A human clears it instead: confirm the colliding task is
-# finished (bin/fm-crew-state.sh <other-id>), move its record aside
+# The scan itself does NOT consult the claim: a claim belongs to the slot, not to
+# a record, so there is one claim file for a colliding pair and nothing in it
+# distinguishes a record that lost the slot from one that took it without ever
+# writing a claim (every slot handed out before 2026-09-07, and any home whose
+# firstmate predates claims). What the scan consults instead is the COLLIDING
+# record's own liveness - its backend, its target, and the tools that backend
+# needs (fm_pool_leak_meta_state's three-way contract) - and it steps past that
+# record only when every one of those tools resolves here AND the endpoint is
+# absent. A colliding worker that is still running refuses, and so does one
+# whose liveness cannot be determined, because the whole point of the refusal is
+# to never reap the processes or hard-reset the copy of a live task. That is the
+# other direction of the 2026-09-15 deadlock: the task the slot claim names
+# could not be torn down while a long-dead task's record still named the slot.
+# When liveness is unknown a human still clears it: confirm the colliding task
+# is finished (bin/fm-crew-state.sh <other-id>), move its record aside
 # (mv "$FM_HOME/state/<other-id>.meta" "$FM_HOME/data/worktree-recovered/stale-meta/"),
 # then re-run this teardown - the refusal message prints that command with the
 # paths filled in.
@@ -338,6 +342,10 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# fm_pool_leak_meta_state: the one liveness determination for a task record
+# other than this one, used by the record-exclusivity scan below.
+# shellcheck source=bin/fm-pool-leak-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-pool-leak-lib.sh"
 # Supervision lease guard: post-landing cleanup is overlap territory between
 # the two Pi supervision actors; refuse while the OTHER actor holds this
 # task's live lease (contract: bin/fm-lease-lib.sh; no-op in homes without
@@ -2174,9 +2182,15 @@ collect_local_firstmate_states() {
   done
 }
 
+# A colliding record whose own worker is provably gone no longer blocks this
+# teardown: the scan reads THAT record's backend and target
+# (fm_pool_leak_meta_state's three-way contract) and only steps past it when the
+# backend's tools all resolve here AND its endpoint is absent. A live worker
+# refuses, and so does an unknown one, because the refusal exists to stop
+# teardown from killing a worker that is still running.
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
+  local slot state_dir other other_id field other_path other_slot other_rc
   slot=$(canonical_existing_dir "$worktree") || return 0
   collect_local_firstmate_states "$record_state" || return 1
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
@@ -2189,10 +2203,17 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
+        other_rc=0
+        fm_pool_leak_meta_state "$other" || other_rc=$?
+        [ "$other_rc" -ne 1 ] || continue 2
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
-        echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
+        if [ "$other_rc" -eq 3 ]; then
+          echo "Task $other_id's record names a backend whose tools this session cannot all resolve, so whether its worker is still running is unknown, and returning that pool slot could kill a live worker; nothing was changed - not even with --force." >&2
+          echo "Resolve that backend's tools and re-run teardown, or - if $other_id is long finished - move its record aside by hand (mkdir -p \"\$FM_HOME/data/worktree-recovered/stale-meta\" && mv \"$other\" \"\$FM_HOME/data/worktree-recovered/stale-meta/\") and re-run this teardown." >&2
+        else
+          echo "Task $other_id's worker is still running, and returning that pool slot would kill its processes and reset its copy, so nothing was changed - not even with --force." >&2
+        fi
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
-        echo "If $other_id is long finished and the slot's claim names $record_id, $other_id's record is stale: move it aside by hand (mkdir -p \"\$FM_HOME/data/worktree-recovered/stale-meta\" && mv \"$other\" \"\$FM_HOME/data/worktree-recovered/stale-meta/\") and re-run this teardown." >&2
         return 1
       done
     done

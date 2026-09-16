@@ -268,7 +268,7 @@ test_pool_state_disagreeing_with_a_claim_never_prints_a_teardown_command() {
   printf '{"worktrees":[]}\n' > "$dir/pool/treehouse-state.json"
 
   out=$(run_detect "$dir")
-  assert_contains "$out" "this pool no longer records that slot" \
+  assert_contains "$out" "lists no worktree under that slot directory" \
     "a slot the pool has taken back is a stale claim, not a held slot"
   assert_not_contains "$out" "fm-teardown.sh $id" \
     "a slot the pool has taken back must carry no teardown command"
