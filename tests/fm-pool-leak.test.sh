@@ -29,8 +29,7 @@ make_pool_case() {  # <name>
   git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
     commit --allow-empty -qm pool-fixture
   git -C "$dir/project" worktree add -q --detach "$dir/pool/1/project"
-  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$dir/pool/1/project" \
-    > "$dir/pool/treehouse-state.json"
+  pool_state "$dir" "$dir/pool/1/project"
   fakebin=$(fm_fakebin "$dir")
   jq_bin=$(command -v jq) \
     || fail "these cases read the pool's treehouse-state.json and need jq"
@@ -49,6 +48,31 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   printf '%s\n' "$dir"
+}
+
+# The pool's own state file, in the shape Treehouse writes it: per worktree
+# name, path, created_at, and - only while a process holds the slot - owner_pid
+# and owner_started_at (epoch milliseconds). No field names a task.
+pool_state() {  # <case> <slot-checkout> [pid] [started-at-ms]
+  local dir=$1 path=$2 pid=${3:-} started=${4:-}
+  if [ -n "$pid" ]; then
+    printf '{"worktrees":[{"name":"1","path":"%s","created_at":"2026-09-15T10:00:00+09:00","owner_pid":%s,"owner_started_at":%s}]}\n' \
+      "$path" "$pid" "$started" > "$dir/pool/treehouse-state.json"
+  else
+    printf '{"worktrees":[{"name":"1","path":"%s","created_at":"2026-09-15T10:00:00+09:00"}]}\n' \
+      "$path" > "$dir/pool/treehouse-state.json"
+  fi
+}
+
+# owner_started_at as Treehouse records it for a running process.
+pid_started_at_ms() {  # <pid>
+  local lstart epoch
+  lstart=$(LC_ALL=C ps -p "$1" -o lstart=) || return 1
+  lstart=${lstart#"${lstart%%[![:space:]]*}"}
+  epoch=$(date -j -f '%a %b %e %T %Y' "$lstart" +%s 2>/dev/null) \
+    || epoch=$(date -d "$lstart" +%s 2>/dev/null) \
+    || return 1
+  printf '%s\n' "$(( epoch * 1000 ))"
 }
 
 claim_slot() {  # <case> <task-id> <home>
@@ -220,7 +244,7 @@ test_claim_with_no_home_is_reported_and_a_foreign_home_stays_silent() {
 # still the claimant's to return. A stale claim on a slot the pool has taken
 # back must never come with a command that reaps processes and resets a copy.
 test_pool_state_disagreeing_with_a_claim_never_prints_a_teardown_command() {
-  local dir out id=stale-claim-task
+  local dir out live started id=stale-claim-task
 
   dir=$(make_pool_case pool-state-dropped-slot)
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -236,19 +260,46 @@ test_pool_state_disagreeing_with_a_claim_never_prints_a_teardown_command() {
     "a slot the pool has taken back must carry no teardown command"
   assert_present "$dir/pool/1/.fm-slot-owner" "the check cleared a slot claim"
 
-  dir=$(make_pool_case pool-state-other-holder)
+  # A process is running under the slot right now. The pool records the pid, not
+  # a task, so this may be a successor and nothing destructive may be offered.
+  dir=$(make_pool_case pool-state-slot-in-use)
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/pool/1/project" "project=$dir/project" "kind=ship"
   claim_slot "$dir" "$id" "$dir/home"
-  printf '{"worktrees":[{"name":"1","path":"%s","lease_holder":"other-task"}]}\n' \
-    "$dir/pool/1/project" > "$dir/pool/treehouse-state.json"
+  ( cd "$dir/pool/1/project" && exec sleep 30 ) &
+  live=$!
+  started=$(pid_started_at_ms "$live") \
+    || fail "this host cannot read a process start time, so the in-use fixture cannot be built"
+  pool_state "$dir" "$dir/pool/1/project" "$live" "$started"
 
   out=$(run_detect "$dir")
-  assert_contains "$out" "leased to other-task" \
-    "a slot the pool leases to another task should say exactly that"
+  assert_contains "$out" "the pool records process $live running under it" \
+    "a slot with a live process must be reported as in use"
   assert_not_contains "$out" "fm-teardown.sh $id" \
-    "a slot the pool leases to another task must carry no command at all"
+    "a slot with a live process must carry no teardown command"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+
+  # The same slot once that process is gone: the pool holds a dead pid, the
+  # claimant's worker is gone too, and that - only that - is the leak.
+  dir=$(make_pool_case pool-state-slot-pid-dead)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/pool/1/project" "project=$dir/project" "kind=ship"
+  claim_slot "$dir" "$id" "$dir/home"
+  ( exec sleep 30 ) &
+  live=$!
+  started=$(pid_started_at_ms "$live") \
+    || fail "this host cannot read a process start time, so the dead-pid fixture cannot be built"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  kill -0 "$live" 2>/dev/null && fail "the dead-pid fixture's process is still alive"
+  pool_state "$dir" "$dir/pool/1/project" "$live" "$started"
+
+  out=$(run_detect "$dir")
+  assert_contains "$out" "FM_HOME=$dir/home $ROOT/bin/fm-teardown.sh $id" \
+    "a slot whose pool process is dead and whose worker is gone is the leak"
 
   dir=$(make_pool_case pool-state-unreadable)
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -262,7 +313,29 @@ test_pool_state_disagreeing_with_a_claim_never_prints_a_teardown_command() {
     "a pool state that cannot be read must be reported as unconfirmed"
   assert_not_contains "$out" "fm-teardown.sh $id" \
     "an unconfirmed slot must not be handed a destructive command"
-  pass "pool leak: a pool state that drops, re-leases, or cannot confirm a slot never prints a teardown command"
+  pass "pool leak: a dropped slot, a slot in use, and an unreadable pool state never print a teardown command"
+}
+
+# Discovery checks one record per pool to keep the git cost bounded. The record
+# it happens to check first must not decide the pool for the others: an
+# abandoned slot directory is the very state this detector exists for.
+test_an_unusable_slot_record_does_not_hide_its_pools_other_slots() {
+  local dir out id=z-stale-task
+  dir=$(make_pool_case pool-with-a-broken-slot)
+  # Sorts before the claimant's record, so discovery meets it first.
+  mkdir -p "$dir/pool/2/project"
+  fm_write_meta "$dir/home/state/a-broken.meta" \
+    "window=firstmate:fm-a-broken" "endpoint_task_id=a-broken" \
+    "worktree=$dir/pool/2/project" "project=$dir/project" "kind=ship"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/pool/1/project" "project=$dir/project" "kind=ship"
+  claim_slot "$dir" "$id" "$dir/home"
+
+  out=$(run_detect "$dir")
+  assert_contains "$out" "FM_HOME=$dir/home $ROOT/bin/fm-teardown.sh $id" \
+    "a slot directory that is not a Treehouse slot hid the leak in its pool's other slot"
+  pass "pool leak: a record naming an unusable slot does not hide the rest of its pool"
 }
 
 test_finished_task_still_holding_its_slot_is_named_with_its_cleanup_command
@@ -273,3 +346,4 @@ test_a_missing_adapter_dependency_is_unknown_liveness_not_a_dead_worker
 test_unclaimed_slot_reports_nothing
 test_claim_with_no_home_is_reported_and_a_foreign_home_stays_silent
 test_pool_state_disagreeing_with_a_claim_never_prints_a_teardown_command
+test_an_unusable_slot_record_does_not_hide_its_pools_other_slots
