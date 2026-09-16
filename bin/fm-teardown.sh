@@ -2170,32 +2170,31 @@ collect_local_firstmate_states() {
 EXCLUSIVE_SCAN_CLAIM=absent
 EXCLUSIVE_SCAN_RECORD_ID=
 
-# A colliding record this record's cleanup outranks. Both records name the SAME
-# slot, so there is one claim file for the pair: when it names THIS record, the
-# colliding record is the one that does not hold the claim. The claim alone does
-# not settle it - a slot taken before claims existed, or by a home whose
-# firstmate predates them, leaves the previous claim in place - so the colliding
-# record must ALSO have no live endpoint. A colliding record whose worker is
-# still running is the live holder this refusal exists to protect, whatever the
-# claim says, and refuses exactly as it did before this bypass existed. Without the bypass a long-dead
-# record and its live successor refused each other forever: the successor was
-# blocked by the stale record, and the stale record's own records-only path sat
-# behind this very scan (observed 2026-09-15, where two stale records had to be
-# moved aside by hand before either slot could be returned). The claim cannot
-# separate two records that carry the SAME task id in different homes, so that
-# collision still refuses. It is also confined to a colliding worktree= field: a
-# secondmate home is leased straight from the pool (bin/fm-home-seed.sh) and
-# writes no claim, so a record naming this slot as its home= is never outranked
-# by a claim and still refuses.
-exclusive_scan_claim_outranks() {  # <field> <other-id> <other-meta>
-  local field=$1 other_id=$2 other_meta=$3 other_backend other_target
+# A colliding record the slot's claim outranks. Two claim reads must agree: the
+# slot this record names carries a claim naming THIS record, and the slot the
+# colliding record names carries a claim naming somebody else. The claim is
+# written by bin/fm-spawn.sh under the project lock that allocates the slot, so
+# a record whose slot claim names another task provably went through a
+# claim-writing spawn and lost the slot afterwards. A colliding record whose
+# slot carries NO claim proves nothing - a slot taken before claims existed, or
+# by a home whose firstmate predates them, leaves no claim of its own - so it
+# refuses exactly as it did before this bypass existed. Without the bypass a
+# long-dead record and its live successor refused each other forever: the
+# successor was blocked by the stale record, and the stale record's own
+# records-only path sat behind this very scan (observed 2026-09-15, where two
+# stale records had to be moved aside by hand before either slot could be
+# returned). The claim cannot separate two records that carry the SAME task id
+# in different homes, so that collision still refuses. It is also confined to a
+# colliding worktree= field: a secondmate home is leased straight from the pool
+# (bin/fm-home-seed.sh) and writes no claim, so a record naming this slot as its
+# home= is never outranked by a claim and still refuses.
+exclusive_scan_claim_outranks() {  # <field> <other-id> <other-slot>
+  local field=$1 other_id=$2 other_slot=$3
   [ "$field" = worktree ] || return 1
   [ "$EXCLUSIVE_SCAN_CLAIM" = mine ] || return 1
   [ "$other_id" != "$EXCLUSIVE_SCAN_RECORD_ID" ] || return 1
-  other_backend=$(fm_backend_of_meta "$other_meta")
-  other_target=$(fm_backend_target_of_meta "$other_meta")
-  [ -n "$other_target" ] || return 0
-  ! fm_backend_target_exists "$other_backend" "$other_target" "fm-$other_id"
+  fm_treehouse_slot_owner_state "$other_slot" "$other_id"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = other ]
 }
 
 require_exclusive_worktree_slot_record() {
@@ -2216,8 +2215,8 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
-        if exclusive_scan_claim_outranks "$field" "$other_id" "$other"; then
-          echo "warning: task $other_id's record also names $slot, but that slot's own claim names $record_id and $other_id has no live worker, so $other_id lost the slot before $record_id took it; its record is stale and $record_id's cleanup proceeds. Clear $other_id's record with its own teardown." >&2
+        if exclusive_scan_claim_outranks "$field" "$other_id" "$other_slot"; then
+          echo "warning: task $other_id's record also names $slot, but that slot's own claim names $record_id, so $other_id lost the slot before $record_id took it; its record is stale and $record_id's cleanup proceeds. Clear $other_id's record with its own teardown." >&2
           continue
         fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2

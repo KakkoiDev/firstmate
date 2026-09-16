@@ -22,11 +22,6 @@ make_case() {  # <name>
 printf 'tmux' >> "${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
-for dead in ${FM_FAKE_DEAD_TARGETS:-}; do
-  for arg in "$@"; do
-    [ "$arg" != "$dead" ] || exit 1
-  done
-done
 exit 0
 SH
   cat > "$TMP_ROOT/$dir/fakebin/treehouse" <<'SH'
@@ -62,7 +57,6 @@ run_case() {  # <case> <id>
   local dir=$1 id=$2
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
   FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
-  FM_FAKE_DEAD_TARGETS="${FM_FAKE_DEAD_TARGETS:-}" \
     "$TEARDOWN" "$id" --force
 }
 
@@ -997,8 +991,7 @@ test_slot_claim_breaks_the_two_record_deadlock() {
   claim_pool_slot "$dir" "$live"
 
   set +e
-  FM_FAKE_DEAD_TARGETS="firstmate:fm-$stale" \
-    run_case "$dir" "$live" > "$dir/stdout" 2> "$dir/stderr"
+  run_case "$dir" "$live" > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
   set -e
   [ "$rc" -eq 0 ] \
@@ -1059,11 +1052,10 @@ test_slot_claim_breaks_the_two_record_deadlock() {
   assert_contains "$(cat "$dir/stderr")" "recorded worktree" \
     "the home= collision should refuse rather than warn and continue"
 
-  # The claim names THIS record, but the colliding record's worker is still
-  # running: it is the live holder, whatever the claim says, because a slot can
-  # be taken by a spawn that writes no claim and leaves the previous one in
-  # place. Returning the slot would kill that worker, so it refuses.
-  dir=$(make_case slot-deadlock-live-collider)
+  # A colliding record whose slot carries no claim at all proves nothing: no
+  # claim says which of the two records took the slot last, which is the state of
+  # every slot handed out before claims existed. It refuses.
+  dir=$(make_case slot-deadlock-unclaimed)
   mark_case_as_treehouse_pool "$dir"
   fm_write_meta "$dir/home/state/$live.meta" \
     "window=firstmate:fm-$live" "endpoint_task_id=$live" \
@@ -1071,20 +1063,11 @@ test_slot_claim_breaks_the_two_record_deadlock() {
   fm_write_meta "$dir/home/state/$stale.meta" \
     "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
-  claim_pool_slot "$dir" "$live"
+  rm -f "$dir/pool/1/.fm-slot-owner"
 
-  set +e
-  run_case "$dir" "$live" > "$dir/stdout" 2> "$dir/stderr"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] \
-    || fail "teardown returned a slot whose colliding record still has a live worker"
-  assert_present "$dir/home/state/$live.meta" "the refusal removed the task's own record"
-  assert_present "$dir/home/state/$stale.meta" "the refusal removed the live colliding record"
-  assert_present "$dir/pool/1/.fm-slot-owner" "the refusal cleared the slot claim"
-  assert_present "$dir/worktree/sentinel" "the refusal reset the contested slot"
-  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
-    || fail "the contested slot was returned to the pool: $(cat "$dir/runtime.log")"
+  assert_refused_without_mutation "$dir" "$live" "two records on an unclaimed slot"
+  assert_present "$dir/home/state/$stale.meta" \
+    "an unclaimed-slot collision removed the colliding record"
 
   pass "fm-teardown: a slot claim breaks the stale-record/live-record teardown deadlock in both directions"
 }
