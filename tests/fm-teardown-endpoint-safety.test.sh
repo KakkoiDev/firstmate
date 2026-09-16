@@ -940,6 +940,44 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
 
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
+# The 2026-09-15 deadlock: a long-dead task's record and its live successor's
+# record name the same slot, and the slot's claim names the successor. The
+# claim is read before the record scan, so the stale task's own cleanup runs
+# and the slot stays the successor's. Run the scan first and this refuses in
+# both directions, which is what left 11 of 16 slots stuck.
+test_a_stale_record_tears_down_while_its_successor_keeps_the_slot() {
+  local dir id=stale-task other=successor-task worker rc
+
+  dir=$(make_case slot-stale-record-vs-successor)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] \
+    || fail "teardown of a stale record deadlocked against its live successor's record: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "teardown killed the successor's worker"
+  assert_present "$dir/worktree/sentinel" "teardown reset the successor's slot"
+  assert_present "$dir/home/state/$other.meta" "teardown removed the successor's record"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$other" \
+    "stale record colliding with its live successor's record"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  pass "fm-teardown: a stale record tears down while the successor that holds its old slot keeps it"
+}
+
 test_own_and_absent_slot_claims_still_tear_down() {
   local dir id=owned-task
 
@@ -1357,6 +1395,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_a_stale_record_tears_down_while_its_successor_keeps_the_slot
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts

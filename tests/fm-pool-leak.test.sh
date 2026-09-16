@@ -23,7 +23,7 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
 # hold task records. FM_FAKE_LIVE_TARGETS names the endpoints the fake tmux
 # reports as present, so a case chooses liveness without racing real processes.
 make_pool_case() {  # <name>
-  local dir="$TMP_ROOT/$1" fakebin
+  local dir="$TMP_ROOT/$1" fakebin jq_bin
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/pool/1"
   git init -q "$dir/project"
   git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
@@ -32,6 +32,9 @@ make_pool_case() {  # <name>
   printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$dir/pool/1/project" \
     > "$dir/pool/treehouse-state.json"
   fakebin=$(fm_fakebin "$dir")
+  jq_bin=$(command -v jq) \
+    || fail "these cases read the pool's treehouse-state.json and need jq"
+  ln -sf "$jq_bin" "$fakebin/jq"
   fm_fake_exit0 "$fakebin" gh gh-axi treehouse node tasks-axi quota-axi \
     lavish-axi no-mistakes chrome-devtools-axi
   cat > "$fakebin/tmux" <<'SH'
@@ -150,6 +153,7 @@ test_a_missing_adapter_dependency_is_unknown_liveness_not_a_dead_worker() {
     "worktree=$dir/pool/1/project" "project=$dir/project" "kind=ship"
   fm_fake_exit0 "$dir/fakebin" herdr
   ln -sf /usr/bin/true "$dir/fakebin/treehouse"
+  rm -f "$dir/fakebin/jq"
   for tool in dirname basename; do
     ln -sf "$(command -v "$tool")" "$dir/fakebin/$tool"
   done
@@ -212,6 +216,55 @@ test_claim_with_no_home_is_reported_and_a_foreign_home_stays_silent() {
   pass "pool leak: a claim with no home is reported, a claim from a home absent here is not"
 }
 
+# The pool's own state file, not the claim alone, decides whether a slot is
+# still the claimant's to return. A stale claim on a slot the pool has taken
+# back must never come with a command that reaps processes and resets a copy.
+test_pool_state_disagreeing_with_a_claim_never_prints_a_teardown_command() {
+  local dir out id=stale-claim-task
+
+  dir=$(make_pool_case pool-state-dropped-slot)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/pool/1/project" "project=$dir/project" "kind=ship"
+  claim_slot "$dir" "$id" "$dir/home"
+  printf '{"worktrees":[]}\n' > "$dir/pool/treehouse-state.json"
+
+  out=$(run_detect "$dir")
+  assert_contains "$out" "this pool no longer records that slot" \
+    "a slot the pool has taken back is a stale claim, not a held slot"
+  assert_not_contains "$out" "fm-teardown.sh $id" \
+    "a slot the pool has taken back must carry no teardown command"
+  assert_present "$dir/pool/1/.fm-slot-owner" "the check cleared a slot claim"
+
+  dir=$(make_pool_case pool-state-other-holder)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/pool/1/project" "project=$dir/project" "kind=ship"
+  claim_slot "$dir" "$id" "$dir/home"
+  printf '{"worktrees":[{"name":"1","path":"%s","lease_holder":"other-task"}]}\n' \
+    "$dir/pool/1/project" > "$dir/pool/treehouse-state.json"
+
+  out=$(run_detect "$dir")
+  assert_contains "$out" "leased to other-task" \
+    "a slot the pool leases to another task should say exactly that"
+  assert_not_contains "$out" "fm-teardown.sh $id" \
+    "a slot the pool leases to another task must carry no command at all"
+
+  dir=$(make_pool_case pool-state-unreadable)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/pool/1/project" "project=$dir/project" "kind=ship"
+  claim_slot "$dir" "$id" "$dir/home"
+  printf 'not json at all\n' > "$dir/pool/treehouse-state.json"
+
+  out=$(run_detect "$dir")
+  assert_contains "$out" "could not be read" \
+    "a pool state that cannot be read must be reported as unconfirmed"
+  assert_not_contains "$out" "fm-teardown.sh $id" \
+    "an unconfirmed slot must not be handed a destructive command"
+  pass "pool leak: a pool state that drops, re-leases, or cannot confirm a slot never prints a teardown command"
+}
+
 test_finished_task_still_holding_its_slot_is_named_with_its_cleanup_command
 test_slot_held_by_a_live_worker_is_silent
 test_claim_with_no_record_and_an_unreadable_claim_are_reported_differently
@@ -219,3 +272,4 @@ test_unresolvable_backend_reports_unknown_liveness_without_a_command
 test_a_missing_adapter_dependency_is_unknown_liveness_not_a_dead_worker
 test_unclaimed_slot_reports_nothing
 test_claim_with_no_home_is_reported_and_a_foreign_home_stays_silent
+test_pool_state_disagreeing_with_a_claim_never_prints_a_teardown_command

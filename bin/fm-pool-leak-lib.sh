@@ -13,7 +13,12 @@
 # carried and an automatic sweep would have destroyed it.
 #
 # Scope: the slots of every pool this home's own task records reach, judged
-# against the claim each slot carries (bin/fm-treehouse-slot-lib.sh). A claim
+# against the claim each slot carries (bin/fm-treehouse-slot-lib.sh) and against
+# the pool's own treehouse-state.json. Only a claim the pool still agrees with
+# gets a cleanup command: a slot the pool no longer records, a slot it leases to
+# someone other than the claimant, and a pool state that cannot be read are each
+# reported with no command, because a claim left behind by a return that died
+# half-done names a slot that is already back in the pool. A claim
 # names the task AND the home that took the slot, so the record it points at is
 # read in that home rather than by searching every home on the machine. A claim
 # whose home is a directory that does not exist here belongs to another machine
@@ -33,17 +38,59 @@ _FM_POOL_LEAK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # and project=, so a pool no surviving record names is not discovered and none
 # of its slots are examined.
 fm_pool_leak_pools() {  # <state-dir>
-  local state=$1 meta worktree project slot pool
+  local state=$1 meta worktree project slot pool key seen
+  seen=$'\n'
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
     worktree=$(fm_meta_get "$meta" worktree)
     project=$(fm_meta_get "$meta" project)
     [ -n "$worktree" ] && [ -n "$project" ] || continue
-    fm_treehouse_pool_slot "$project" "$worktree" || continue
     slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || continue
     pool=$(dirname "$(dirname "$slot")")
+    key="$project -> $pool"
+    case "$seen" in
+      *$'\n'"$key"$'\n'*) continue ;;
+    esac
+    seen="$seen$key"$'\n'
+    fm_treehouse_pool_slot "$project" "$worktree" || continue
     printf '%s\n' "$pool"
   done | LC_ALL=C sort -u
+}
+
+# What the pool itself records for each of its slots, one
+# "<slot-directory><tab><lease holder>" line, sorted by nothing in particular.
+# Returns 2 when the pool's state cannot be read as the pool's state at all -
+# missing, not JSON, or no jq to parse it - because an unreadable pool record is
+# not evidence that a claim is still current.
+fm_pool_leak_pool_slots() {  # <pool>
+  local pool=$1 state raw line path holder dir
+  state="$pool/treehouse-state.json"
+  [ -f "$state" ] && [ ! -L "$state" ] || return 2
+  command -v jq >/dev/null 2>&1 || return 2
+  jq -e '(.worktrees | type) == "array"' "$state" >/dev/null 2>&1 || return 2
+  raw=$(jq -r '.worktrees[] | [(.path // ""), (.lease_holder // "")] | @tsv' \
+    "$state" 2>/dev/null) || return 2
+  while IFS=$'\t' read -r path holder; do
+    [ -n "$path" ] || continue
+    dir=$(CDPATH='' cd -- "$(dirname "$path")" 2>/dev/null && pwd -P) || continue
+    printf '%s\t%s\n' "$dir" "$holder"
+  done <<EOF
+$raw
+EOF
+}
+
+# 0 = the pool records this slot, and prints the task it leases it to, empty
+# when the pool records no holder; 1 = the pool no longer records this slot.
+fm_pool_leak_slot_pool_holder() {  # <slot-lines> <slot>
+  local lines=$1 slot=$2 line
+  while IFS= read -r line; do
+    case "$line" in
+      "$slot"$'\t'*) printf '%s\n' "${line#*$'\t'}"; return 0 ;;
+    esac
+  done <<EOF
+$lines
+EOF
+  return 1
 }
 
 # Whether the task a claim names still has a worker running.
@@ -69,8 +116,11 @@ fm_pool_leak_task_state() {  # <home> <task-id>
 # One POOL_LEAK line per held slot, or nothing at all.
 fm_pool_leak_report() {  # <state-dir>
   local state=$1 pool slot claim_home claim_id rc name
+  local pool_slots pool_rc holder holder_rc
   while IFS= read -r pool; do
     [ -n "$pool" ] || continue
+    pool_rc=0
+    pool_slots=$(fm_pool_leak_pool_slots "$pool") || pool_rc=$?
     for slot in "$pool"/*; do
       [ -d "$slot" ] && [ ! -L "$slot" ] || continue
       rc=0
@@ -90,6 +140,20 @@ fm_pool_leak_report() {  # <state-dir>
         continue
       fi
       [ -d "$claim_home" ] || continue
+      if [ "$pool_rc" -ne 0 ]; then
+        echo "POOL_LEAK: $pool slot $name claims task $claim_id, but this pool's own $pool/treehouse-state.json could not be read, so nothing here can confirm the slot is still that task's; read that file and $slot by hand before returning anything"
+        continue
+      fi
+      holder_rc=0
+      holder=$(fm_pool_leak_slot_pool_holder "$pool_slots" "$slot") || holder_rc=$?
+      if [ "$holder_rc" -ne 0 ]; then
+        echo "POOL_LEAK: $pool slot $name claims task $claim_id, but this pool no longer records that slot, so returning it is not the fix; inspect $slot for unlanded work, then clear $slot/.fm-slot-owner by hand"
+        continue
+      fi
+      if [ -n "$holder" ] && [ "$holder" != "$claim_id" ]; then
+        echo "POOL_LEAK: $pool slot $name claims task $claim_id, but the pool records that slot as leased to $holder; the claim and the pool name different holders, so no command here is safe - reconcile them by hand"
+        continue
+      fi
       rc=0
       fm_pool_leak_task_state "$claim_home" "$claim_id" || rc=$?
       case "$rc" in
