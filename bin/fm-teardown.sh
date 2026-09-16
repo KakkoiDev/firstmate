@@ -99,11 +99,21 @@
 # owns the claim, its location, and its states. The claim runs FIRST because it
 # is the stronger evidence and because gating it behind the scan deadlocked a
 # stale record against its own live successor: neither could be torn down while
-# the other's record existed (observed 2026-09-15). For the same reason the scan
-# itself consults the claim: when the claim names THIS record's task, a
-# colliding record naming a different task provably lost the slot earlier, so it
-# warns and continues instead of refusing. Two records carrying the SAME task id
-# in different homes are indistinguishable to the claim and still refuse.
+# the other's record existed (observed 2026-09-15).
+# The scan itself does NOT consult the claim, and a record-vs-record collision
+# refuses in both directions even when the slot's claim names one of them. That
+# shape is two records naming one slot - a task that finished without cleanup,
+# and the task Treehouse handed the slot to next - and the claim cannot settle
+# it: a claim belongs to the slot, not to a record, so there is one claim file
+# for the pair and nothing in it distinguishes a record that lost the slot from
+# one that took it without ever writing a claim (every slot handed out before
+# 2026-09-07, and any home whose firstmate predates claims). Continuing on that
+# evidence would reap the processes and hard-reset the copy of whichever record
+# is in fact live. A human clears it instead: confirm the colliding task is
+# finished (bin/fm-crew-state.sh <other-id>), move its record aside
+# (mv "$FM_HOME/state/<other-id>.meta" "$FM_HOME/data/worktree-recovered/stale-meta/"),
+# then re-run this teardown - the refusal message prints that command with the
+# paths filled in.
 # A claim naming another task is
 # proof of reassignment: the slot is no longer this task's, so teardown warns,
 # names the claimant, and then finishes only this task's own cleanup - endpoint,
@@ -2164,47 +2174,11 @@ collect_local_firstmate_states() {
   done
 }
 
-# Set by require_exclusive_worktree_slot_record for the scan it is running, so
-# the per-hit test below reads one determination rather than re-reading the
-# claim for every colliding record.
-EXCLUSIVE_SCAN_CLAIM=absent
-EXCLUSIVE_SCAN_RECORD_ID=
-
-# A colliding record the slot's claim outranks. Two claim reads must agree: the
-# slot this record names carries a claim naming THIS record, and the slot the
-# colliding record names carries a claim naming somebody else. The claim is
-# written by bin/fm-spawn.sh under the project lock that allocates the slot, so
-# a record whose slot claim names another task provably went through a
-# claim-writing spawn and lost the slot afterwards. A colliding record whose
-# slot carries NO claim proves nothing - a slot taken before claims existed, or
-# by a home whose firstmate predates them, leaves no claim of its own - so it
-# refuses exactly as it did before this bypass existed. Without the bypass a
-# long-dead record and its live successor refused each other forever: the
-# successor was blocked by the stale record, and the stale record's own
-# records-only path sat behind this very scan (observed 2026-09-15, where two
-# stale records had to be moved aside by hand before either slot could be
-# returned). The claim cannot separate two records that carry the SAME task id
-# in different homes, so that collision still refuses. It is also confined to a
-# colliding worktree= field: a secondmate home is leased straight from the pool
-# (bin/fm-home-seed.sh) and writes no claim, so a record naming this slot as its
-# home= is never outranked by a claim and still refuses.
-exclusive_scan_claim_outranks() {  # <field> <other-id> <other-slot>
-  local field=$1 other_id=$2 other_slot=$3
-  [ "$field" = worktree ] || return 1
-  [ "$EXCLUSIVE_SCAN_CLAIM" = mine ] || return 1
-  [ "$other_id" != "$EXCLUSIVE_SCAN_RECORD_ID" ] || return 1
-  fm_treehouse_slot_owner_state "$other_slot" "$other_id"
-  [ "$FM_TREEHOUSE_SLOT_OWNER" = other ]
-}
-
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
   local slot state_dir other other_id field other_path other_slot
   slot=$(canonical_existing_dir "$worktree") || return 0
   collect_local_firstmate_states "$record_state" || return 1
-  fm_treehouse_slot_owner_state "$slot" "$record_id"
-  EXCLUSIVE_SCAN_CLAIM=$FM_TREEHOUSE_SLOT_OWNER
-  EXCLUSIVE_SCAN_RECORD_ID=$record_id
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
@@ -2215,13 +2189,10 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
-        if exclusive_scan_claim_outranks "$field" "$other_id" "$other_slot"; then
-          echo "warning: task $other_id's record also names $slot, but that slot's own claim names $record_id, so $other_id lost the slot before $record_id took it; its record is stale and $record_id's cleanup proceeds. Clear $other_id's record with its own teardown." >&2
-          continue
-        fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
+        echo "If $other_id is long finished and the slot's claim names $record_id, $other_id's record is stale: move it aside by hand (mkdir -p \"\$FM_HOME/data/worktree-recovered/stale-meta\" && mv \"$other\" \"\$FM_HOME/data/worktree-recovered/stale-meta/\") and re-run this teardown." >&2
         return 1
       done
     done
