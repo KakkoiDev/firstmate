@@ -5,9 +5,9 @@
 # The check answers one question per Treehouse pool slot: does the task whose
 # claim holds this slot still have a worker? A slot held by a finished task is
 # the leak that emptied a 16-slot pool on 2026-09-15, so every such slot must be
-# named with the exact command that returns it - and nothing may be returned,
-# reset, or re-claimed by the check itself, because a held slot can still carry
-# work no branch holds.
+# named with what was observed about it - and nothing may be returned, reset, or
+# re-claimed by the check itself, nor any command printed that would, because a
+# held slot can still carry work no branch holds.
 #
 # Every fixture here carries the full shape Treehouse actually writes, including
 # owner_pid and owner_started_at on a slot in use. A fixture that omits a field
@@ -93,7 +93,7 @@ run_detect() {  # <case> [live-target...]
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
 }
 
-test_finished_task_still_holding_its_slot_is_named_with_its_cleanup_command() {
+test_finished_task_still_holding_its_slot_is_named_without_a_teardown_command() {
   local dir out id=finished-task
   dir=$(make_pool_case held-by-finished-task)
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -104,13 +104,45 @@ test_finished_task_still_holding_its_slot_is_named_with_its_cleanup_command() {
   out=$(run_detect "$dir")
   assert_contains "$out" "POOL_LEAK: $dir/pool slot 1 is still held by task $id" \
     "a slot held by a task with no worker should be reported"
-  assert_contains "$out" "FM_HOME=$dir/home $ROOT/bin/fm-teardown.sh $id" \
-    "the report should print the exact command that returns the slot"
+  assert_not_contains "$out" "fm-teardown.sh" \
+    "an endpoint that did not answer must not be spent on a teardown command"
+  assert_contains "$out" "FM_HOME=$dir/home $ROOT/bin/fm-crew-state.sh $id" \
+    "the report should name the read-only check that confirms the task is finished"
   # Detection only: the slot, its claim, and its copy are untouched.
   assert_present "$dir/pool/1/.fm-slot-owner" "the check removed a slot claim"
   assert_present "$dir/pool/1/project/.git" "the check removed a held slot's checkout"
   assert_present "$dir/home/state/$id.meta" "the check removed a task record"
-  pass "pool leak: a slot still held by a finished task is named with its cleanup command"
+  pass "pool leak: a slot whose claimant's endpoint did not answer is named without a teardown command"
+}
+
+# A live claimant only justifies silence while its own record still names THIS
+# slot. Once that record was republished onto another slot - which is how a
+# claim is orphaned - the slot it left behind is reachable by no task's cleanup.
+test_a_live_claimant_whose_record_names_another_slot_is_reported() {
+  local dir out live started id=moved-task
+  dir=$(make_pool_case live-claimant-moved-on)
+  git -C "$dir/project" worktree add -q --detach "$dir/pool/2/project"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/pool/2/project" "project=$dir/project" "kind=ship"
+  claim_slot "$dir" "$id" "$dir/home"
+  ( cd "$dir/pool/2/project" && exec sleep 30 ) &
+  live=$!
+  started=$(pid_started_at_ms "$live") \
+    || fail "this host cannot read a process start time, so the in-use fixture cannot be built"
+  pool_state "$dir" "$dir/pool/2/project" "$live" "$started"
+
+  out=$(run_detect "$dir" "firstmate:fm-$id")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  assert_contains "$out" "POOL_LEAK: $dir/pool slot 1 is claimed by task $id" \
+    "a claim its own claimant's record no longer names should be reported"
+  assert_contains "$out" "$dir/pool/2/project" \
+    "the report should name the slot the claimant's record does point at"
+  assert_not_contains "$out" "fm-teardown.sh" \
+    "an orphaned claim must carry no destructive command"
+  assert_present "$dir/pool/1/.fm-slot-owner" "the check removed an orphaned slot claim"
+  pass "pool leak: a live claimant whose record names another slot leaves a reported orphan claim"
 }
 
 test_slot_held_by_a_live_worker_is_silent() {
@@ -312,8 +344,10 @@ test_pool_state_disagreeing_with_a_claim_never_prints_a_teardown_command() {
   pool_state "$dir" "$dir/pool/1/project" "$live" "$started"
 
   out=$(run_detect "$dir")
-  assert_contains "$out" "FM_HOME=$dir/home $ROOT/bin/fm-teardown.sh $id" \
-    "a slot whose pool process is dead and whose worker is gone is the leak"
+  assert_contains "$out" "POOL_LEAK: $dir/pool slot 1 is still held by task $id" \
+    "a slot whose pool process is dead and whose endpoint did not answer is the leak"
+  assert_not_contains "$out" "fm-teardown.sh" \
+    "no leak shape may be handed a command that reaps processes and resets a copy"
 
   dir=$(make_pool_case pool-state-unreadable)
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -347,13 +381,14 @@ test_an_unusable_slot_record_does_not_hide_its_pools_other_slots() {
   claim_slot "$dir" "$id" "$dir/home"
 
   out=$(run_detect "$dir")
-  assert_contains "$out" "FM_HOME=$dir/home $ROOT/bin/fm-teardown.sh $id" \
+  assert_contains "$out" "POOL_LEAK: $dir/pool slot 1 is still held by task $id" \
     "a slot directory that is not a Treehouse slot hid the leak in its pool's other slot"
   pass "pool leak: a record naming an unusable slot does not hide the rest of its pool"
 }
 
-test_finished_task_still_holding_its_slot_is_named_with_its_cleanup_command
+test_finished_task_still_holding_its_slot_is_named_without_a_teardown_command
 test_slot_held_by_a_live_worker_is_silent
+test_a_live_claimant_whose_record_names_another_slot_is_reported
 test_claim_with_no_record_and_an_unreadable_claim_are_reported_differently
 test_unresolvable_backend_reports_unknown_liveness_without_a_command
 test_a_missing_adapter_dependency_is_unknown_liveness_not_a_dead_worker

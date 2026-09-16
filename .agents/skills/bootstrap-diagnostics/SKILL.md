@@ -35,10 +35,10 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
-- `POOL_LEAK: <pool> slot <n> <what holds it>; <how to return it>` - a shared worktree slot is still held by a task whose worker is gone, so every project sharing that pool is short a slot until cleanup runs; an exhausted pool fails every launch for that project.
-  Run the exact cleanup command the line prints, one slot at a time, and read each result: a refusal is a stop-and-investigate result, never something to force past.
+- `POOL_LEAK: <pool> slot <n> <what holds it>; <what to check>` - a shared worktree slot is still held by a task that is not using it, so every project sharing that pool is short a slot until cleanup runs; an exhausted pool fails every launch for that project.
+  The line prints no cleanup command by design: an endpoint that did not answer reads exactly like one that was never there, so confirm the task is finished with the read-only check the line names before anyone runs teardown on it.
   Never free a slot by hand or by any sweep: a held slot can still contain committed or staged work no branch carries, which is why nothing is returned automatically.
-  A line saying the claim names a task with no record, or that the claim cannot be read, has no cleanup command by design; inspect that slot for unlanded work and escalate before anything reuses it.
+  A line saying the claim names a task with no record, that the claim is orphaned from its own record, or that the claim cannot be read, means no task's cleanup reaches that slot at all; inspect it for unlanded work and escalate before anything reuses it.
 
 - `STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>` - the visible startup-memory budget is not a safe one-line positive decimal file; do not infer the default or propagate it.
   Correct the local primary file, then rerun session start so the normal convergence path can deliver the validated value to secondmate homes.

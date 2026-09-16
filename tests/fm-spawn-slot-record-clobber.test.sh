@@ -140,6 +140,33 @@ test_fresh_spawn_refuses_to_replace_a_record_that_still_holds_its_slot_claim_unr
   pass "fm-spawn: a fresh spawn refuses when the held slot's claim cannot be read"
 }
 
+# Freeing a dirty slot by hand deletes the checkout, never the claim beside it,
+# so the guard has to read the claim rather than the checkout: this is the exact
+# state in which a republished record orphans a claim for good.
+test_fresh_spawn_refuses_when_the_held_slots_checkout_was_deleted() {
+  local rec id=deleted-checkout-task out status
+
+  rec=$(make_clobber_case clobber-deleted-checkout "$id")
+  read_clobber_case "$rec"
+  seed_held_slot "$id" "$id"
+  git -C "$PROJ_DIR" worktree remove --force "$CASE_DIR/pool/1/project"
+
+  set +e
+  out=$(run_clobber_spawn "$id")
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] \
+    || fail "a fresh spawn orphaned the claim on a slot whose checkout was deleted:"$'\n'"$out"
+  assert_contains "$out" "still holds the pool slot at $CASE_DIR/pool/1/project" \
+    "the refusal should name the slot the record still holds"
+  assert_grep "worktree=$CASE_DIR/pool/1/project" "$HOME_DIR/state/$id.meta" \
+    "the refused spawn rewrote the record it was protecting"
+  assert_grep "task=$id" "$CASE_DIR/pool/1/.fm-slot-owner" \
+    "the refused spawn rewrote the slot claim"
+  pass "fm-spawn: a held slot whose checkout was deleted still refuses a fresh spawn"
+}
+
 test_fresh_spawn_refuses_to_replace_a_record_that_still_holds_its_slot
 test_fresh_spawn_proceeds_when_the_recorded_slot_was_already_reassigned
+test_fresh_spawn_refuses_when_the_held_slots_checkout_was_deleted
 test_fresh_spawn_refuses_to_replace_a_record_that_still_holds_its_slot_claim_unreadable

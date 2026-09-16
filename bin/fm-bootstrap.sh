@@ -56,7 +56,7 @@
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          A POOL_LEAK line means a Treehouse pool slot is still held by a task
 #          that has finished, so the pool is short that slot until cleanup runs;
-#          bin/fm-pool-leak-lib.sh owns the scan and the exact remediation each
+#          bin/fm-pool-leak-lib.sh owns the scan and what it reports for each
 #          line prints. Detection only: no slot is ever returned, reset, or
 #          re-claimed here, because a held slot can still hold unlanded work.
 #          treehouse is also MISSING when its installed version lacks

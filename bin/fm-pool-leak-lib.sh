@@ -8,18 +8,19 @@
 # cleanup never ran costs the whole fleet that slot until someone notices. On
 # 2026-09-15 every launch for one project failed for an hour with 11 of 16 slots
 # held by tasks that had already finished. Nothing here returns, resets, or
-# claims a slot: it reports which slots are held and the exact command that
-# returns each one, because two of those slots held staged work no branch
-# carried and an automatic sweep would have destroyed it.
+# claims a slot, and it prints no command that would: it names which slots are
+# held and what was observed about each, because two of those slots held staged
+# work no branch carried and an automatic sweep would have destroyed it.
 #
 # Scope: the slots of every pool this home's own task records reach, judged
 # against the claim each slot carries (bin/fm-treehouse-slot-lib.sh) and against
-# the pool's own treehouse-state.json. Only a claim the pool still agrees with
-# gets a cleanup command. The claimant is asked first: a task whose worker is
-# still running holds its own slot, which is the normal state and is never
-# reported, whatever the pool says. Once that worker is gone, a slot the pool no
-# longer records, a slot the pool records a running process under, and a pool
-# state that cannot be read are each reported with no command. The pool file names no task - its per-slot fields are
+# the pool's own treehouse-state.json. The claimant is asked first: a task whose
+# worker is still running AND whose own record still names this slot holds it,
+# which is the normal state and is never reported, whatever the pool says. A
+# live claimant whose record names some other slot left this claim behind, so
+# that one IS reported. Once the worker is gone, a slot the pool no longer
+# records, a slot the pool records a running process under, and a pool state
+# that cannot be read are each reported on their own terms. The pool file names no task - its per-slot fields are
 # name, path, created_at, owner_pid, and owner_started_at - so "this slot was
 # handed to a different task" is not a state this check can reach, and every
 # report says so rather than inferring it from the pid. A claim
@@ -132,7 +133,8 @@ fm_pool_leak_slot_in_use() {  # <pid> <started-at-ms>
 # rc 1 is not proof of death: bin/fm-backend.sh's fm_backend_target_exists
 # deliberately reads a query it could not make - a herdr server that is down, an
 # unreadable Orca terminal - as "does not exist". It is reported so a human can
-# look, and no caller may spend it on a destructive decision.
+# look, and no caller spends it on a destructive decision; nothing here prints a
+# command that reaps processes or resets a copy.
 FM_POOL_LEAK_STATE_REASON=
 fm_pool_leak_task_state() {  # <home> <task-id>
   local meta="$1/state/$2.meta" id=$2 window target backend tool tools remote_host
@@ -174,7 +176,7 @@ fm_pool_leak_task_state() {  # <home> <task-id>
 
 # One POOL_LEAK line per held slot, or nothing at all.
 fm_pool_leak_report() {  # <state-dir>
-  local state=$1 pool slot claim_home claim_id rc name known
+  local state=$1 pool slot claim_home claim_id rc name known claim_wt claim_slot
   local pool_slots pool_rc entry entry_rc slot_pid slot_started
   while IFS= read -r pool; do
     [ -n "$pool" ] || continue
@@ -202,7 +204,16 @@ fm_pool_leak_report() {  # <state-dir>
       rc=0
       fm_pool_leak_task_state "$claim_home" "$claim_id" || rc=$?
       case "$rc" in
-        0) continue ;;
+        0)
+          claim_wt=$(fm_meta_get "$claim_home/state/$claim_id.meta" worktree)
+          if [ -n "$claim_wt" ]; then
+            claim_slot=$(CDPATH='' cd -- "$claim_wt" 2>/dev/null && pwd -P) \
+              || claim_slot=${claim_wt%/}
+            [ "$(dirname "$claim_slot")" = "$slot" ] && continue
+          fi
+          echo "POOL_LEAK: $pool slot $name is claimed by task $claim_id, whose worker is running but whose own record names ${claim_wt:-no worktree at all}, not this slot; that claim is orphaned, so no task's cleanup will ever return this slot - inspect $slot for unlanded work, then clear $slot/.fm-slot-owner by hand"
+          continue
+          ;;
         3)
           echo "POOL_LEAK: $pool slot $name is held by task $claim_id, and whether its worker is still running is unknown because $FM_POOL_LEAK_STATE_REASON; settle that before tearing the task down"
           continue
@@ -230,7 +241,7 @@ fm_pool_leak_report() {  # <state-dir>
       fi
       case "$rc" in
         1)
-          echo "POOL_LEAK: $pool slot $name is still held by task $claim_id, whose worker is gone; return it with: FM_HOME=$claim_home $_FM_POOL_LEAK_LIB_DIR/fm-teardown.sh $claim_id"
+          echo "POOL_LEAK: $pool slot $name is still held by task $claim_id, whose recorded endpoint did not answer and whose slot the pool records no live process under; a query that could not be made reads here exactly like an absent one, so confirm that task is finished (FM_HOME=$claim_home $_FM_POOL_LEAK_LIB_DIR/fm-crew-state.sh $claim_id) and inspect $slot for unlanded work before returning the slot"
           ;;
         2)
           echo "POOL_LEAK: $pool slot $name claims task $claim_id, but home $claim_home holds no record for it, so no cleanup command can return that slot; inspect $slot for unlanded work, then clear the claim by hand"

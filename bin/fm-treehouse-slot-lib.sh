@@ -46,9 +46,13 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 # checkout rather than a file inside it - so claiming a slot can never dirty the
 # copy teardown's landed-work checks inspect, and a returned slot carries no
 # untracked leftover from it.
+# The claim is a SIBLING of the checkout, so it outlives a checkout deleted by
+# hand and the marker must still resolve then: fall back to the recorded path
+# lexically when it cannot be canonicalized.
 fm_treehouse_slot_owner_marker() {  # <worktree>
   local worktree=$1 slot
-  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  [ -n "$worktree" ] || return 1
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || slot=${worktree%/}
   printf '%s/.fm-slot-owner\n' "$(dirname "$slot")"
 }
 

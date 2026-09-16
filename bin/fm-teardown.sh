@@ -115,7 +115,7 @@
 # hard-reset the copy of whichever record is in fact live. A human clears it
 # instead: confirm the colliding task
 # is finished (bin/fm-crew-state.sh <other-id>), move its record aside
-# (mv "$FM_HOME/state/<other-id>.meta" "$FM_HOME/data/worktree-recovered/stale-meta/"),
+# (mv <other-home>/state/<other-id>.meta <other-home>/data/worktree-recovered/stale-meta/),
 # then re-run this teardown - the refusal message prints that command with the
 # paths filled in.
 # A claim naming another task is
@@ -2180,7 +2180,7 @@ collect_local_firstmate_states() {
 
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
+  local slot state_dir other other_id field other_path other_slot other_recovered
   slot=$(canonical_existing_dir "$worktree") || return 0
   collect_local_firstmate_states "$record_state" || return 1
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
@@ -2196,7 +2196,8 @@ require_exclusive_worktree_slot_record() {
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
-        echo "If $other_id is long finished and the slot's claim names $record_id, $other_id's record is stale: move it aside by hand (mkdir -p \"\$FM_HOME/data/worktree-recovered/stale-meta\" && mv \"$other\" \"\$FM_HOME/data/worktree-recovered/stale-meta/\") and re-run this teardown." >&2
+        other_recovered="$(dirname "$state_dir")/data/worktree-recovered/stale-meta"
+        echo "If $other_id is long finished and the slot's claim names $record_id, $other_id's record is stale: move it aside by hand (mkdir -p \"$other_recovered\" && mv \"$other\" \"$other_recovered/\") and re-run this teardown." >&2
         return 1
       done
     done
