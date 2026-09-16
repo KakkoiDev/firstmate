@@ -129,24 +129,18 @@ fm_pool_leak_slot_in_use() {  # <pid> <started-at-ms>
 # 0 = a live endpoint, 1 = no live endpoint, 2 = no record to tear down,
 # 3 = liveness cannot be determined from this session, with the why in
 #     FM_POOL_LEAK_STATE_REASON.
-# Only rc 1 is a positive reading of an absent endpoint; every shape this
-# session cannot probe is rc 3, because a caller that reaps on this answer must
-# never be handed absence of evidence as proof of death.
-fm_pool_leak_task_state() {  # <home> <task-id>
-  fm_pool_leak_meta_state "$1/state/$2.meta"
-}
-
-# The same determination for a record already located by path, for callers that
-# hold the .meta itself rather than a home and an id.
+# rc 1 is not proof of death: bin/fm-backend.sh's fm_backend_target_exists
+# deliberately reads a query it could not make - a herdr server that is down, an
+# unreadable Orca terminal - as "does not exist". It is reported so a human can
+# look, and no caller may spend it on a destructive decision.
 FM_POOL_LEAK_STATE_REASON=
-fm_pool_leak_meta_state() {  # <meta>
-  local meta=$1 id window target backend tool tools remote_host
+fm_pool_leak_task_state() {  # <home> <task-id>
+  local meta="$1/state/$2.meta" id=$2 window target backend tool tools remote_host
   FM_POOL_LEAK_STATE_REASON=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
     FM_POOL_LEAK_STATE_REASON="its record could not be read back"
     return 2
   }
-  id=$(basename "$meta" .meta)
   # bin/fm-spawn.sh's remote secondmate record carries no backend= line at all
   # and its endpoint is remote_backend/remote_target on another machine, so the
   # local probe below would query a window that cannot exist here and read a

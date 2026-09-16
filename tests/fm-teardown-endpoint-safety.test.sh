@@ -445,16 +445,6 @@ test_bare_relative_origin_shares_project_lock_with_clone() {
   pass "Treehouse locking resolves a bare local origin against its source project, matching the provisioned clone"
 }
 
-# The record-exclusivity scan probes a colliding record's endpoint read-only
-# (tmux display-message) before it refuses, so "no mutation" here means no
-# runtime command other than that probe.
-assert_no_runtime_mutation() {  # <case> <description>
-  local dir=$1 description=$2
-  if grep -v -- '<display-message>' "$dir/runtime.log" | grep -q .; then
-    fail "$description: $(cat "$dir/runtime.log")"
-  fi
-}
-
 test_reused_pool_slot_refuses_before_touching_the_other_task() {
   local dir id=stale-task other=live-task worker rc
 
@@ -484,7 +474,8 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
   assert_present "$dir/worktree/sentinel" "teardown reset a pool slot a second task record still holds"
   assert_present "$dir/home/state/$other.meta" "teardown removed the live task's record"
   assert_present "$dir/home/state/$id.meta" "teardown removed the stale task's record before refusing"
-  assert_no_runtime_mutation "$dir" "teardown reached the runtime on a contested pool slot"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "teardown reached the runtime on a contested pool slot: $(cat "$dir/runtime.log")"
   assert_contains "$(cat "$dir/stderr")" "$other" \
     "refusal should name the other task holding the slot"
   kill "$worker" 2>/dev/null || true
@@ -508,7 +499,8 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
   [ "$rc" -ne 0 ] || fail "teardown returned a pool slot a secondmate home record still holds"
   assert_present "$dir/worktree/sentinel" "teardown reset a pool slot a secondmate home record still holds"
   assert_present "$dir/home/state/$other.meta" "teardown removed the secondmate record"
-  assert_no_runtime_mutation "$dir" "teardown reached the runtime on a slot held by a secondmate home"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "teardown reached the runtime on a slot held by a secondmate home: $(cat "$dir/runtime.log")"
 
   pass "fm-teardown: a pool slot named by a second task record is never returned, killed, or reset"
 }
@@ -541,7 +533,8 @@ test_cross_home_pool_slot_collision_refuses() {
   assert_present "$dir/home/state/$id.meta" "cross-home collision removed stale metadata"
   assert_present "$second_home/state/$other.meta" "cross-home collision removed live metadata"
   assert_present "$dir/worktree/sentinel" "cross-home collision reset the shared slot"
-  assert_no_runtime_mutation "$dir" "cross-home collision reached the runtime"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "cross-home collision reached the runtime: $(cat "$dir/runtime.log")"
   assert_contains "$(cat "$dir/stderr")" "$other" \
     "cross-home refusal should name the task holding the slot"
   pass "fm-teardown: a pool slot held by another firstmate home is never returned"
@@ -829,7 +822,8 @@ test_remote_layout_homes_serialize_on_one_project_lock() {
     || fail "a remote-seeded home returned a pool slot while its local child held the shared lock"
   assert_present "$dir/home/state/$id.meta" "contended remote-layout teardown removed the task record"
   assert_present "$dir/worktree/sentinel" "contended remote-layout teardown reset the slot"
-  assert_no_runtime_mutation "$dir" "contended remote-layout teardown reached the runtime"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "contended remote-layout teardown reached the runtime: $(cat "$dir/runtime.log")"
   assert_contains "$(cat "$dir/stderr")" "another Treehouse slot allocation or return is in progress" \
     "the refusal should name the shared project lock, not some unrelated check"
 
@@ -984,18 +978,21 @@ test_a_stale_record_tears_down_while_its_successor_keeps_the_slot() {
   pass "fm-teardown: a stale record tears down while the successor that holds its old slot keeps it"
 }
 
-# The other direction of the same 2026-09-15 deadlock: teardown of the task the
-# slot claim NAMES, blocked by a colliding record whose own worker is long dead.
-# The record-exclusivity scan must step past a colliding record it can prove is
-# gone, and only that one: a live or unknown colliding worker still refuses.
-test_a_claimed_slot_tears_down_past_a_colliding_record_whose_worker_is_gone() {
+# An endpoint that does not answer is not proof the record is stale: for every
+# backend but tmux an unqueryable target reads exactly like an absent one
+# (bin/fm-backend.sh), and a secondmate home holds its slot on a durable
+# treehouse lease that outlives the agent. So a colliding record whose window is
+# gone must still refuse, on worktree= and on home= alike.
+test_a_colliding_record_with_a_dead_endpoint_still_refuses() {
   local dir id=successor-task other=stale-task rc
 
-  dir=$(make_case slot-claimant-vs-dead-record)
-  mark_case_as_treehouse_pool "$dir"
-  # The colliding record's endpoint is the only thing that must read as gone;
-  # every other tmux query still answers so the claimant's own cleanup runs.
-  cat > "$dir/fakebin/tmux" <<SH
+  # The colliding record's endpoint is the only query that fails; every other
+  # tmux call still answers, so nothing but that record's liveness differs from
+  # a teardown that would otherwise run to completion.
+  seed_dead_endpoint_collision() {  # <case> <colliding-field>
+    local dir=$1 field=$2
+    mark_case_as_treehouse_pool "$dir"
+    cat > "$dir/fakebin/tmux" <<SH
 #!/usr/bin/env bash
 case " \$* " in
   *display-message*firstmate:fm-$other*) exit 1 ;;
@@ -1005,141 +1002,55 @@ printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
 printf '\n' >> "\${FM_RUNTIME_LOG:?}"
 exit 0
 SH
-  chmod +x "$dir/fakebin/tmux"
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
-  fm_write_meta "$dir/home/state/$other.meta" \
-    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
-  claim_pool_slot "$dir" "$id"
+    chmod +x "$dir/fakebin/tmux"
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+      "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    if [ "$field" = home ]; then
+      fm_write_meta "$dir/home/state/$other.meta" \
+        "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+        "worktree=$dir/worktree" "home=$dir/worktree" \
+        "project=$dir/project" "harness=codex" "kind=secondmate" \
+        "mode=secondmate" "yolo=off" "projects=alpha"
+    else
+      fm_write_meta "$dir/home/state/$other.meta" \
+        "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+        "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    fi
+    claim_pool_slot "$dir" "$id"
+  }
 
-  set +e
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
-  rc=$?
-  set -e
+  assert_dead_endpoint_collision_refused() {  # <case> <description>
+    local dir=$1 description=$2 rc
+    set +e
+    run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] \
+      || fail "$description: teardown reaped a slot a colliding record names: $(cat "$dir/stdout")"
+    assert_present "$dir/home/state/$id.meta" "$description: the refusal removed the task record"
+    assert_present "$dir/home/state/$other.meta" "$description: the refusal removed the colliding record"
+    assert_present "$dir/worktree/sentinel" "$description: the refusal reset the slot's copy"
+    assert_present "$dir/pool/1/.fm-slot-owner" "$description: the refusal removed the slot claim"
+    ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+      || fail "$description: the slot was returned to the pool: $(cat "$dir/runtime.log")"
+    assert_contains "$(cat "$dir/stderr")" "worktree-recovered/stale-meta" \
+      "$description: the refusal should print the manual stale-record workaround"
+  }
 
-  [ "$rc" -eq 0 ] \
-    || fail "teardown of the task the slot claim names deadlocked against a dead task's record: $(cat "$dir/stderr")"
-  assert_absent "$dir/home/state/$id.meta" "the claimant's own record was not removed"
-  assert_absent "$dir/pool/1/.fm-slot-owner" "the claimant's spent slot claim was left behind"
-  assert_present "$dir/home/state/$other.meta" "teardown removed the colliding record it only read"
-  grep -Fq "treehouse <return>" "$dir/runtime.log" \
-    || fail "the claimant's pool slot was not returned: $(cat "$dir/runtime.log")"
+  # The record-vs-record shape of the 2026-09-15 incident, seen from the task
+  # the slot claim names.
+  dir=$(make_case slot-claimant-vs-dead-record)
+  seed_dead_endpoint_collision "$dir" worktree
+  assert_dead_endpoint_collision_refused "$dir" "colliding record with a dead endpoint"
 
-  # Same shape, colliding worker ALIVE: still refuses, with nothing changed.
-  dir=$(make_case slot-claimant-vs-live-record)
-  mark_case_as_treehouse_pool "$dir"
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
-  fm_write_meta "$dir/home/state/$other.meta" \
-    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
-  claim_pool_slot "$dir" "$id"
+  # The same dead endpoint on a secondmate home record, whose slot is leased
+  # rather than claimed, so a stopped agent is routine and recoverable.
+  dir=$(make_case slot-claimant-vs-dead-secondmate-home)
+  seed_dead_endpoint_collision "$dir" home
+  assert_dead_endpoint_collision_refused "$dir" "colliding secondmate home with a dead endpoint"
 
-  set +e
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "teardown stepped past a colliding record whose worker is alive"
-  assert_present "$dir/home/state/$id.meta" "the refusal removed the task record"
-  assert_present "$dir/home/state/$other.meta" "the refusal removed the colliding record"
-  assert_present "$dir/worktree/sentinel" "the refusal reset the slot's copy"
-  assert_present "$dir/pool/1/.fm-slot-owner" "the refusal removed the slot claim"
-  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
-    || fail "the refusal returned the pool slot: $(cat "$dir/runtime.log")"
-  assert_contains "$(cat "$dir/stderr")" "still running" \
-    "the refusal should say the colliding task's worker is still running"
-
-  pass "fm-teardown: the task a slot claim names tears down past a colliding record whose worker is gone"
-}
-
-# Only a POSITIVE reading of an absent endpoint lets the scan step past a
-# colliding record. These are the two shapes that read as absent from a local
-# tmux probe while saying nothing at all about a worker.
-test_a_colliding_record_this_session_cannot_probe_still_refuses() {
-  local dir id=successor-task other=remote-secondmate rc
-
-  # Exactly the record bin/fm-spawn.sh publishes for a remote secondmate: no
-  # backend= line, window=remote:<id>, and the real endpoint in remote_*.
-  dir=$(make_case slot-claimant-vs-remote-record)
-  mark_case_as_treehouse_pool "$dir"
-  # Real tmux fails a query against a session it does not have, and the only
-  # local session here is firstmate; window=remote:<id> names no local window.
-  cat > "$dir/fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-prev=
-for arg in "$@"; do
-  if [ "$prev" = -t ]; then
-    case "$arg" in firstmate:*) ;; *) exit 1 ;; esac
-  fi
-  prev=$arg
-done
-printf 'tmux' >> "${FM_RUNTIME_LOG:?}"
-printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
-printf '\n' >> "${FM_RUNTIME_LOG:?}"
-exit 0
-SH
-  chmod +x "$dir/fakebin/tmux"
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
-  fm_write_meta "$dir/home/state/$other.meta" \
-    "window=remote:$other" "endpoint_task_id=$other" \
-    "worktree=$dir/worktree" "project=$dir/project" \
-    "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
-    "tasktmp=" "model=" "effort=" "home=$dir/worktree" "projects=alpha" \
-    "remote_host=builder.invalid" "remote_root=/srv/firstmate" \
-    "remote_backend=herdr" "remote_herdr_session=fm-remote" \
-    "remote_target=fm-remote:%7"
-  claim_pool_slot "$dir" "$id"
-
-  set +e
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] \
-    || fail "teardown reaped a slot a live remote secondmate home records: $(cat "$dir/stdout")"
-  assert_present "$dir/home/state/$other.meta" "the refusal removed the remote secondmate's record"
-  assert_present "$dir/worktree/sentinel" "the refusal reset the remote secondmate's home"
-  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
-    || fail "the remote secondmate's slot was returned to the pool: $(cat "$dir/runtime.log")"
-  assert_contains "$(cat "$dir/stderr")" "builder.invalid" \
-    "the refusal should name the remote host it cannot probe"
-
-  pass "fm-teardown: a colliding remote secondmate record is never read as gone"
-}
-
-# A colliding record with no window line at all: nothing was read about a
-# worker, which is not the same as reading that there is none.
-test_a_colliding_record_with_no_endpoint_still_refuses() {
-  local dir id=successor-task other=endpointless-task rc
-
-  dir=$(make_case slot-claimant-vs-endpointless-record)
-  mark_case_as_treehouse_pool "$dir"
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
-  fm_write_meta "$dir/home/state/$other.meta" \
-    "endpoint_task_id=$other" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
-  claim_pool_slot "$dir" "$id"
-
-  set +e
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] \
-    || fail "teardown reaped a slot a colliding record with no endpoint names: $(cat "$dir/stdout")"
-  assert_present "$dir/home/state/$other.meta" "the refusal removed the endpointless record"
-  assert_present "$dir/worktree/sentinel" "the refusal reset the slot's copy"
-  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
-    || fail "the slot was returned past a record with no endpoint: $(cat "$dir/runtime.log")"
-  assert_contains "$(cat "$dir/stderr")" "no endpoint at all" \
-    "the refusal should say the colliding record carries no endpoint"
-
-  pass "fm-teardown: a colliding record with no endpoint is never read as gone"
+  pass "fm-teardown: a colliding record whose endpoint does not answer still refuses"
 }
 
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1560,9 +1471,7 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_a_stale_record_tears_down_while_its_successor_keeps_the_slot
-test_a_claimed_slot_tears_down_past_a_colliding_record_whose_worker_is_gone
-test_a_colliding_record_this_session_cannot_probe_still_refuses
-test_a_colliding_record_with_no_endpoint_still_refuses
+test_a_colliding_record_with_a_dead_endpoint_still_refuses
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
