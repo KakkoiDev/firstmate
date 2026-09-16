@@ -227,6 +227,8 @@ test_a_missing_adapter_dependency_is_unknown_liveness_not_a_dead_worker() {
   for tool in dirname basename; do
     ln -sf "$(command -v "$tool")" "$dir/fakebin/$tool"
   done
+  # $1 and $2 are positional parameters of the bash -c calls below, not of this shell.
+  # shellcheck disable=SC2016
   probe='. "$1/bin/fm-backend.sh"; . "$1/bin/fm-treehouse-slot-lib.sh"; . "$1/bin/fm-pool-leak-lib.sh"; fm_pool_leak_task_state "$2" herdr-task'
 
   # herdr resolves, jq does not: the adapter parses its session list with jq, so
