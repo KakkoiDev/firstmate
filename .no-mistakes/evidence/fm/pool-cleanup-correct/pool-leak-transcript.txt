@@ -1,0 +1,39 @@
+$ FM_HOME=<home> bin/fm-bootstrap.sh   # startup pool-slot leak check
+MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)
+MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)
+MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)
+PRESENTATION_UNAVAILABLE: lavish-axi (requires >=0.1.46; install: npm install -g lavish-axi && lavish-axi setup hooks) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish
+MISSING: quota-axi (install: npm install -g quota-axi)
+MISSING: tasks-axi (install: npm install -g tasks-axi)
+POOL_LEAK: /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-pool-leak.Bx9MC7/held-by-finished-task/pool slot 1 is still held by task finished-task, whose recorded endpoint did not answer and whose slot the pool records no live process under; a query that could not be made reads here exactly like an absent one, so confirm that task is finished (FM_HOME=/private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-pool-leak.Bx9MC7/held-by-finished-task/home /Users/cyril.antoni/.no-mistakes/worktrees/8d3b2958aa4c/01M2MADEY2PD8T0N1YQCWDZ8CY/bin/fm-crew-state.sh finished-task) and inspect /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-pool-leak.Bx9MC7/held-by-finished-task/pool/1 for unlanded work before returning the slot
+$ FM_HOME=<home> bin/fm-bootstrap.sh   # startup pool-slot leak check
+MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)
+MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)
+MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)
+PRESENTATION_UNAVAILABLE: lavish-axi (requires >=0.1.46; install: npm install -g lavish-axi && lavish-axi setup hooks) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish
+MISSING: quota-axi (install: npm install -g quota-axi)
+MISSING: tasks-axi (install: npm install -g tasks-axi)
+POOL_LEAK: /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-pool-leak.Bx9MC7/live-claimant-moved-on/pool slot 1 is claimed by task moved-task, whose worker is running but whose own record names /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-pool-leak.Bx9MC7/live-claimant-moved-on/pool/2/project, not this slot; that claim is orphaned, so no task's cleanup will ever return this slot - inspect /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-pool-leak.Bx9MC7/live-claimant-moved-on/pool/1 for unlanded work, then clear /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-pool-leak.Bx9MC7/live-claimant-moved-on/pool/1/.fm-slot-owner by hand
+$ FM_HOME=<home> bin/fm-bootstrap.sh   # startup pool-slot leak check
+MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)
+MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)
+MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)
+PRESENTATION_UNAVAILABLE: lavish-axi (requires >=0.1.46; install: npm install -g lavish-axi && lavish-axi setup hooks) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish
+MISSING: quota-axi (install: npm install -g quota-axi)
+MISSING: tasks-axi (install: npm install -g tasks-axi)
+POOL_LEAK: /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-pool-leak.Bx9MC7/claim-without-record/pool slot 1 claims task vanished-task, but home /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-pool-leak.Bx9MC7/claim-without-record/home holds no record for it, so no cleanup command can return that slot; inspect /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-pool-leak.Bx9MC7/claim-without-record/pool/1 for unlanded work, then clear the claim by hand
+$ FM_HOME=<home> bin/fm-bootstrap.sh   # startup pool-slot leak check
+MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)
+MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)
+MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)
+PRESENTATION_UNAVAILABLE: lavish-axi (requires >=0.1.46; install: npm install -g lavish-axi && lavish-axi setup hooks) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish
+MISSING: quota-axi (install: npm install -g quota-axi)
+MISSING: tasks-axi (install: npm install -g tasks-axi)
+POOL_LEAK: /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-pool-leak.Bx9MC7/unreadable-claim/pool slot 1 carries a slot-owner claim that cannot be read, so nothing can prove whose slot it is; inspect /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-pool-leak.Bx9MC7/unreadable-claim/pool/1/.fm-slot-owner before any task reuses that slot
+$ FM_HOME=<home> bin/fm-bootstrap.sh   # startup pool-slot leak check
+MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)
+MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)
+MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)
+PRESENTATION_UNAVAILABLE: lavish-axi (requires >=0.1.46; install: npm install -g lavish-axi && lavish-axi setup hooks) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish
+MISSING: quota-axi (install: npm install -g quota-axi)
+MISSING: tasks-axi (install: npm install -g tasks-axi)

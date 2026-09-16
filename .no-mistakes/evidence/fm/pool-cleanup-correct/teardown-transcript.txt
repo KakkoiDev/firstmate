@@ -1,0 +1,35 @@
+$ FM_HOME=<home> bin/fm-teardown.sh stale-task --force
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  2 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+warning: task stale-task's recorded worktree /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-teardown-endpoint-safety.wVcN4x/slot-stale-record-vs-successor/pool/1/project was reassigned to task successor-task (home /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-teardown-endpoint-safety.wVcN4x/slot-stale-record-vs-successor/home), which claimed that pool slot after this record was written; that slot is no longer stale-task's, so its processes, copy, and claim are left untouched and only stale-task's own cleanup runs.
+teardown stale-task complete (window firstmate:fm-stale-task; pool slot /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-teardown-endpoint-safety.wVcN4x/slot-stale-record-vs-successor/worktree left to task successor-task (home /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-teardown-endpoint-safety.wVcN4x/slot-stale-record-vs-successor/home), which it was reassigned to)
+Backlog: stale-task just finished (this home keeps no markdown backlog at /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-teardown-endpoint-safety.wVcN4x/slot-stale-record-vs-successor/home/data/backlog.md). Update /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-teardown-endpoint-safety.wVcN4x/slot-stale-record-vs-successor/home/data/backlog.md - move stale-task to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
+$ FM_HOME=<home> bin/fm-teardown.sh successor-task --force
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  2 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REFUSED: task successor-task's recorded worktree /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-teardown-endpoint-safety.wVcN4x/slot-claimant-vs-dead-record/pool/1/project is also task stale-task's recorded worktree.
+Returning that pool slot would kill stale-task's processes and reset its copy, so nothing was changed - not even with --force.
+Reconcile whichever record is wrong (bin/fm-crew-state.sh successor-task; bin/fm-crew-state.sh stale-task), then re-run teardown.
+If stale-task is long finished and the slot's claim names successor-task, stale-task's record is stale: move it aside by hand (mkdir -p "/private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-teardown-endpoint-safety.wVcN4x/slot-claimant-vs-dead-record/home/data/worktree-recovered/stale-meta" && mv "/private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-teardown-endpoint-safety.wVcN4x/slot-claimant-vs-dead-record/home/state/stale-task.meta" "/private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-teardown-endpoint-safety.wVcN4x/slot-claimant-vs-dead-record/home/data/worktree-recovered/stale-meta/") and re-run this teardown.
+$ FM_HOME=<home> bin/fm-teardown.sh successor-task --force
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  2 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REFUSED: task successor-task's recorded worktree /private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-teardown-endpoint-safety.wVcN4x/slot-claimant-vs-dead-secondmate-home/pool/1/project is also task stale-task's recorded worktree.
+Returning that pool slot would kill stale-task's processes and reset its copy, so nothing was changed - not even with --force.
+Reconcile whichever record is wrong (bin/fm-crew-state.sh successor-task; bin/fm-crew-state.sh stale-task), then re-run teardown.
+If stale-task is long finished and the slot's claim names successor-task, stale-task's record is stale: move it aside by hand (mkdir -p "/private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-teardown-endpoint-safety.wVcN4x/slot-claimant-vs-dead-secondmate-home/home/data/worktree-recovered/stale-meta" && mv "/private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-teardown-endpoint-safety.wVcN4x/slot-claimant-vs-dead-secondmate-home/home/state/stale-task.meta" "/private/var/folders/yk/3x0wgs_s12v47knmxd574hm40000gp/T/fm-teardown-endpoint-safety.wVcN4x/slot-claimant-vs-dead-secondmate-home/home/data/worktree-recovered/stale-meta/") and re-run this teardown.

@@ -1,0 +1,25 @@
+=== fm-pool-leak
+ok - pool leak: a slot whose claimant's endpoint did not answer is named without a teardown command
+ok - pool leak: a slot whose worker is still running reports nothing
+ok - pool leak: a live claimant whose record names another slot leaves a reported orphan claim
+ok - pool leak: a claim with no record, and a claim that cannot be read, each report their own remediation
+ok - pool leak: a record whose backend CLI is unresolvable reports unknown liveness, not a dead worker
+ok - pool leak: a missing adapter dependency reads as unknown liveness, not a dead worker
+ok - pool leak: a slot carrying no claim reports nothing
+ok - pool leak: a claim with no home is reported, a claim from a home absent here is not
+ok - pool leak: a dropped slot, a slot in use, and an unreadable pool state never print a teardown command
+ok - pool leak: a record naming an unusable slot does not hide the rest of its pool
+=== fm-spawn-slot-record-clobber
+ok - fm-spawn: a fresh spawn refuses to replace a record that still holds its pool slot
+ok - fm-spawn: a record whose pool slot was already reassigned still spawns
+ok - fm-spawn: a held slot whose checkout was deleted still refuses a fresh spawn
+ok - fm-spawn: a fresh spawn refuses when the held slot's claim cannot be read
+=== fm-teardown-endpoint-safety
+ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
+ok - fm-teardown: a concurrent lifecycle action refuses before mutation
+ok - fm-teardown: non-pool cleanup ignores unrelated task publication locks
+ok - fm-teardown: destructive cleanup serializes with metadata writers
+ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses
+ok - tmux backend: direct empty target returns nonzero without invoking tmux
+ok - process cleanup: creation-time PID identity removes only the exact child and preserves the control child
+can't find session: endpoint safety
