@@ -105,12 +105,15 @@
 # distinguishes a record that lost the slot from one that took it without ever
 # writing a claim (every slot handed out before 2026-09-07, and any home whose
 # firstmate predates claims). What the scan consults instead is the COLLIDING
-# record's own liveness - its backend, its target, and the tools that backend
-# needs (fm_pool_leak_meta_state's three-way contract) - and it steps past that
-# record only when every one of those tools resolves here AND the endpoint is
-# absent. A colliding worker that is still running refuses, and so does one
-# whose liveness cannot be determined, because the whole point of the refusal is
-# to never reap the processes or hard-reset the copy of a live task. That is the
+# record's own liveness (fm_pool_leak_meta_state's three-way contract) and it
+# steps past that record only on a POSITIVE reading that the endpoint is gone:
+# a local backend whose required tools all resolve here, queried, and absent.
+# Every other shape - a live worker, a record whose endpoint lives on a remote
+# host this session cannot probe, a record carrying no endpoint at all, an
+# unresolvable backend tool, a record that could not be read back - is unknown
+# and refuses, because the whole point of the refusal is to never reap the
+# processes or hard-reset the copy of a live task, and absence of evidence is
+# not proof of death. That is the
 # other direction of the 2026-09-15 deadlock: the task the slot claim names
 # could not be torn down while a long-dead task's record still named the slot.
 # When liveness is unknown a human still clears it: confirm the colliding task
@@ -2207,11 +2210,11 @@ require_exclusive_worktree_slot_record() {
         fm_pool_leak_meta_state "$other" || other_rc=$?
         [ "$other_rc" -ne 1 ] || continue 2
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
-        if [ "$other_rc" -eq 3 ]; then
-          echo "Task $other_id's record names a backend whose tools this session cannot all resolve, so whether its worker is still running is unknown, and returning that pool slot could kill a live worker; nothing was changed - not even with --force." >&2
-          echo "Resolve that backend's tools and re-run teardown, or - if $other_id is long finished - move its record aside by hand (mkdir -p \"\$FM_HOME/data/worktree-recovered/stale-meta\" && mv \"$other\" \"\$FM_HOME/data/worktree-recovered/stale-meta/\") and re-run this teardown." >&2
-        else
+        if [ "$other_rc" -eq 0 ]; then
           echo "Task $other_id's worker is still running, and returning that pool slot would kill its processes and reset its copy, so nothing was changed - not even with --force." >&2
+        else
+          echo "Whether task $other_id's worker is still running is unknown (${FM_POOL_LEAK_STATE_REASON:-its liveness could not be determined}), and returning that pool slot could kill a live worker; nothing was changed - not even with --force." >&2
+          echo "Settle that and re-run teardown, or - if $other_id is long finished - move its record aside by hand (mkdir -p \"\$FM_HOME/data/worktree-recovered/stale-meta\" && mv \"$other\" \"\$FM_HOME/data/worktree-recovered/stale-meta/\") and re-run this teardown." >&2
         fi
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
         return 1

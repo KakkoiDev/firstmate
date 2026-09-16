@@ -127,24 +127,51 @@ fm_pool_leak_slot_in_use() {  # <pid> <started-at-ms>
 
 # Whether the task a claim names still has a worker running.
 # 0 = a live endpoint, 1 = no live endpoint, 2 = no record to tear down,
-# 3 = a tool the record's backend needs is not resolvable here, so liveness is
-#     unknown.
+# 3 = liveness cannot be determined from this session, with the why in
+#     FM_POOL_LEAK_STATE_REASON.
+# Only rc 1 is a positive reading of an absent endpoint; every shape this
+# session cannot probe is rc 3, because a caller that reaps on this answer must
+# never be handed absence of evidence as proof of death.
 fm_pool_leak_task_state() {  # <home> <task-id>
   fm_pool_leak_meta_state "$1/state/$2.meta"
 }
 
 # The same determination for a record already located by path, for callers that
 # hold the .meta itself rather than a home and an id.
+FM_POOL_LEAK_STATE_REASON=
 fm_pool_leak_meta_state() {  # <meta>
-  local meta=$1 id window target backend tool tools
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 2
+  local meta=$1 id window target backend tool tools remote_host
+  FM_POOL_LEAK_STATE_REASON=
+  [ -f "$meta" ] && [ ! -L "$meta" ] || {
+    FM_POOL_LEAK_STATE_REASON="its record could not be read back"
+    return 2
+  }
   id=$(basename "$meta" .meta)
+  # bin/fm-spawn.sh's remote secondmate record carries no backend= line at all
+  # and its endpoint is remote_backend/remote_target on another machine, so the
+  # local probe below would query a window that cannot exist here and read a
+  # live home as dead. remote_host is the same authority switch
+  # bin/fm-fleet-snapshot.sh reads.
+  remote_host=$(fm_meta_get "$meta" remote_host)
+  [ -z "$remote_host" ] || {
+    FM_POOL_LEAK_STATE_REASON="its endpoint lives on remote host $remote_host, which this session cannot probe"
+    return 3
+  }
   window=$(fm_meta_get "$meta" window)
-  [ -n "$window" ] || return 1
+  [ -n "$window" ] || {
+    FM_POOL_LEAK_STATE_REASON="its record carries no endpoint at all, so nothing here was read about a worker"
+    return 3
+  }
   backend=$(fm_backend_of_meta "$meta")
-  tools=$(fm_backend_required_tools "$backend") || return 3
+  tools=$(fm_backend_required_tools "$backend") || {
+    FM_POOL_LEAK_STATE_REASON="its record names backend $backend, whose required tools this session cannot list"
+    return 3
+  }
   for tool in $tools; do
-    fm_backend_required_tool_available "$backend" "$tool" || return 3
+    fm_backend_required_tool_available "$backend" "$tool" || {
+      FM_POOL_LEAK_STATE_REASON="its record names backend $backend, whose tool $tool this session cannot resolve"
+      return 3
+    }
   done
   target=$(fm_backend_target_of_meta "$meta")
   fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id" || return 1
@@ -183,7 +210,7 @@ fm_pool_leak_report() {  # <state-dir>
       case "$rc" in
         0) continue ;;
         3)
-          echo "POOL_LEAK: $pool slot $name is held by task $claim_id, whose record names a backend whose tools this session cannot all resolve, so whether its worker is still running is unknown; resolve that backend's tools and re-check before tearing the task down"
+          echo "POOL_LEAK: $pool slot $name is held by task $claim_id, and whether its worker is still running is unknown because $FM_POOL_LEAK_STATE_REASON; settle that before tearing the task down"
           continue
           ;;
       esac

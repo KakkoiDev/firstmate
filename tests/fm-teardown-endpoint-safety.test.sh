@@ -1055,6 +1055,93 @@ SH
   pass "fm-teardown: the task a slot claim names tears down past a colliding record whose worker is gone"
 }
 
+# Only a POSITIVE reading of an absent endpoint lets the scan step past a
+# colliding record. These are the two shapes that read as absent from a local
+# tmux probe while saying nothing at all about a worker.
+test_a_colliding_record_this_session_cannot_probe_still_refuses() {
+  local dir id=successor-task other=remote-secondmate rc
+
+  # Exactly the record bin/fm-spawn.sh publishes for a remote secondmate: no
+  # backend= line, window=remote:<id>, and the real endpoint in remote_*.
+  dir=$(make_case slot-claimant-vs-remote-record)
+  mark_case_as_treehouse_pool "$dir"
+  # Real tmux fails a query against a session it does not have, and the only
+  # local session here is firstmate; window=remote:<id> names no local window.
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+prev=
+for arg in "$@"; do
+  if [ "$prev" = -t ]; then
+    case "$arg" in firstmate:*) ;; *) exit 1 ;; esac
+  fi
+  prev=$arg
+done
+printf 'tmux' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=remote:$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "tasktmp=" "model=" "effort=" "home=$dir/worktree" "projects=alpha" \
+    "remote_host=builder.invalid" "remote_root=/srv/firstmate" \
+    "remote_backend=herdr" "remote_herdr_session=fm-remote" \
+    "remote_target=fm-remote:%7"
+  claim_pool_slot "$dir" "$id"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "teardown reaped a slot a live remote secondmate home records: $(cat "$dir/stdout")"
+  assert_present "$dir/home/state/$other.meta" "the refusal removed the remote secondmate's record"
+  assert_present "$dir/worktree/sentinel" "the refusal reset the remote secondmate's home"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the remote secondmate's slot was returned to the pool: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "builder.invalid" \
+    "the refusal should name the remote host it cannot probe"
+
+  pass "fm-teardown: a colliding remote secondmate record is never read as gone"
+}
+
+# A colliding record with no window line at all: nothing was read about a
+# worker, which is not the same as reading that there is none.
+test_a_colliding_record_with_no_endpoint_still_refuses() {
+  local dir id=successor-task other=endpointless-task rc
+
+  dir=$(make_case slot-claimant-vs-endpointless-record)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "teardown reaped a slot a colliding record with no endpoint names: $(cat "$dir/stdout")"
+  assert_present "$dir/home/state/$other.meta" "the refusal removed the endpointless record"
+  assert_present "$dir/worktree/sentinel" "the refusal reset the slot's copy"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the slot was returned past a record with no endpoint: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "no endpoint at all" \
+    "the refusal should say the colliding record carries no endpoint"
+
+  pass "fm-teardown: a colliding record with no endpoint is never read as gone"
+}
+
 test_own_and_absent_slot_claims_still_tear_down() {
   local dir id=owned-task
 
@@ -1474,6 +1561,8 @@ test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_a_stale_record_tears_down_while_its_successor_keeps_the_slot
 test_a_claimed_slot_tears_down_past_a_colliding_record_whose_worker_is_gone
+test_a_colliding_record_this_session_cannot_probe_still_refuses
+test_a_colliding_record_with_no_endpoint_still_refuses
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
