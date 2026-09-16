@@ -15,9 +15,11 @@
 # Scope: the slots of every pool this home's own task records reach, judged
 # against the claim each slot carries (bin/fm-treehouse-slot-lib.sh) and against
 # the pool's own treehouse-state.json. Only a claim the pool still agrees with
-# gets a cleanup command: a slot the pool no longer records, a slot the pool
-# records a running process under, and a pool state that cannot be read are each
-# reported with no command. The pool file names no task - its per-slot fields are
+# gets a cleanup command. The claimant is asked first: a task whose worker is
+# still running holds its own slot, which is the normal state and is never
+# reported, whatever the pool says. Once that worker is gone, a slot the pool no
+# longer records, a slot the pool records a running process under, and a pool
+# state that cannot be read are each reported with no command. The pool file names no task - its per-slot fields are
 # name, path, created_at, owner_pid, and owner_started_at - so "this slot was
 # handed to a different task" is not a state this check can reach, and every
 # report says so rather than inferring it from the pid. A claim
@@ -168,6 +170,15 @@ fm_pool_leak_report() {  # <state-dir>
         continue
       fi
       [ -d "$claim_home" ] || continue
+      rc=0
+      fm_pool_leak_task_state "$claim_home" "$claim_id" || rc=$?
+      case "$rc" in
+        0) continue ;;
+        3)
+          echo "POOL_LEAK: $pool slot $name is held by task $claim_id, whose record names a backend whose tools this session cannot all resolve, so whether its worker is still running is unknown; resolve that backend's tools and re-check before tearing the task down"
+          continue
+          ;;
+      esac
       if [ "$pool_rc" -ne 0 ]; then
         echo "POOL_LEAK: $pool slot $name claims task $claim_id, but this pool's own $pool/treehouse-state.json could not be read, so nothing here can confirm the slot is still that task's; read that file and $slot by hand before returning anything"
         continue
@@ -181,21 +192,15 @@ fm_pool_leak_report() {  # <state-dir>
       slot_pid=${entry%%$'\t'*}
       slot_started=${entry#*$'\t'}
       if fm_pool_leak_slot_in_use "$slot_pid" "$slot_started"; then
-        echo "POOL_LEAK: $pool slot $name is claimed by task $claim_id and the pool records process $slot_pid running under it; the pool records no task identity, so whether that process is $claim_id's or a successor's cannot be told from it - no command is offered, inspect process $slot_pid and $slot by hand"
+        echo "POOL_LEAK: $pool slot $name is claimed by task $claim_id, whose worker is gone, but the pool records process $slot_pid running under that slot; the pool records no task identity, so whether that process is a successor's cannot be told from it - no command is offered, inspect process $slot_pid and $slot by hand"
         continue
       fi
-      rc=0
-      fm_pool_leak_task_state "$claim_home" "$claim_id" || rc=$?
       case "$rc" in
-        0) continue ;;
         1)
           echo "POOL_LEAK: $pool slot $name is still held by task $claim_id, whose worker is gone; return it with: FM_HOME=$claim_home $_FM_POOL_LEAK_LIB_DIR/fm-teardown.sh $claim_id"
           ;;
         2)
           echo "POOL_LEAK: $pool slot $name claims task $claim_id, but home $claim_home holds no record for it, so no cleanup command can return that slot; inspect $slot for unlanded work, then clear the claim by hand"
-          ;;
-        3)
-          echo "POOL_LEAK: $pool slot $name is held by task $claim_id, whose record names a backend whose tools this session cannot all resolve, so whether its worker is still running is unknown; resolve that backend's tools and re-check before tearing the task down"
           ;;
       esac
     done

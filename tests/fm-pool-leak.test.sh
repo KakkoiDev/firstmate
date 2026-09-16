@@ -8,6 +8,11 @@
 # named with the exact command that returns it - and nothing may be returned,
 # reset, or re-claimed by the check itself, because a held slot can still carry
 # work no branch holds.
+#
+# Every fixture here carries the full shape Treehouse actually writes, including
+# owner_pid and owner_started_at on a slot in use. A fixture that omits a field
+# the real producer always writes is not a simplification, it is a hole shaped
+# exactly like the bug.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -109,14 +114,23 @@ test_finished_task_still_holding_its_slot_is_named_with_its_cleanup_command() {
 }
 
 test_slot_held_by_a_live_worker_is_silent() {
-  local dir out id=live-task
+  local dir out live started id=live-task
   dir=$(make_pool_case held-by-live-worker)
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/pool/1/project" "project=$dir/project" "kind=ship"
   claim_slot "$dir" "$id" "$dir/home"
+  # The shape a slot in use is really in: the pool records the live process its
+  # `treehouse get` left holding the slot.
+  ( cd "$dir/pool/1/project" && exec sleep 30 ) &
+  live=$!
+  started=$(pid_started_at_ms "$live") \
+    || fail "this host cannot read a process start time, so the in-use fixture cannot be built"
+  pool_state "$dir" "$dir/pool/1/project" "$live" "$started"
 
   out=$(run_detect "$dir" "firstmate:fm-$id")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
   assert_not_contains "$out" "POOL_LEAK:" \
     "a slot whose worker is still running is not a leak"
   pass "pool leak: a slot whose worker is still running reports nothing"
@@ -274,7 +288,7 @@ test_pool_state_disagreeing_with_a_claim_never_prints_a_teardown_command() {
   pool_state "$dir" "$dir/pool/1/project" "$live" "$started"
 
   out=$(run_detect "$dir")
-  assert_contains "$out" "the pool records process $live running under it" \
+  assert_contains "$out" "the pool records process $live running under that slot" \
     "a slot with a live process must be reported as in use"
   assert_not_contains "$out" "fm-teardown.sh $id" \
     "a slot with a live process must carry no teardown command"
