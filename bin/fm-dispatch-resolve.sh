@@ -61,6 +61,10 @@
 #   provider, or OpenRouter without a model), which is actionable, never
 #   selected around.
 #
+# Usage record: every Jev call, answered or failed, appends one record of
+#   question type dispatch-rule through bin/fm-jev-lib.sh, which owns the
+#   transport and the record format; stdout and exit status are unaffected.
+#
 # Environment:
 #   FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL, TYPESAFE_API_KEY, and
 #   OPENROUTER_API_KEY are read from the environment or $FM_HOME/.env.
@@ -92,11 +96,11 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$SCRIPT_DIR/fm-brief-heading-lib.sh"
+# shellcheck source=bin/fm-jev-lib.sh
+. "$SCRIPT_DIR/fm-jev-lib.sh"
 
 CONFIDENCE_FLOOR=0.6
-TS_MODEL=jev-latest
-TS_BASE=https://api.typesafe.ai
-TS_TIMEOUT=5
+TS_MODEL=$FM_JEV_MODEL
 OR_BASE=https://openrouter.ai/api
 OR_TIMEOUT=10
 DEFAULT_WHEN="No listed rule applies to this task."
@@ -277,6 +281,15 @@ TASK_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
 SEND_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA" "$TASK_TEXT"; die "mktemp failed"; }
 trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT"' EXIT
 
+# One usage record per Jev call through the shared hook in bin/fm-jev-lib.sh;
+# `fm-jev.sh record-mine latest:dispatch-rule <rule>` labels it afterwards.
+record_call() {  # <ok|error>
+  local summary="Which dispatch rule fits this task brief"
+  [ -z "$PROJECT" ] || summary="$summary for project $PROJECT"
+  fm_jev_record_call "$DECISION_ID" dispatch-rule "$summary" \
+    "$(jq -c '.questions.rule.criteria | keys_unsorted' <<<"$REQUEST")" rule "$1" "$LAT_MS" "$RESP_FILE"
+}
+
 never_send_off() {
   echo "dispatch-resolve: off ($1; nothing sent)" >&2
   exit 0
@@ -352,24 +365,26 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
       }
     }')
   never_send_check
-  T0=$(fm_timing_now_ms)
+  DECISION_ID=$(fm_jev_new_id)
   if [ "$DISPATCH_PROVIDER" = openrouter ]; then
+    T0=$(fm_timing_now_ms)
     HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$OR_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
       -X POST "$OR_BASE/alpha/decisions" -H 'Content-Type: application/json' \
       -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$OPENROUTER_API_KEY_PRIVATE") \
       --data-binary @- 2>/dev/null) || HTTP=000
+    T1=$(fm_timing_now_ms)
+    LAT_MS=$(( T1 - T0 ))
+    if [ "$HTTP" != 200 ]; then
+      record_call error
+      emit_error "http $HTTP after ${LAT_MS} ms"
+    fi
   else
-    HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
-      -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
-      -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
-      --data-binary @- 2>/dev/null) || HTTP=000
-  fi
-  T1=$(fm_timing_now_ms)
-  LAT_MS=$(( T1 - T0 ))
-  if [ "$DISPATCH_PROVIDER" = openrouter ]; then
-    [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms"
-  else
-    [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
+    fm_jev_post "$REQUEST" "$RESP_FILE"
+    HTTP=$FM_JEV_HTTP LAT_MS=$FM_JEV_LAT_MS
+    if [ "$HTTP" != 200 ]; then
+      record_call error
+      emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
+    fi
   fi
 jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
@@ -384,7 +399,8 @@ jq -e --slurpfile rules "$RULES" '
       ((.usage | type) == "object" and
        (.usage.input_tokens | type) == "number" and
        (.usage.output_tokens | type) == "number"))' \
-  "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
+  "$RESP_FILE" >/dev/null 2>&1 || { record_call error; emit_error "response is not a rule Choice answer"; }
+record_call ok
 
 # ---- quota evidence: one quota-axi --json snapshot -----------------------------
 command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"

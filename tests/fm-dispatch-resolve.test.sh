@@ -327,6 +327,31 @@ FM_DISPATCH_PROVIDER=unknown OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF
 expect_code 2 "$code" "unknown provider is a configuration error"
 assert_contains "$err" 'unknown FM_DISPATCH_PROVIDER' "unknown provider is actionable"
 pass "OpenRouter ambiguous, malformed, HTTP, and missing-model paths are handled"
+# --- usage record: one dispatch-rule record per Jev call, none without one -------
+USAGE="$HOME_DIR/state/jev-usage.jsonl"
+rm -f "$USAGE"
+reset_log
+run code out err "$BRIEF" --project pager
+assert_absent "$USAGE" "absent key writes no usage record"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+assert_equals 1 "$(wc -l < "$USAGE" | tr -d ' ')" "one record per resolver call"
+assert_equals 'call|dispatch-rule|Which dispatch rule fits this task brief for project pager|rule_4|0.9|jev-1.13.0|812|60|ok' \
+  "$(jq -r '[.event, .question_type, .summary, .answer, .confidence, .model, .tokens_in, .tokens_out, .status] | join("|")' "$USAGE")" \
+  "the resolver records its rule answer"
+assert_equals '["rule_1","rule_2","rule_3","rule_4","default"]' "$(jq -c .options "$USAGE")" "the record lists every rule option"
+assert_not_contains "$(cat "$USAGE")" "$KEY" "the key is never recorded"
+assert_not_contains "$(cat "$USAGE")" 'off-by-one' "the brief is never recorded"
+reset_log
+TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: error' "a failed call keeps its error outcome"
+assert_equals 'error|' "$(tail -n1 "$USAGE" | jq -r '[.status, (.answer // "")] | join("|")')" "a failed call records an error"
+id=$(head -n1 "$USAGE" | jq -r .decision_id)
+assert_equals "jev: recorded $id mine=rule_2 jev=rule_4 overridden" \
+  "$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-jev.sh" record-mine "$id" rule_2)" "fm-jev.sh labels a resolver decision"
+rm -f "$USAGE"
+pass "usage record: every resolver Jev call appends one dispatch-rule record, and fm-jev.sh labels it"
 
 # --- never-send list: a match or a bad list withholds the request -------------
 NEVER_SEND="$HOME_DIR/config/dispatch-never-send"
