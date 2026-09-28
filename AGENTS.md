@@ -412,6 +412,7 @@ The skill owns the guarded fleet update and restart procedure; it never touches 
 
 Skill descriptions are the always-loaded trigger index; load each agent-only skill only at its stated trigger.
 Load `agent-skill-trigger-index` only when auditing or maintaining the complete trigger index.
+Load `jev-shadow` at session start and follow it at every decision point it lists; Jev's answer is logged beside firstmate's own and never decides.
 
 ## 14. Relay
 
