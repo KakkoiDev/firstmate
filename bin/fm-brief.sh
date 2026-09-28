@@ -575,6 +575,12 @@ $CREWMATE_PAUSE_INSTRUCTIONS
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+8. Never spawn sub-workers, subagents, background agents, teammates, or parallel review
+   ensembles, by any tool or skill. You do the work yourself in this one session. A skill that
+   fans out (for example an ensemble review) must be run single-pass or not at all. If a task
+   genuinely cannot be done without fanning out, append \`blocked [at=<epoch>]: {why}\` and stop.
+9. Never raise your own reasoning effort above the level firstmate launched you with, and never
+   use xhigh or max.
 
 $INBOX_SECTION
 
@@ -653,6 +659,12 @@ $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+8. Never spawn sub-workers, subagents, background agents, teammates, or parallel review
+   ensembles, by any tool or skill. You do the work yourself in this one session. A skill that
+   fans out (for example an ensemble review) must be run single-pass or not at all. If a task
+   genuinely cannot be done without fanning out, append \`blocked [at=<epoch>]: {why}\` and stop.
+9. Never raise your own reasoning effort above the level firstmate launched you with, and never
+   use xhigh or max.
 
 $INBOX_SECTION
 
