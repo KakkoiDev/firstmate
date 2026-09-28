@@ -63,7 +63,10 @@
 #
 # Usage record: every Jev call, answered or failed, appends one record of
 #   question type dispatch-rule through bin/fm-jev-lib.sh, which owns the
-#   transport and the record format; stdout and exit status are unaffected.
+#   transport, the record format, the local audit snapshot (the brief text
+#   sent is its context), and the Datadog decision event, sent detached with
+#   claude_status not-run because the resolver runs no duplicate Claude query;
+#   stdout and exit status are unaffected.
 #
 # Environment:
 #   FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL, TYPESAFE_API_KEY, and
@@ -98,6 +101,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-brief-heading-lib.sh"
 # shellcheck source=bin/fm-jev-lib.sh
 . "$SCRIPT_DIR/fm-jev-lib.sh"
+fm_jev_capture_dd
 
 CONFIDENCE_FLOOR=0.6
 TS_MODEL=$FM_JEV_MODEL
@@ -284,10 +288,18 @@ trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT"' EXIT
 # One usage record per Jev call through the shared hook in bin/fm-jev-lib.sh;
 # `fm-jev.sh record-mine latest:dispatch-rule <rule>` labels it afterwards.
 record_call() {  # <ok|error>
-  local summary="Which dispatch rule fits this task brief"
+  local summary="Which dispatch rule fits this task brief" sha
   [ -z "$PROJECT" ] || summary="$summary for project $PROJECT"
+  sha=$(fm_jev_sha256 "$TASK_TEXT")
   fm_jev_record_call "$DECISION_ID" dispatch-rule "$summary" \
-    "$(jq -c '.questions.rule.criteria | keys_unsorted' <<<"$REQUEST")" rule "$1" "$LAT_MS" "$RESP_FILE"
+    "$(jq -c '.questions.rule.criteria | keys_unsorted' <<<"$REQUEST")" rule "$1" "$LAT_MS" "$RESP_FILE" "$sha"
+  fm_jev_write_audit "$DECISION_ID" dispatch-rule "$(jq -r '.questions.rule.instructions' <<<"$REQUEST")" \
+    "$(jq -c '.questions.rule.criteria' <<<"$REQUEST")" "$TASK_TEXT" "$sha" "$REQUEST" "$RESP_FILE"
+  fm_jev_detach send_decision_event
+}
+# shellcheck disable=SC2329 # Invoked through fm_jev_detach.
+send_decision_event() {
+  fm_jev_dd_send "$(fm_jev_decision_event "$(fm_jev_call_record "$DECISION_ID")" not-run)"
 }
 
 never_send_off() {

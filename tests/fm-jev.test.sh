@@ -4,8 +4,10 @@
 # Drives the public argv and environment interface with a fake curl on PATH
 # that records argv, the request body it read from stdin, the header it read
 # from file descriptor 3, and whether a key reached its environment, then
-# answers with a canned typesafe.ai response. No case touches the network, and
-# the absent-key case proves the tool makes no call and writes no record.
+# answers with a canned typesafe.ai response; a Datadog intake URL is recorded
+# separately and answered 202. A fake claude stands in for the detached
+# duplicate query. No case touches the network, and the absent-key case
+# proves the tool makes no call and writes no record.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -20,13 +22,16 @@ LOG="$TMP_ROOT/log"
 RESPONSE="$TMP_ROOT/response.json"
 CONTEXT="$TMP_ROOT/context.md"
 USAGE="$HOME_DIR/state/jev-usage.jsonl"
+SIDELOG="$HOME_DIR/state/jev-duplicate.log"
+AUDIT_DIR="$HOME_DIR/state/jev-audit"
 BASE_PATH=$PATH
 KEY='test-key-4c7e21aa-never-on-argv'
+DD_KEY='dd-key-91b3f0c2-never-on-argv'
 mkdir -p "$HOME_DIR" "$LOG" "$NO_CURL_BIN"
 for command_name in awk bash cat date dirname jq mkdir mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
 done
-unset TYPESAFE_API_KEY
+unset TYPESAFE_API_KEY DD_API_KEY DD_SITE
 
 printf '%s\n' 'Worker pane shows the same test failing for the third time.' 'CONTEXT-ONLY-MARKER' > "$CONTEXT"
 
@@ -42,6 +47,21 @@ JSON
 cat > "$FAKEBIN/curl" <<'SH'
 #!/usr/bin/env bash
 set -u
+case " $* " in
+  *' https://http-intake.logs.'*)
+    mkdir -p "${FAKE_CURL_LOG:?}"
+    if [ -n "${TYPESAFE_API_KEY+x}${TYPESAFE_API_KEY_PRIVATE+x}${DD_API_KEY+x}${DD_API_KEY_PRIVATE+x}" ]; then
+      printf 'dd:secret-present\n' >> "$FAKE_CURL_LOG/dd-env"
+    else
+      printf 'dd:clean\n' >> "$FAKE_CURL_LOG/dd-env"
+    fi
+    printf '%s\n' "$@" >> "$FAKE_CURL_LOG/dd-argv"
+    { cat; printf '\n'; } >> "$FAKE_CURL_LOG/dd-body"
+    cat /dev/fd/3 >> "$FAKE_CURL_LOG/dd-header" 2>/dev/null || printf 'fd3 unreadable\n' >> "$FAKE_CURL_LOG/dd-header"
+    printf '%s' "${FAKE_DD_HTTP:-202}"
+    exit 0
+    ;;
+esac
 if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
   printf 'curl:secret-present\n' >> "${FAKE_CURL_LOG:?}/child-env"
 else
@@ -64,12 +84,62 @@ printf '%s' "${FAKE_CURL_HTTP:-200}"
 SH
 chmod +x "$FAKEBIN/curl"
 
+# Fake claude: records argv, stdin, working directory, and whether a key
+# reached its environment, then answers like `claude -p --output-format json`.
+cat > "$FAKEBIN/claude" <<'SH'
+#!/usr/bin/env bash
+set -u
+L=${FAKE_CURL_LOG:?}
+mkdir -p "$L"
+printf '%s\n' "$@" > "$L/claude-argv"
+pwd -P > "$L/claude-pwd"
+find . -mindepth 1 | wc -l | tr -d ' ' > "$L/claude-dir-count"
+if [ -n "${TYPESAFE_API_KEY+x}${TYPESAFE_API_KEY_PRIVATE+x}${DD_API_KEY+x}${DD_API_KEY_PRIVATE+x}" ]; then
+  echo secret-present > "$L/claude-env"
+else
+  echo clean > "$L/claude-env"
+fi
+cat > "$L/claude-stdin"
+case "${FAKE_CLAUDE_MODE:-ok}" in
+  fail) echo 'claude failed' >&2; exit 1 ;;
+  sleep) sleep 4 ;;
+esac
+jq -cn --arg r "${FAKE_CLAUDE_ANSWER:-looping}" '
+  {type: "result", subtype: "success", is_error: false, result: $r,
+   duration_ms: 3882, duration_api_ms: 3832, total_cost_usd: 0.004504,
+   usage: {input_tokens: 2, cache_creation_input_tokens: 552, cache_read_input_tokens: 0, output_tokens: 5},
+   modelUsage: {}}'
+SH
+chmod +x "$FAKEBIN/claude"
+
 export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE"
 
 reset() {
   rm -rf "$LOG" "$HOME_DIR/state"
   mkdir -p "$LOG"
 }
+
+# settled <n>: n detached duplicate queries have finished, each leaving either
+# a duplicate record or a side-log line.
+settled() {
+  local d=0 s=0
+  [ -f "$USAGE" ] && d=$(grep -c '"event":"duplicate"' "$USAGE")
+  [ -f "$SIDELOG" ] && s=$(grep -c . "$SIDELOG")
+  [ $((d + s)) -ge "$1" ]
+}
+# lines_at_least <file> <n>
+lines_at_least() { [ -f "$1" ] && [ "$(grep -c . "$1")" -ge "$2" ]; }
+# wait_for <description> <command...>: polls for up to ten seconds.
+wait_for() {
+  local desc=$1 _
+  shift
+  for _ in $(seq 1 100); do
+    "$@" && return 0
+    sleep 0.1
+  done
+  fail "$desc (timed out)"
+}
+calls() { jq -c 'select(.event == "call")' "$USAGE"; }
 
 # run <exit-var> <out-var> <err-var> [args...]
 run() {
@@ -127,10 +197,13 @@ assert_contains "$argv" $'--max-time\n5' "the fixed five-second timeout"
 assert_contains "$argv" '@/dev/fd/3' "the header is read from a file descriptor"
 assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" ".env key reaches curl on the fd header"
 assert_equals 'curl:clean' "$(cat "$LOG/child-env")" "the key is absent from the curl environment"
-assert_equals 1 "$(wc -l < "$USAGE" | tr -d ' ')" "one record per call"
-record=$(cat "$USAGE")
-assert_equals '["answer","confidence","decision_id","event","latency_ms","model","options","probabilities","question_type","status","summary","tokens_in","tokens_out","ts","v"]' \
+wait_for "the duplicate query settles" settled 1
+assert_equals 1 "$(calls | wc -l | tr -d ' ')" "one call record per call"
+record=$(calls)
+assert_equals '["answer","confidence","context_sha256","decision_id","event","jev_cost_usd","latency_ms","model","options","probabilities","question_type","status","summary","tokens_in","tokens_out","ts","v"]' \
   "$(jq -c 'keys' <<<"$record")" "record carries exactly the documented fields"
+assert_equals true "$(jq '(.jev_cost_usd - 0.00001764 | fabs) < 1e-15' <<<"$record")" "Jev cost is 420 input tokens at \$42 per billion"
+assert_equals "$(shasum -a 256 "$CONTEXT" | awk '{print $1}')" "$(jq -r .context_sha256 <<<"$record")" "record points at the context by its sha256"
 assert_equals "call|$id|stuck-worker|What is the stuck worker doing|looping|0.9|jev-1.13.0|420|55|ok" \
   "$(jq -r '[.event, .decision_id, .question_type, .summary, .answer, .confidence, .model, .tokens_in, .tokens_out, .status] | join("|")' <<<"$record")" \
   "record values"
@@ -142,12 +215,67 @@ assert_not_contains "$record" 'CONTEXT-ONLY-MARKER' "the context is never record
 assert_not_contains "$record" 'Which state best describes' "the question text is never recorded"
 pass "answered: typed output, one Choice request, key on the fd header only, one summary record"
 
+# --- duplicate Claude query: isolated, joined by decision id ------------------------
+duplicate=$(jq -c 'select(.event == "duplicate")' "$USAGE")
+assert_equals '["claude_answer","claude_cost_usd","claude_latency_ms","claude_model","claude_tokens_in","claude_tokens_out","claude_wall_ms","decision_id","event","status","ts","v"]' \
+  "$(jq -c 'keys' <<<"$duplicate")" "duplicate record carries exactly the documented fields"
+assert_equals "$id|claude-opus-5-5|looping|3832|0.004504|554|5|ok" \
+  "$(jq -r '[.decision_id, .claude_model, .claude_answer, .claude_latency_ms, .claude_cost_usd, .claude_tokens_in, .claude_tokens_out, .status] | join("|")' <<<"$duplicate")" \
+  "duplicate record values: API latency, API-equivalent cost, input plus cache tokens"
+[ "$(jq -r '.claude_wall_ms | type' <<<"$duplicate")" = number ] || fail "wall latency is a number"
+claude_argv=$(cat "$LOG/claude-argv")
+for flag in -p --safe-mode --strict-mcp-config --no-session-persistence --exclude-dynamic-system-prompt-sections; do
+  assert_contains "$claude_argv" "$flag" "claude runs with $flag"
+done
+assert_contains "$claude_argv" $'--setting-sources\n\n' "claude loads no setting sources"
+assert_contains "$claude_argv" $'--tools\n\n' "claude has no tools"
+assert_contains "$claude_argv" $'--model\nclaude-opus-5-5' "claude uses the pinned model"
+assert_contains "$claude_argv" $'--output-format\njson' "claude answers in JSON"
+assert_not_contains "$claude_argv" 'CONTEXT-ONLY-MARKER' "the context never reaches claude argv"
+assert_equals 0 "$(cat "$LOG/claude-dir-count")" "claude runs in an empty directory"
+assert_not_equals "$(cd "$ROOT" && pwd -P)" "$(cat "$LOG/claude-pwd")" "claude never runs in the repository"
+assert_equals clean "$(cat "$LOG/claude-env")" "no key reaches the claude environment"
+claude_stdin=$(cat "$LOG/claude-stdin")
+assert_contains "$claude_stdin" 'Which state best describes the worker in the context?' "claude gets the same question"
+assert_contains "$claude_stdin" '- looping: Repeating the same failed step.' "claude gets the same options"
+assert_contains "$claude_stdin" 'CONTEXT-ONLY-MARKER' "claude gets the same context"
+assert_not_contains "$claude_stdin" "$KEY" "the key never reaches claude"
+pass "duplicate query: isolated claude run, one joined duplicate record"
+
+# --- audit snapshot: exact question, context, prompts, and raw answers --------------
+audit="$AUDIT_DIR/$id.json"
+assert_present "$audit" "the audit snapshot is written"
+has_claude_response() { jq -e 'has("claude_response")' "$audit" >/dev/null 2>&1; }
+wait_for "claude's raw answer lands in the snapshot" has_claude_response
+assert_equals '["claude_prompt","claude_response","claude_system_prompt","context","context_sha256","decision_id","jev_request","jev_response","options","question","question_type","ts","v"]' \
+  "$(jq -c 'keys' "$audit")" "the snapshot carries exactly the documented fields"
+assert_equals "$(cat "$CONTEXT")" "$(jq -r .context "$audit")" "the snapshot holds the exact context"
+assert_equals "$(jq -j .context "$audit" | shasum -a 256 | awk '{print $1}')" "$(jq -r .context_sha256 "$audit")" "the snapshot sha256 matches its context bytes"
+assert_equals "$(jq -r .context_sha256 <<<"$record")" "$(jq -r .context_sha256 "$audit")" "record and snapshot share the sha256"
+assert_equals "$(jq -cS . "$LOG/body")" "$(jq -cS .jev_request "$audit")" "the snapshot holds the exact Jev request"
+assert_equals "$(cat "$RESPONSE")" "$(jq -r .jev_response "$audit")" "the snapshot holds the raw Jev response"
+assert_equals "$claude_stdin" "$(jq -r .claude_prompt "$audit")" "the snapshot holds the exact claude prompt"
+assert_equals looping "$(jq -r '.claude_response | fromjson | .result' "$audit")" "the snapshot holds the raw claude answer"
+assert_equals 'Which state best describes the worker in the context?' "$(jq -r .question "$audit")" "the snapshot holds the question"
+assert_equals '{"working":"Making progress.","looping":"Repeating the same failed step.","confused":"confused"}' \
+  "$(jq -c .options "$audit")" "the snapshot holds the option meanings"
+grep -rqF -- "$KEY" "$AUDIT_DIR" && fail "the key is never in the audit snapshot"
+assert_not_contains "$(cat "$audit")" 'Authorization' "no auth header is in the audit snapshot"
+run code out err show "$id"
+expect_code 0 "$code" "show exits 0"
+assert_equals "$(jq -cS . "$audit")" "$(jq -cS .audit <<<"$out")" "show prints the audit snapshot"
+assert_equals "looping|looping|ok" "$(jq -r '.record | [.answer, .claude_answer, .claude_status] | join("|")' <<<"$out")" "show joins the duplicate beside the call"
+pass "audit snapshot: exact context and prompts, matching sha256, no key, printed by show"
+
 reset
 TYPESAFE_API_KEY=$KEY run code out err ask --type deploy-check --summary 'Is the deploy safe' --question 'Is it safe?' --yes-no
 assert_equals '{"yes":"Yes.","no":"No."}' "$(jq -c .questions.q.criteria "$LOG/body")" "--yes-no is the yes/no Choice"
 assert_equals '' "$(jq -r .state.context "$LOG/body")" "no context file sends an empty context"
 assert_equals '' "$out" "a response over other options is not an answer"
 assert_contains "$err" 'jev: error (response is not a Choice answer over the options)' "the mismatch is named"
+wait_for "the yes/no duplicate settles" settled 1
+assert_equals 'off-option|' "$(jq -r 'select(.event == "duplicate") | [.status, (.claude_answer // "")] | join("|")' "$USAGE")" \
+  "a claude reply that is not an option id is recorded as off-option with no answer"
 pass "--yes-no asks the yes/no Choice and validates the answer against it"
 
 # --- failures step aside: exit 0, nothing on stdout, error record ----------------
@@ -159,14 +287,16 @@ for failure in 'FAKE_CURL_FAIL=1|http 000' 'FAKE_CURL_HTTP=503|http 503'; do
   expect_code 0 "$?" "$env_assign exits 0"
   assert_equals '' "$(cat "$TMP_ROOT/out")" "$env_assign prints nothing on stdout"
   assert_contains "$(cat "$TMP_ROOT/stderr")" "jev: error (${failure#*|} after" "$env_assign is one stderr line"
-  assert_equals 'error||' "$(jq -r '[.status, (.answer // ""), (.model // "")] | join("|")' "$USAGE")" "$env_assign records an error with no answer"
+  assert_equals 'error||' "$(calls | jq -r '[.status, (.answer // ""), (.model // "")] | join("|")')" "$env_assign records an error with no answer"
+  wait_for "$env_assign duplicate settles" settled 1
 done
 reset
 printf '%s\n' '{"model":"jev-1.13.0","answers":{"q":{"choice":"looping","confidence":1.4}}}' > "$RESPONSE"
 TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}"
 expect_code 0 "$code" "malformed answer exits 0"
 assert_equals '' "$out" "malformed answer prints nothing on stdout"
-assert_equals 'error' "$(jq -r .status "$USAGE")" "malformed answer records an error"
+assert_equals 'error' "$(calls | jq -r .status)" "malformed answer records an error"
+wait_for "malformed-answer duplicate settles" settled 1
 reset
 out=$(PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" "$TOOL" "${ASK[@]}" 2> "$TMP_ROOT/stderr")
 expect_code 0 "$?" "missing curl exits 0"
@@ -196,6 +326,7 @@ id1=$(sed -n 's/^  decision_id: //p' <<<"$out")
 TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}"
 id2=$(sed -n 's/^  decision_id: //p' <<<"$out")
 assert_not_equals "$id1" "$id2" "each call gets its own decision id"
+wait_for "both duplicates settle" settled 2
 rm -f "$LOG/argv"
 run code out err record-mine "$id1" looping
 expect_code 0 "$code" "record-mine exits 0"
@@ -211,13 +342,111 @@ expect_code 0 "$code" "record-outcome exits 0"
 assert_equals "jev: recorded outcome for $id1 final=confused jev=looping overridden" "$out" "an outcome's final choice overrides"
 run code out err show "$id1"
 assert_equals 'looping|looping|captain says it was confused|confused|overridden' \
-  "$(jq -r '[.answer, .mine, .outcome, .final, .decision] | join("|")' <<<"$out")" "show joins call, mine, and outcome"
+  "$(jq -r '.record | [.answer, .mine, .outcome, .final, .decision] | join("|")' <<<"$out")" "show joins call, mine, and outcome"
 run code out err show "$id2"
 assert_equals 'looping|confused||confused|overridden' \
-  "$(jq -r '[.answer, .mine, (.outcome // ""), .final, .decision] | join("|")' <<<"$out")" "without an outcome the final choice is firstmate's"
-assert_equals 'call call mine mine outcome' "$(jq -r .event "$USAGE" | tr '\n' ' ' | sed 's/ $//')" "the log stays append-only"
+  "$(jq -r '.record | [.answer, .mine, (.outcome // ""), .final, .decision] | join("|")' <<<"$out")" "without an outcome the final choice is firstmate's"
+assert_equals 'call call mine mine outcome' "$(jq -r 'select(.event != "duplicate") | .event' "$USAGE" | tr '\n' ' ' | sed 's/ $//')" "the log stays append-only"
+assert_equals 2 "$(jq -r 'select(.event == "duplicate") | .event' "$USAGE" | wc -l | tr -d ' ')" "one duplicate record per call"
+assert_absent "$LOG/dd-body" "no Datadog key sends nothing"
 assert_absent "$LOG/argv" "record subcommands never call curl"
 pass "record-mine and record-outcome append beside the call and join on its decision id"
+
+# --- Datadog: one combined decision event, label events, key on fd 3 only --------
+reset
+write_response "$RESPONSE" looping 0.9
+TYPESAFE_API_KEY=$KEY DD_API_KEY=$DD_KEY DD_SITE=datadoghq.eu run code out err "${ASK[@]}"
+expect_code 0 "$code" "ask with Datadog exits 0"
+id=$(sed -n 's/^  decision_id: //p' <<<"$out")
+wait_for "the combined decision event is sent" lines_at_least "$LOG/dd-body" 1
+event=$(jq -c '.[0]' "$LOG/dd-body")
+assert_equals 1 "$(jq -s 'length' "$LOG/dd-body")" "one Datadog request per decision"
+assert_equals 1 "$(head -n1 "$LOG/dd-body" | jq 'length')" "the request holds one event"
+assert_equals '["claude_answer","claude_cost_usd","claude_jev_agree","claude_latency_ms","claude_model","claude_status","claude_tokens_in","claude_tokens_out","claude_wall_ms","context_sha256","ddsource","ddtags","decision_id","event","firstmate_answer","jev_answer","jev_confidence","jev_cost_usd","jev_latency_ms","jev_model","jev_status","jev_tokens_in","jev_tokens_out","message","question_type","service","summary"]' \
+  "$(jq -c 'keys' <<<"$event")" "the decision event carries exactly the documented fields"
+assert_equals "decision|$id|firstmate-jev|stuck-worker|What is the stuck worker doing|looping|jev-1.13.0|ok|looping|claude-opus-5-5|ok|true" \
+  "$(jq -r '[.event, .decision_id, .service, .question_type, .summary, .jev_answer, .jev_model, .jev_status, .claude_answer, .claude_model, .claude_status, .claude_jev_agree] | map(tostring) | join("|")' <<<"$event")" \
+  "the decision event joins Jev and the duplicate query"
+assert_equals 'number number number number number number number number number boolean null' \
+  "$(jq -r '[.jev_confidence, .jev_latency_ms, .jev_tokens_in, .jev_cost_usd, .claude_latency_ms, .claude_wall_ms, .claude_tokens_in, .claude_tokens_out, .claude_cost_usd, .claude_jev_agree, .firstmate_answer] | map(type) | join(" ")' <<<"$event")" \
+  "numeric fields stay numeric"
+assert_equals '0.9|420|3832|554|5|0.004504' \
+  "$(jq -r '[.jev_confidence, .jev_tokens_in, .claude_latency_ms, .claude_tokens_in, .claude_tokens_out, .claude_cost_usd] | map(tostring) | join("|")' <<<"$event")" \
+  "the decision event values"
+assert_equals "$(jq -r .context_sha256 "$AUDIT_DIR/$id.json")" "$(jq -r .context_sha256 <<<"$event")" "the event points at the audit snapshot by sha256"
+dd_body=$(cat "$LOG/dd-body")
+for secret_text in 'CONTEXT-ONLY-MARKER' 'Which state best describes' 'Repeating the same failed step' 'probabilities' "$KEY" "$DD_KEY"; do
+  assert_not_contains "$dd_body" "$secret_text" "Datadog never gets: $secret_text"
+done
+assert_contains "$(cat "$LOG/dd-argv")" 'https://http-intake.logs.datadoghq.eu/api/v2/logs' "DD_SITE picks the intake host"
+assert_not_contains "$(cat "$LOG/dd-argv")" "$DD_KEY" "the Datadog key never appears on curl argv"
+assert_equals "DD-API-KEY: $DD_KEY" "$(cat "$LOG/dd-header")" "the Datadog key reaches curl on the fd header"
+assert_equals 'dd:clean' "$(cat "$LOG/dd-env")" "no key is in the Datadog curl environment"
+assert_equals clean "$(cat "$LOG/claude-env")" "the Datadog key never reaches claude"
+pass "Datadog decision event: one combined event after the duplicate, numeric fields, no text, key on fd 3"
+
+rm -f "$LOG/dd-body" "$LOG/dd-header"
+printf '%s\n' "DD_API_KEY=$DD_KEY" > "$HOME_DIR/.env"
+run code out err record-mine "$id" confused
+rm -f "$HOME_DIR/.env"
+expect_code 0 "$code" "record-mine with Datadog exits 0"
+assert_equals '' "$err" "a sent label event is silent"
+label=$(jq -c '.[0]' "$LOG/dd-body")
+assert_equals '["ddsource","ddtags","decision_id","event","final_choice","firstmate_answer","followed_or_overridden","message","service"]' \
+  "$(jq -c 'keys' <<<"$label")" "the label event carries exactly the documented fields"
+assert_equals "label|$id|confused|overridden|confused" \
+  "$(jq -r '[.event, .decision_id, .firstmate_answer, .followed_or_overridden, .final_choice] | join("|")' <<<"$label")" \
+  "record-mine sends the label with the final choice"
+assert_contains "$(cat "$LOG/dd-argv")" 'https://http-intake.logs.datadoghq.com/api/v2/logs' "DD_SITE defaults to datadoghq.com"
+assert_equals "DD-API-KEY: $DD_KEY" "$(cat "$LOG/dd-header")" "an .env Datadog key reaches curl on the fd header"
+rm -f "$LOG/dd-body"
+DD_API_KEY=$DD_KEY run code out err record-outcome "$id" 'captain agreed with Jev' --final looping
+assert_equals "label|$id|confused|followed|looping" \
+  "$(jq -r '.[0] | [.event, .decision_id, .firstmate_answer, .followed_or_overridden, .final_choice] | join("|")' "$LOG/dd-body")" \
+  "record-outcome sends the label with the overriding final choice"
+DD_API_KEY=$DD_KEY FAKE_DD_HTTP=500 run code out err record-mine "$id" looping
+expect_code 0 "$code" "a Datadog failure never fails the record"
+assert_equals 'jev: datadog log not sent (http 500)' "$err" "a Datadog failure is one stderr line"
+assert_equals looping "$(jq -r 'select(.event == "mine") | .mine' "$USAGE" | tail -n1)" "the record lands despite the Datadog failure"
+rm -f "$LOG/dd-body"
+DD_API_KEY=$DD_KEY DD_SITE='evil.example/x?' run code out err record-mine "$id" looping
+assert_equals 'jev: datadog log not sent (DD_SITE is not a Datadog site name)' "$err" "a malformed DD_SITE is refused"
+assert_absent "$LOG/dd-body" "a malformed DD_SITE sends nothing"
+pass "Datadog label events: record-mine and record-outcome, .env key, failures step aside"
+
+# --- Claude failure: no duplicate record, null Claude fields ------------------------
+reset
+TYPESAFE_API_KEY=$KEY DD_API_KEY=$DD_KEY FAKE_CLAUDE_MODE=fail run code out err "${ASK[@]}"
+expect_code 0 "$code" "a claude failure never fails ask"
+assert_contains "$out" '  answer: looping' "a claude failure leaves the Jev answer intact"
+assert_equals '' "$err" "a claude failure writes nothing to the caller's stderr"
+id=$(sed -n 's/^  decision_id: //p' <<<"$out")
+wait_for "the decision event is sent after the claude failure" lines_at_least "$LOG/dd-body" 1
+assert_equals 0 "$(jq -r 'select(.event == "duplicate") | .event' "$USAGE" | wc -l | tr -d ' ')" "a claude failure writes no duplicate record"
+assert_contains "$(cat "$SIDELOG")" "$id: claude exited non-zero" "a claude failure is one side-log line"
+event=$(jq -c '.[0]' "$LOG/dd-body")
+assert_equals 'looping|error|null|null|null|null|null|null|null|null' \
+  "$(jq -r '[.jev_answer, .claude_status, .claude_answer, .claude_model, .claude_latency_ms, .claude_wall_ms, .claude_tokens_in, .claude_tokens_out, .claude_cost_usd, .claude_jev_agree] | map(tostring) | join("|")' <<<"$event")" \
+  "a claude failure sends null Claude fields and a null agreement"
+reset
+TYPESAFE_API_KEY=$KEY DD_API_KEY=$DD_KEY FAKE_CURL_HTTP=503 run code out err "${ASK[@]}"
+wait_for "the decision event is sent after a Jev failure" lines_at_least "$LOG/dd-body" 1
+assert_equals 'error|null|looping|null' \
+  "$(jq -r '.[0] | [.jev_status, .jev_answer, .claude_answer, .claude_jev_agree] | map(tostring) | join("|")' "$LOG/dd-body")" \
+  "a Jev failure still sends one event with a null agreement"
+pass "claude failure: exit 0, no duplicate record, side-log line, null Claude fields in the event"
+
+# --- the duplicate never blocks the caller ------------------------------------------
+reset
+start=$SECONDS
+TYPESAFE_API_KEY=$KEY FAKE_CLAUDE_MODE=sleep run code out err "${ASK[@]}"
+elapsed=$((SECONDS - start))
+expect_code 0 "$code" "ask with a slow claude exits 0"
+assert_contains "$out" '  answer: looping' "ask prints its answer before claude returns"
+[ "$elapsed" -le 2 ] || fail "ask returned before the four-second claude finished (took ${elapsed}s)"
+assert_equals 0 "$(jq -r 'select(.event == "duplicate") | .event' "$USAGE" | wc -l | tr -d ' ')" "the duplicate has not landed when ask returns"
+wait_for "the slow duplicate settles" settled 1
+pass "the duplicate query runs detached: a captured ask returns before claude does"
 
 # --- report math on a fixture log -----------------------------------------------
 reset
@@ -227,9 +456,17 @@ fixture_call() {  # <id> <type> <ts> <status> <answer> <confidence> <latency> <t
     {v: 1, event: "call", ts: $ts, decision_id: $id, question_type: $t, summary: "s",
      options: ["a", "b", "working", "looping", "confused"],
      answer: (if $a == "" then null else $a end), confidence: $c, probabilities: null, model: "jev-1.13.0",
-     latency_ms: $l, tokens_in: $ti, tokens_out: $to, status: $s}'
+     latency_ms: $l, tokens_in: $ti, tokens_out: $to,
+     jev_cost_usd: (if $ti == null then null else $ti * 42 / 1e9 end), status: $s}'
 }
 fixture_mine() { jq -cn --arg id "$1" --arg m "$2" '{v: 1, event: "mine", ts: "2026-09-26T00:00:00Z", decision_id: $id, mine: $m}'; }
+fixture_dup() {  # <id> <answer or empty> <wall> <api> <cost>
+  jq -cn --arg id "$1" --arg a "$2" --argjson w "$3" --argjson l "$4" --argjson c "$5" '
+    {v: 1, event: "duplicate", ts: "2026-09-26T00:00:00Z", decision_id: $id, claude_model: "claude-opus-5-5",
+     claude_answer: (if $a == "" then null else $a end), claude_wall_ms: $w, claude_latency_ms: $l,
+     claude_cost_usd: $c, claude_tokens_in: 554, claude_tokens_out: 5,
+     status: (if $a == "" then "off-option" else "ok" end)}'
+}
 {
   fixture_call d1 project-match 2026-09-21T00:00:00Z ok a 0.9 100 10 2
   fixture_call d2 project-match 2026-09-22T00:00:00Z ok a 0.8 200 20 3
@@ -244,6 +481,10 @@ fixture_mine() { jq -cn --arg id "$1" --arg m "$2" '{v: 1, event: "mine", ts: "2
   fixture_mine d3 b
   fixture_mine e1 working
   fixture_mine e2 confused
+  fixture_dup d1 a 3000 2800 0.004
+  fixture_dup d2 b 4000 3900 0.002
+  fixture_dup d3 '' 5000 4500 0.001
+  fixture_dup e2 looping 3500 3400 0.003
   printf '%s\n' '{"v":1,"event":"outcome","ts":"2026-09-27T00:00:00Z","decision_id":"d2","outcome":"captain picked b","final":"b"}'
 } > "$USAGE"
 run code out err report --since 2026-09-20
@@ -258,8 +499,13 @@ project-match
   false-confident: 1
   disagreements: 1   outcome-labelled: 1
   final choice: followed 2   overridden 1
-  latency_ms p50: 300   p95: 5000
+  jev latency_ms p50: 300   p95: 5000
+  claude: duplicates 3   answered 2
+  claude wall_ms p50: 4000   p95: 5000   api_ms p50: 3900   p95: 4500
+  jev = claude: 1/2 (50%)   claude = firstmate: 2/2 (100%)
+  three-way all agree: 1/2 (50%)
   tokens: in 100   out 14
+  cost: jev total $0.00000420 per decision $0.00000105   claude (API-equivalent) total $0.00700000 per decision $0.00233333
 stuck-worker
   calls: 1   answered: 1   step-aside: 0
   agreement with firstmate: 0/1 (0%)
@@ -268,8 +514,13 @@ stuck-worker
   false-confident: 1
   disagreements: 1   outcome-labelled: 0
   final choice: followed 0   overridden 1
-  latency_ms p50: 60   p95: 60
+  jev latency_ms p50: 60   p95: 60
+  claude: duplicates 1   answered 1
+  claude wall_ms p50: 3500   p95: 3500   api_ms p50: 3400   p95: 3400
+  jev = claude: 1/1 (100%)   claude = firstmate: 0/1 (0%)
+  three-way all agree: 0/1 (0%)
   tokens: in 2   out 2
+  cost: jev total $0.00000008 per decision $0.00000008   claude (API-equivalent) total $0.00300000 per decision $0.00300000
 all types
   calls: 6   answered: 5   step-aside: 1
   agreement with firstmate: 2/4 (50%)
@@ -278,8 +529,13 @@ all types
   false-confident: 2
   disagreements: 2   outcome-labelled: 1
   final choice: followed 2   overridden 2
-  latency_ms p50: 200   p95: 5000
+  jev latency_ms p50: 200   p95: 5000
+  claude: duplicates 4   answered 3
+  claude wall_ms p50: 3500   p95: 5000   api_ms p50: 3400   p95: 4500
+  jev = claude: 2/3 (66.7%)   claude = firstmate: 2/3 (66.7%)
+  three-way all agree: 1/3 (33.3%)
   tokens: in 102   out 16
+  cost: jev total $0.00000428 per decision $0.00000086   claude (API-equivalent) total $0.01000000 per decision $0.00250000
 TXT
 )
 assert_equals "$expected" "$out" "report math over the fixture since the date"
@@ -288,7 +544,24 @@ assert_contains "$out" 'jev report (since all records, floor 0.85)' "no --since 
 assert_contains "$out" $'stuck-worker\n  calls: 2   answered: 2   step-aside: 0\n  agreement with firstmate: 1/2 (50%)\n  confident (>= 0.85): 1/1 (100%) agree   below floor: 0/1 (0%) agree' "--floor moves the confident split"
 run code out err report --since yesterday
 expect_code 2 "$code" "a malformed --since is a usage error"
+pass "report: per-type agreement, three-way agreement, latency and cost for Jev and Claude, outcomes, tokens"
+
+run code out err report --since 2026-09-20 --audit-sample 5
+expect_code 0 "$code" "report --audit-sample exits 0"
+sample=$(sed -n '/^audit sample:/,$p' <<<"$out")
+assert_equals 'audit sample: 2 of 2 jev = claude agreements, random' "$(sed -n 1p <<<"$sample")" "the sample names its size"
+assert_equals "  d1 project-match jev=a claude=a firstmate=a audit=$AUDIT_DIR/d1.json"$'\n'"  e2 stuck-worker jev=looping claude=looping firstmate=confused audit=$AUDIT_DIR/e2.json" \
+  "$(sed -n 2,3p <<<"$sample" | sort)" "the sample lists every agreement when n covers them"
+assert_equals "jev / claude disagreements: 1"$'\n'"  d2 project-match jev=a claude=b firstmate=b audit=$AUDIT_DIR/d2.json" \
+  "$(sed -n '4,$p' <<<"$sample")" "every disagreement follows the sample"
+run code out err report --since 2026-09-20 --audit-sample 1
+sample=$(sed -n '/^audit sample:/,$p' <<<"$out")
+assert_equals 'audit sample: 1 of 2 jev = claude agreements, random' "$(sed -n 1p <<<"$sample")" "n caps the sample"
+assert_contains "$(sed -n 2p <<<"$sample")" 'claude=' "one sampled agreement"
+assert_equals 'jev / claude disagreements: 1' "$(sed -n 3p <<<"$sample")" "all disagreements are still listed under a small sample"
+run code out err report --audit-sample many
+expect_code 2 "$code" "a non-numeric --audit-sample is a usage error"
 rm -f "$USAGE"
 run code out err report
 assert_contains "$out" 'no recorded calls' "an empty log reports no calls"
-pass "report: per-type agreement, confident split, escalation, false-confident, outcomes, latency, tokens"
+pass "report --audit-sample: n random agreements beside every disagreement, each with its snapshot path"
