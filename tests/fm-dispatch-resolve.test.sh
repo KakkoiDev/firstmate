@@ -27,6 +27,7 @@ mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
 for command_name in bash chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
 done
+unset DD_API_KEY DD_SITE
 
 cat > "$BRIEF" <<'MD'
 # Task
@@ -108,8 +109,18 @@ JSON
 cat > "$FAKEBIN/curl" <<'SH'
 #!/usr/bin/env bash
 # Fake curl: records argv (minus the -o target), the stdin body, and the header
-# read from fd 3, then answers with FAKE_CURL_RESPONSE and FAKE_CURL_HTTP.
+# read from fd 3, then answers with FAKE_CURL_RESPONSE and FAKE_CURL_HTTP. A
+# Datadog intake call is recorded separately under dd-* and answered 202.
 set -u
+case " $* " in
+  *' https://http-intake.logs.'*)
+    mkdir -p "${FAKE_CURL_LOG:?}"
+    { cat; printf '\n'; } >> "$FAKE_CURL_LOG/dd-body"
+    cat /dev/fd/3 >> "$FAKE_CURL_LOG/dd-header" 2>/dev/null || printf 'fd3 unreadable\n' >> "$FAKE_CURL_LOG/dd-header"
+    printf '202'
+    exit 0
+    ;;
+esac
 if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
   printf 'curl:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
@@ -262,6 +273,15 @@ assert_equals 'call|dispatch-rule|Which dispatch rule fits this task brief for p
 assert_equals '["rule_1","rule_2","rule_3","rule_4","default"]' "$(jq -c .options "$USAGE")" "the record lists every rule option"
 assert_not_contains "$(cat "$USAGE")" "$KEY" "the key is never recorded"
 assert_not_contains "$(cat "$USAGE")" 'off-by-one' "the brief is never recorded"
+id=$(jq -r .decision_id "$USAGE")
+audit="$HOME_DIR/state/jev-audit/$id.json"
+assert_present "$audit" "the resolver writes an audit snapshot"
+assert_contains "$(jq -r .context "$audit")" 'off-by-one' "the snapshot holds the brief text sent"
+assert_equals "$(jq -j .context "$audit" | shasum -a 256 | awk '{print $1}')" "$(jq -r .context_sha256 "$USAGE")" \
+  "the record's sha256 matches the snapshot's context bytes"
+assert_equals "$(jq -cS . "$LOG/body")" "$(jq -cS .jev_request "$audit")" "the snapshot holds the exact request"
+grep -rqF -- "$KEY" "$HOME_DIR/state/jev-audit" && fail "the key is never in the audit snapshot"
+assert_absent "$LOG/dd-body" "no Datadog key sends nothing"
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF" --project pager
 assert_contains "$out" '  status: error' "a failed call keeps its error outcome"
@@ -269,6 +289,19 @@ assert_equals 'error|' "$(tail -n1 "$USAGE" | jq -r '[.status, (.answer // "")] 
 id=$(head -n1 "$USAGE" | jq -r .decision_id)
 assert_equals "jev: recorded $id mine=rule_2 jev=rule_4 overridden" \
   "$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-jev.sh" record-mine "$id" rule_2)" "fm-jev.sh labels a resolver decision"
+rm -f "$USAGE"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY DD_API_KEY=dd-resolver-key run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: clear' "Datadog leaves the resolver outcome unchanged"
+dd_sent() { [ -s "$LOG/dd-body" ]; }
+for _ in $(seq 1 100); do dd_sent && break; sleep 0.1; done
+dd_sent || fail "the resolver sends one decision event (timed out)"
+assert_equals "decision|dispatch-rule|rule_4|ok|not-run|null|null" \
+  "$(jq -r '.[0] | [.event, .question_type, .jev_answer, .jev_status, .claude_status, .claude_answer, .claude_jev_agree] | map(tostring) | join("|")' "$LOG/dd-body")" \
+  "the resolver event says no duplicate query ran"
+assert_not_contains "$(cat "$LOG/dd-body")" 'off-by-one' "the brief never reaches Datadog"
+assert_equals 'DD-API-KEY: dd-resolver-key' "$(cat "$LOG/dd-header")" "the resolver's Datadog key reaches curl on the fd header"
 rm -f "$USAGE"
 pass "usage record: every resolver Jev call appends one dispatch-rule record, and fm-jev.sh labels it"
 
