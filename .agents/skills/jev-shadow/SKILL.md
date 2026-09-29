@@ -28,6 +28,7 @@ The one exception to shadow-only answers is `claim-check`, below.
 5. When a human later corrects or overrides that decision, run `bin/fm-jev.sh record-outcome <decision-id> "<what the human said>"`, adding `--final <choice>` when the choice actually taken changed; the outcome is graded against whichever party decided.
 
 Never wait on, retry, or argue with a Jev answer; a fresh `claim-check` on new evidence is the one re-ask, below.
+When `record-mine` or `ask --mine` prints `jev: WARNING: firstmate disagrees with Jev`, say so to the operator in the final message.
 `bin/fm-jev.sh --help` owns the command syntax and record semantics, and `bin/fm-jev-gate-lib.sh` owns the script-embedded question wording.
 
 ## Decision points
@@ -71,3 +72,9 @@ On a Claude Code primary, the PreToolUse hook refuses a Notion write or Slack se
 `claim-check` is the one type that gates: an answer of `contradicted` or `not-addressed` at or above the claim-check floor keeps writes to that target refused until a fresh `claim-check` with new evidence is answered `supported`, or until `bin/fm-jev.sh record-outcome <decision-id> "<the operator's words>"` records the operator's explicit confirmation.
 Below the floor the write proceeds with a warning; `docs/configuration.md` "Jev authority" owns the floor file.
 Every other type, templated or not, stays shadow-only.
+
+## Turn-end section
+
+When a turn made Jev asks, the final message carries the output of `bin/fm-jev.sh turn --since <turn start>` verbatim: the `Jev asks this turn (<n>)` header and one line per ask.
+Each line marked `[DISAGREE]` also needs a line outside the section that names the disagreement with the word "disagree" and the question type.
+On a Claude Code primary, the Stop hook refuses a turn end that lacks either and prints the command with the turn start filled in.
