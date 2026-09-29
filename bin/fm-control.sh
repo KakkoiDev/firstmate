@@ -7,7 +7,7 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>] [--worker-state <state>]
 #                                         (--note <text> | --note-file <path>)
-#   --worker-state <working|waiting-on-answered-question|looping|confused|unresponsive>
+#   --worker-state <working|idle-done|waiting-on-answered-question|looping|confused|unresponsive>
 #   is required for an interrupt or relaunch of a crewmate or scout;
 #   control_jev_gate below owns the ask.
 #

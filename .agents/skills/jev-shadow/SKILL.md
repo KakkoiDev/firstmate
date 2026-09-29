@@ -42,7 +42,7 @@ Options in angle brackets are filled from the live registry or fleet at the time
 | `effort-level` | `fm-spawn.sh`, from `--effort` or `default` | Which reasoning effort fits this task? | `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, `default` |
 | `dispatch-rule` | `bin/fm-dispatch-resolve.sh` itself | the rule match | record with `record-mine latest:dispatch-rule <rule_N or default>` |
 | `mid-task-ask` | `fm-send.sh --mid-task-ask <choice>`, or `--not-a-decision` for a steer that answers nothing | Does this mid-task ask invalidate the work under way, or is it a follow-up or downstream correction? | `invalidates`, `follow-up`, `downstream-correction` |
-| `stuck-worker` | `fm-control.sh <id> interrupt\|relaunch --worker-state <choice>` | Which state best describes this worker? | `working`, `waiting-on-answered-question`, `looping`, `confused`, `unresponsive` |
+| `stuck-worker` | `fm-control.sh <id> interrupt\|relaunch --worker-state <choice>` | Which state best describes this worker? | `working`, `idle-done`, `waiting-on-answered-question`, `looping`, `confused`, `unresponsive` |
 | `merge-risk` | `fm-pr-merge.sh` and `fm-merge-local.sh --merge-risk <yes\|no>` | Is this merge destructive, irreversible, or security-sensitive? | yes/no |
 | `report-has-captain-call` | `fm-teardown.sh` for a scout, `--report-has-captain-call <yes\|no>` | Does this report contain a call only the human operator can make? | yes/no |
 | `scout-recommends-ship` | `fm-teardown.sh` for a scout, `--scout-recommends-ship <yes\|no>` | Does this scout report recommend shippable work? | yes/no |
