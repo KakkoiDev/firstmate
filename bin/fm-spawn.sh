@@ -7243,8 +7243,11 @@ fi
 # ones assigned an isolated worktree; a secondmate runs its own home instead.
 # The id reached a validated bare-slug charset above, so it carries no shell
 # syntax of its own.
+# FM_JEV_HOME names this home, so a Jev ask the worker makes from any
+# directory lands in this home's usage record (bin/fm-jev.sh).
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
+  spawn_send_text_line "$T" "export FM_JEV_HOME=$(shell_quote "$FM_HOME")"
 fi
 # Send through the exact pane channel that already ships GOTMPDIR, so every pane
 # backend and harness - ship, scout, and secondmate - gets it before launch. Skipped
@@ -7279,7 +7282,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
     TERM_PROGRAM REX_SESSION REX_BLOCK REX_SERVER REX_BIN_DIR \
     TERN_IDENTITY TERN_PANE TERN_PANE_SOCKET TERN_WINDOW_KEY TERN_WINDOW_SOCKET \
-    FM_TASK_ID COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
+    FM_TASK_ID FM_JEV_HOME COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
     $LAUNCH_ENV_FORWARD_NAMES; do
     if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
       case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in

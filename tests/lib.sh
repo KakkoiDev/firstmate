@@ -74,9 +74,11 @@ unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 # fm-merge-local, or fm-control is not refused for a missing decision
 # argument; tests/fm-jev-gate.test.sh arms it. Clear the Claude Code session
 # id so no Jev ask looks for the live session transcript; a case that tests
-# the issuing-request lookup names its fixture with FM_JEV_TRANSCRIPT.
+# the issuing-request lookup names its fixture with FM_JEV_TRANSCRIPT. Clear
+# FM_JEV_HOME, which a task worker's pane exports, so an ask a suite makes
+# lands in that suite's own FM_HOME, never the real home.
 export FM_JEV_GATE=off
-unset CLAUDE_CODE_SESSION_ID
+unset CLAUDE_CODE_SESSION_ID FM_JEV_HOME
 
 # Clear the Rex block identity an operator's terminal exports. Run directly
 # inside a Rex block, the suite would otherwise auto-detect the rex backend

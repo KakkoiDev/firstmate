@@ -31,7 +31,8 @@ mkdir -p "$HOME_DIR" "$LOG" "$NO_CURL_BIN"
 for command_name in awk bash cat date dirname jq mkdir mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
 done
-unset TYPESAFE_API_KEY DD_API_KEY DD_SITE
+# The worker marker would name the asker; each case sets it where it matters.
+unset TYPESAFE_API_KEY DD_API_KEY DD_SITE FM_TASK_ID
 
 printf '%s\n' 'Worker pane shows the same test failing for the third time.' 'CONTEXT-ONLY-MARKER' > "$CONTEXT"
 
@@ -217,7 +218,7 @@ assert_equals 'curl:clean' "$(cat "$LOG/child-env")" "the key is absent from the
 wait_for "the duplicate query settles" settled 1
 assert_equals 1 "$(calls | wc -l | tr -d ' ')" "one call record per call"
 record=$(calls)
-assert_equals '["answer","confidence","context_sha256","decision_id","event","jev_cost_usd","latency_ms","model","options","probabilities","question_type","status","summary","tokens_in","tokens_out","ts","v"]' \
+assert_equals '["answer","asker","confidence","context_sha256","decision_id","event","jev_cost_usd","latency_ms","model","options","probabilities","question_type","status","summary","tokens_in","tokens_out","ts","v"]' \
   "$(jq -c 'keys' <<<"$record")" "record carries exactly the documented fields"
 assert_equals true "$(jq '(.jev_cost_usd - 0.00001764 | fabs) < 1e-15' <<<"$record")" "Jev cost is 420 input tokens at \$42 per billion"
 assert_equals "$(shasum -a 256 "$CONTEXT" | awk '{print $1}')" "$(jq -r .context_sha256 <<<"$record")" "record points at the context by its sha256"
@@ -230,11 +231,12 @@ assert_equals '["working","looping","confused"]' "$(jq -c .options <<<"$record")
 assert_not_contains "$record" "$KEY" "the key is never recorded"
 assert_not_contains "$record" 'CONTEXT-ONLY-MARKER' "the context is never recorded"
 assert_not_contains "$record" 'Which state best describes' "the question text is never recorded"
+assert_equals firstmate "$(jq -r .asker <<<"$record")" "the primary's ask names firstmate as the asker"
 pass "answered: typed output, one Choice request, key on the fd header only, one summary record"
 
 # --- duplicate Claude query: isolated, joined by decision id ------------------------
 duplicate=$(jq -c 'select(.event == "duplicate")' "$USAGE")
-assert_equals '["claude_answer","claude_cost_usd","claude_latency_ms","claude_model","claude_tokens_in","claude_tokens_out","claude_wall_ms","decision_id","event","status","ts","v"]' \
+assert_equals '["asker","claude_answer","claude_cost_usd","claude_latency_ms","claude_model","claude_tokens_in","claude_tokens_out","claude_wall_ms","decision_id","event","status","ts","v"]' \
   "$(jq -c 'keys' <<<"$duplicate")" "duplicate record carries exactly the documented fields"
 assert_equals "$id|claude-opus-5-5|looping|3832|0.004504|554|5|ok" \
   "$(jq -r '[.decision_id, .claude_model, .claude_answer, .claude_latency_ms, .claude_cost_usd, .claude_tokens_in, .claude_tokens_out, .status] | join("|")' <<<"$duplicate")" \
@@ -295,6 +297,20 @@ wait_for "the yes/no duplicate settles" settled 1
 assert_equals 'off-option|' "$(jq -r 'select(.event == "duplicate") | [.status, (.claude_answer // "")] | join("|")' "$USAGE")" \
   "a claude reply that is not an option id is recorded as off-option with no answer"
 pass "--yes-no asks the yes/no Choice and validates the answer against it"
+
+# --- a task worker's ask lands in its launching home, named by its task id ----------
+reset
+mkdir -p "$TMP_ROOT/worker-dir"
+out=$(cd "$TMP_ROOT/worker-dir" && PATH="$FAKEBIN:$BASE_PATH" TYPESAFE_API_KEY="$KEY" FM_HOME="$TMP_ROOT/worker-dir" \
+  FM_JEV_HOME="$HOME_DIR" FM_TASK_ID=t9 "$TOOL" "${ASK[@]}" --mine looping 2>/dev/null)
+id=$(sed -n 's/^  decision_id: //p' <<<"$out")
+[ -n "$id" ] || fail "the worker's ask printed no decision id: $out"
+wait_for "the worker's duplicate query settles" settled 1
+assert_absent "$TMP_ROOT/worker-dir/state/jev-usage.jsonl" "the worker's ask writes nothing where it runs"
+assert_equals 'call:t9 decided:t9 duplicate:t9 mine:t9' \
+  "$(jq -rs --arg id "$id" '[.[] | select(.decision_id == $id and .event != "request") | "\(.event):\(.asker)"] | sort | join(" ")' "$USAGE")" \
+  "every record of the worker's ask names its task id"
+pass "a task worker's ask lands in the home named by FM_JEV_HOME, every record naming its task id"
 
 # --- failures step aside: exit 0, nothing on stdout, error record ----------------
 for failure in 'FAKE_CURL_FAIL=1|http 000' 'FAKE_CURL_HTTP=503|http 503'; do

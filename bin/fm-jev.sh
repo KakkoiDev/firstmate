@@ -144,6 +144,9 @@
 #   with its three answers and audit snapshot path.
 #
 # The record format and its path are owned by bin/fm-jev-lib.sh.
+# Home: FM_JEV_HOME, which bin/fm-spawn.sh exports into every ship and scout
+#   pane, wins over FM_HOME, so a worker's asks land in the home that launched
+#   it whatever directory it runs from; unset, FM_HOME and then this checkout.
 # Exit 2 only for a usage error, an unreadable context file, a missing jq, or
 # an unknown decision id or answer; record subcommands never touch the network.
 #
@@ -158,7 +161,7 @@ unset TYPESAFE_API_KEY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-$FM_ROOT}"
+FM_HOME="${FM_JEV_HOME:-${FM_HOME:-$FM_ROOT}}"
 
 # shellcheck source=bin/fm-env-lib.sh
 . "$SCRIPT_DIR/fm-env-lib.sh"
