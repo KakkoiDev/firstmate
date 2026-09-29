@@ -5272,8 +5272,11 @@ fi
 # ones assigned an isolated worktree; a secondmate runs its own home instead.
 # The id reached a validated bare-slug charset above, so it carries no shell
 # syntax of its own.
+# FM_JEV_HOME names this home, so a Jev ask the worker makes from any
+# directory lands in this home's usage record (bin/fm-jev.sh).
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
+  spawn_send_text_line "$T" "export FM_JEV_HOME=$(shell_quote "$FM_HOME")"
 fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
@@ -5301,7 +5304,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
-    FM_TASK_ID COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
+    FM_TASK_ID FM_JEV_HOME COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
     $LAUNCH_ENV_NAMES; do
     # Only validated names enter shell syntax. Values expand once, quoted, in
     # the pane shell and never become source text or spawn-process snapshots.

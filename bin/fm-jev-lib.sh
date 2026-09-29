@@ -29,6 +29,8 @@
 #   The record holds no question text, context, or request payload; its
 #   context_sha256 and decision_id point at the audit snapshot.
 #   A write failure is discarded: the record never changes what a caller does.
+#   fm_jev_append adds "asker" to every line that lacks one: $FM_TASK_ID in a
+#   task worker, else "firstmate".
 #
 # Never-send list: fm_jev_never_send_line <text-file> checks text about to be
 #   sent against the optional $FM_HOME/config/dispatch-never-send list, whose
@@ -397,9 +399,10 @@ fm_jev_post() {
 }
 
 fm_jev_append() {  # <json-line>
-  local log
+  local log line
   log=$(fm_jev_log_path)
-  { mkdir -p "${log%/*}" && printf '%s\n' "$1" >> "$log"; } 2>/dev/null || true
+  line=$(jq -c --arg a "${FM_TASK_ID:-firstmate}" '. + {asker: (.asker // $a)}' <<<"$1" 2>/dev/null) || line=$1
+  { mkdir -p "${log%/*}" && printf '%s\n' "$line" >> "$log"; } 2>/dev/null || true
 }
 
 # fm_jev_record_call <decision-id> <question-type> <summary> <options-json>
