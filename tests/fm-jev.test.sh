@@ -100,6 +100,7 @@ for a in "$@"; do
 done
 printf '%s\n' "$model" >> "$L/claude-models"
 pwd -P > "$L/claude-pwd"
+printf '%s\n' "${OTEL_RESOURCE_ATTRIBUTES:-}" > "$L/claude-otel"
 find . -mindepth 1 | wc -l | tr -d ' ' > "$L/claude-dir-count"
 if [ -n "${TYPESAFE_API_KEY+x}${TYPESAFE_API_KEY_PRIVATE+x}${DD_API_KEY+x}${DD_API_KEY_PRIVATE+x}" ]; then
   echo secret-present > "$L/claude-env"
@@ -233,6 +234,7 @@ assert_equals "$id|claude-opus-5-5|looping|3832|0.004504|554|5|ok" \
   "$(jq -r '[.decision_id, .claude_model, .claude_answer, .claude_latency_ms, .claude_cost_usd, .claude_tokens_in, .claude_tokens_out, .status] | join("|")' <<<"$duplicate")" \
   "duplicate record values: API latency, API-equivalent cost, input plus cache tokens"
 [ "$(jq -r '.claude_wall_ms | type' <<<"$duplicate")" = number ] || fail "wall latency is a number"
+assert_equals firstmate.role=jev-duplicate "$(cat "$LOG/claude-otel")" "the duplicate tags its Claude Code telemetry"
 claude_argv=$(cat "$LOG/claude-argv")
 for flag in -p --safe-mode --strict-mcp-config --no-session-persistence --exclude-dynamic-system-prompt-sections; do
   assert_contains "$claude_argv" "$flag" "claude runs with $flag"
@@ -448,13 +450,14 @@ pass "claude failure: exit 0, no duplicate record, side-log line, null Claude fi
 
 # --- default model list: one duplicate and one Datadog event per model -------------
 reset
-TYPESAFE_API_KEY=$KEY DD_API_KEY=$DD_KEY FM_JEV_CLAUDE_MODELS='' FAKE_CLAUDE_FAIL_MODEL=claude-sonnet-5 run code out err "${ASK[@]}"
+TYPESAFE_API_KEY=$KEY DD_API_KEY=$DD_KEY FM_JEV_CLAUDE_MODELS='' FAKE_CLAUDE_FAIL_MODEL=claude-sonnet-5 OTEL_RESOURCE_ATTRIBUTES=repo.url=x run code out err "${ASK[@]}"
 expect_code 0 "$code" "a three-model ask exits 0"
 id=$(sed -n 's/^  decision_id: //p' <<<"$out")
 wait_for "three decision events are sent" lines_at_least "$LOG/dd-body" 3
 assert_equals $'claude-opus-5-5\nclaude-sonnet-5\nclaude-haiku-4-5-20251001' "$(cat "$LOG/claude-models")" \
   "the default list asks Opus, Sonnet, then Haiku, one after another"
 assert_equals 3 "$(jq -s 'length' "$LOG/dd-body")" "one Datadog request per model"
+assert_equals repo.url=x,firstmate.role=jev-duplicate "$(cat "$LOG/claude-otel")" "the telemetry tag keeps existing resource attributes"
 assert_equals "decision|$id|claude-opus-5-5|ok|looping|decision|$id|claude-sonnet-5|error|null|decision|$id|claude-haiku-4-5-20251001|ok|looping" \
   "$(jq -rs '[.[][0] | .event, .decision_id, .claude_model, .claude_status, .claude_answer] | map(tostring) | join("|")' "$LOG/dd-body")" \
   "each event carries its own model, and a failed model still names itself"
