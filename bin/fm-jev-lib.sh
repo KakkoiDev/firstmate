@@ -46,7 +46,8 @@
 #   DD-API-KEY header and service firstmate-jev; any failure is one
 #   "jev: datadog log not sent (...)" stderr line and never a caller failure.
 #   Two event shapes, numeric fields kept numeric:
-#     event=decision (fm_jev_decision_event), one per decision: decision_id,
+#     event=decision (fm_jev_decision_event), one per decision and Claude
+#       model: decision_id,
 #       question_type, summary, context_sha256, jev_answer, jev_confidence,
 #       jev_model, jev_status, jev_latency_ms, jev_tokens_in, jev_tokens_out,
 #       jev_cost_usd, claude_answer, claude_model, claude_status,
@@ -74,11 +75,11 @@ fm_jev_capture_dd() {
   unset DD_API_KEY DD_SITE
 }
 
-# fm_jev_decision_event <joined-json> <claude-status when no duplicate ran>:
-# the one combined per-decision event; claude_* fields absent from the joined
-# record are null.
+# fm_jev_decision_event <joined-json> <claude-status when no duplicate ran>
+# <claude-model>: the combined event for one decision and one Claude model;
+# claude_* fields absent from the joined record are null, except claude_model.
 fm_jev_decision_event() {
-  jq -c --arg cstatus "$2" '
+  jq -c --arg cstatus "$2" --arg cmodel "$3" '
     (.claude_answer // null) as $ca |
     {ddsource: "firstmate", service: "firstmate-jev", ddtags: ("question_type:" + .question_type),
      message: ("\(.question_type): \(.summary) -> jev \(.answer // "none"), claude \($ca // "none")"),
@@ -86,7 +87,7 @@ fm_jev_decision_event() {
      jev_answer: .answer, jev_confidence: .confidence, jev_model: .model, jev_status: .status,
      jev_latency_ms: .latency_ms, jev_tokens_in: .tokens_in, jev_tokens_out: .tokens_out,
      jev_cost_usd: (.jev_cost_usd // null),
-     claude_answer: $ca, claude_model: (.claude_model // null), claude_status: (.claude_status // $cstatus),
+     claude_answer: $ca, claude_model: (.claude_model // $cmodel), claude_status: (.claude_status // $cstatus),
      claude_latency_ms: (.claude_latency_ms // null), claude_wall_ms: (.claude_wall_ms // null),
      claude_tokens_in: (.claude_tokens_in // null), claude_tokens_out: (.claude_tokens_out // null),
      claude_cost_usd: (.claude_cost_usd // null),

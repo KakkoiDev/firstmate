@@ -92,6 +92,13 @@ set -u
 L=${FAKE_CURL_LOG:?}
 mkdir -p "$L"
 printf '%s\n' "$@" > "$L/claude-argv"
+model=''
+prev=''
+for a in "$@"; do
+  [ "$prev" = --model ] && model=$a
+  prev=$a
+done
+printf '%s\n' "$model" >> "$L/claude-models"
 pwd -P > "$L/claude-pwd"
 find . -mindepth 1 | wc -l | tr -d ' ' > "$L/claude-dir-count"
 if [ -n "${TYPESAFE_API_KEY+x}${TYPESAFE_API_KEY_PRIVATE+x}${DD_API_KEY+x}${DD_API_KEY_PRIVATE+x}" ]; then
@@ -100,6 +107,7 @@ else
   echo clean > "$L/claude-env"
 fi
 cat > "$L/claude-stdin"
+[ "$model" = "${FAKE_CLAUDE_FAIL_MODEL:-}" ] && { echo 'claude failed' >&2; exit 1; }
 case "${FAKE_CLAUDE_MODE:-ok}" in
   fail) echo 'claude failed' >&2; exit 1 ;;
   sleep) sleep 4 ;;
@@ -113,6 +121,8 @@ SH
 chmod +x "$FAKEBIN/claude"
 
 export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE"
+# One Claude model unless a case opts into the default list.
+export FM_JEV_CLAUDE_MODELS=claude-opus-5-5
 
 reset() {
   rm -rf "$LOG" "$HOME_DIR/state"
@@ -423,11 +433,11 @@ assert_equals '' "$err" "a claude failure writes nothing to the caller's stderr"
 id=$(sed -n 's/^  decision_id: //p' <<<"$out")
 wait_for "the decision event is sent after the claude failure" lines_at_least "$LOG/dd-body" 1
 assert_equals 0 "$(jq -r 'select(.event == "duplicate") | .event' "$USAGE" | wc -l | tr -d ' ')" "a claude failure writes no duplicate record"
-assert_contains "$(cat "$SIDELOG")" "$id: claude exited non-zero" "a claude failure is one side-log line"
+assert_contains "$(cat "$SIDELOG")" "$id: claude-opus-5-5: claude exited non-zero" "a claude failure is one side-log line"
 event=$(jq -c '.[0]' "$LOG/dd-body")
-assert_equals 'looping|error|null|null|null|null|null|null|null|null' \
+assert_equals 'looping|error|null|claude-opus-5-5|null|null|null|null|null|null' \
   "$(jq -r '[.jev_answer, .claude_status, .claude_answer, .claude_model, .claude_latency_ms, .claude_wall_ms, .claude_tokens_in, .claude_tokens_out, .claude_cost_usd, .claude_jev_agree] | map(tostring) | join("|")' <<<"$event")" \
-  "a claude failure sends null Claude fields and a null agreement"
+  "a claude failure names its model and sends null Claude fields and a null agreement"
 reset
 TYPESAFE_API_KEY=$KEY DD_API_KEY=$DD_KEY FAKE_CURL_HTTP=503 run code out err "${ASK[@]}"
 wait_for "the decision event is sent after a Jev failure" lines_at_least "$LOG/dd-body" 1
@@ -435,6 +445,25 @@ assert_equals 'error|null|looping|null' \
   "$(jq -r '.[0] | [.jev_status, .jev_answer, .claude_answer, .claude_jev_agree] | map(tostring) | join("|")' "$LOG/dd-body")" \
   "a Jev failure still sends one event with a null agreement"
 pass "claude failure: exit 0, no duplicate record, side-log line, null Claude fields in the event"
+
+# --- default model list: one duplicate and one Datadog event per model -------------
+reset
+TYPESAFE_API_KEY=$KEY DD_API_KEY=$DD_KEY FM_JEV_CLAUDE_MODELS='' FAKE_CLAUDE_FAIL_MODEL=claude-sonnet-5 run code out err "${ASK[@]}"
+expect_code 0 "$code" "a three-model ask exits 0"
+id=$(sed -n 's/^  decision_id: //p' <<<"$out")
+wait_for "three decision events are sent" lines_at_least "$LOG/dd-body" 3
+assert_equals $'claude-opus-5-5\nclaude-sonnet-5\nclaude-haiku-4-5-20251001' "$(cat "$LOG/claude-models")" \
+  "the default list asks Opus, Sonnet, then Haiku, one after another"
+assert_equals 3 "$(jq -s 'length' "$LOG/dd-body")" "one Datadog request per model"
+assert_equals "decision|$id|claude-opus-5-5|ok|looping|decision|$id|claude-sonnet-5|error|null|decision|$id|claude-haiku-4-5-20251001|ok|looping" \
+  "$(jq -rs '[.[][0] | .event, .decision_id, .claude_model, .claude_status, .claude_answer] | map(tostring) | join("|")' "$LOG/dd-body")" \
+  "each event carries its own model, and a failed model still names itself"
+assert_equals 'claude-opus-5-5 claude-haiku-4-5-20251001' \
+  "$(jq -r 'select(.event == "duplicate") | .claude_model' "$USAGE" | paste -sd ' ' -)" "one duplicate record per answering model"
+assert_contains "$(cat "$SIDELOG")" "$id: claude-sonnet-5: claude exited non-zero" "the failed model is one side-log line"
+assert_equals claude-opus-5-5 "$(FM_JEV_CLAUDE_MODELS='' run code out err show "$id"; jq -r .record.claude_model <<<"$out")" \
+  "show joins the first model's duplicate"
+pass "default model list: Opus, Sonnet, Haiku in sequence, one event per model, first model in the joined record"
 
 # --- the duplicate never blocks the caller ------------------------------------------
 reset

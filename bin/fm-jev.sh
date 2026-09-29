@@ -30,15 +30,18 @@
 #   "jev: error (...)" stderr line, nothing on stdout, a status=error record.
 #   Every ask outcome exits 0, so a caller is never blocked; decide as if the
 #   tool were absent whenever stdout is empty.
-#   Duplicate Claude query: after every Jev call (answered or failed), ask
-#   detaches one `claude -p` asking the same question, options, and context of
-#   $FM_JEV_CLAUDE_MODEL, so the time and cost of answering it with Claude are
-#   measured beside Jev without slowing the decision path. It runs from an
+#   Duplicate Claude queries: after every Jev call (answered or failed), ask
+#   detaches one process that asks the same question, options, and context of
+#   each model in $FM_JEV_CLAUDE_MODELS (space-separated, default
+#   "claude-opus-5-5 claude-sonnet-5 claude-haiku-4-5-20251001"), one
+#   `claude -p` after another, so the time and cost of answering it with each
+#   Claude model are measured beside Jev without slowing the decision path.
+#   Each query runs from an
 #   empty temporary directory with --safe-mode, no setting sources, no MCP
 #   servers, no tools, no session persistence, no dynamic system prompt
 #   sections, and a strict one-option system prompt, so the measured input is
-#   the question rather than CLAUDE.md, hooks, or tool definitions. Success
-#   appends one "duplicate" record: claude_model, claude_answer (null and
+#   the question rather than CLAUDE.md, hooks, or tool definitions. Each
+#   success appends one "duplicate" record: claude_model, claude_answer (null and
 #   status off-option when the reply is not exactly one option id),
 #   claude_wall_ms (measured around the process), claude_latency_ms
 #   (duration_api_ms), claude_cost_usd (total_cost_usd, the API-equivalent
@@ -50,10 +53,13 @@
 #   Audit: before detaching, ask writes the local audit snapshot owned by
 #   bin/fm-jev-lib.sh (question, option meanings, context bytes and sha256, the
 #   Jev request and raw response) plus claude_system_prompt and claude_prompt;
-#   the duplicate query adds claude_response, the raw claude output.
-#   Datadog: once the duplicate query finishes or fails, the same detached
-#   process sends the one combined decision event (bin/fm-jev-lib.sh); its
-#   failure line goes to the same side log.
+#   the duplicate queries add claude_response, the raw output of the last one.
+#   Datadog: as each model's query finishes or fails, the same detached
+#   process sends one decision event for that model (bin/fm-jev-lib.sh), so a
+#   decision yields one event per model; a send failure line goes to the same
+#   side log.
+#   The joined record behind show, report, and the label events carries the
+#   first model's duplicate only.
 #
 # record-mine: appends firstmate's own answer for a decision. <decision-id> is
 #   an id printed by ask, or latest:<question-type> for the newest call of that
@@ -107,7 +113,7 @@ fm_jev_capture_dd
 
 REPORT_FLOOR=0.6
 QKEY=q
-FM_JEV_CLAUDE_MODEL=claude-opus-5-5
+FM_JEV_CLAUDE_MODELS=${FM_JEV_CLAUDE_MODELS:-claude-opus-5-5 claude-sonnet-5 claude-haiku-4-5-20251001}
 CLAUDE_SYSTEM_PROMPT='You answer one multiple-choice question. Reply with exactly one of the listed option ids and nothing else: no explanation, no punctuation, no quotes.'
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
@@ -121,12 +127,15 @@ usage() {
 slug_ok() { [[ $1 =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; }
 option_ok() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
 
-# Every record in the log, one JSON object per line; unparsable lines are skipped.
+# records [model]: every record in the log, one JSON object per line, keeping
+# only the duplicates of <model> (default the first of $FM_JEV_CLAUDE_MODELS);
+# unparsable lines are skipped.
 records() {
-  local log
+  local log model=${1:-${FM_JEV_CLAUDE_MODELS%% *}}
   log=$(fm_jev_log_path)
   [ -f "$log" ] || return 0
-  jq -cR 'try fromjson catch empty | select(type == "object")' "$log"
+  jq -cR --arg m "$model" 'try fromjson catch empty | select(type == "object") |
+    select(.event != "duplicate" or .claude_model == $m)' "$log"
 }
 
 # shellcheck disable=SC2016 # $names below are jq variables, not shell ones.
@@ -186,26 +195,26 @@ audit_add() {
   fi
 }
 
-# duplicate_claude <decision-id> <prompt> <options-json>: runs detached.
+# duplicate_claude <decision-id> <model> <prompt> <options-json>: runs detached.
 duplicate_claude() {
-  local id=$1 prompt=$2 options=$3 dir out t0 t1 line
-  command -v claude >/dev/null 2>&1 || { duplicate_log "$id" "claude not installed"; return 0; }
+  local id=$1 model=$2 prompt=$3 options=$4 dir out t0 t1 line
+  command -v claude >/dev/null 2>&1 || { duplicate_log "$id" "$model: claude not installed"; return 0; }
   dir=$(mktemp -d) || { duplicate_log "$id" "mktemp failed"; return 0; }
   out=$(mktemp) || { rmdir "$dir"; duplicate_log "$id" "mktemp failed"; return 0; }
   t0=$(fm_timing_now_ms)
   if ! (cd "$dir" && printf '%s' "$prompt" | claude -p --safe-mode --setting-sources '' --strict-mcp-config \
       --tools '' --no-session-persistence --exclude-dynamic-system-prompt-sections \
-      --model "$FM_JEV_CLAUDE_MODEL" --output-format json --system-prompt "$CLAUDE_SYSTEM_PROMPT" \
+      --model "$model" --output-format json --system-prompt "$CLAUDE_SYSTEM_PROMPT" \
       > "$out" 2>/dev/null); then
     audit_add "$id" claude_response "$out"
     rm -rf "$dir" "$out"
-    duplicate_log "$id" "claude exited non-zero"
+    duplicate_log "$id" "$model: claude exited non-zero"
     return 0
   fi
   t1=$(fm_timing_now_ms)
   rmdir "$dir" 2>/dev/null
   audit_add "$id" claude_response "$out"
-  line=$(jq -c --arg id "$id" --arg ts "$(fm_jev_now_iso)" --arg model "$FM_JEV_CLAUDE_MODEL" \
+  line=$(jq -c --arg id "$id" --arg ts "$(fm_jev_now_iso)" --arg model "$model" \
     --argjson wall "$(( t1 - t0 ))" --argjson options "$options" '
     select(.type == "result" and .is_error == false and (.result | type) == "string") |
     (.result | gsub("^\\s+|\\s+$"; "")) as $reply |
@@ -220,14 +229,14 @@ duplicate_claude() {
      status: (if $valid then "ok" else "off-option" end)}' "$out" 2>/dev/null) || line=''
   rm -f "$out"
   if [ -z "$line" ]; then
-    duplicate_log "$id" "claude output is not a successful result"
+    duplicate_log "$id" "$model: claude output is not a successful result"
     return 0
   fi
   fm_jev_append "$line"
 }
 
-show_one() {  # <decision-id>
-  records | jq -s --arg id "$1" "$JOIN_JQ"'
+show_one() {  # <decision-id> [model]
+  records "${2:-}" | jq -s --arg id "$1" "$JOIN_JQ"'
     [.[] | select(.decision_id == $id)] | joined | first // empty'
 }
 
@@ -334,7 +343,7 @@ cmd_ask() {
 }
 
 # settle <ok|error>: uses cmd_ask's locals. Records the call, writes the audit
-# snapshot, then detaches the duplicate query followed by the one combined
+# snapshot, then detaches the duplicate queries, each followed by its model's
 # Datadog decision event (claude_status error when no duplicate was recorded).
 settle() {
   fm_jev_record_call "$id" "$qtype" "$summary" "$options" "$QKEY" "$1" "$lat" "$resp" "$sha"
@@ -345,8 +354,11 @@ settle() {
 }
 
 duplicate_then_event() {  # <decision-id> <prompt> <options-json>
-  duplicate_claude "$@"
-  fm_jev_dd_send "$(fm_jev_decision_event "$(show_one "$1")" error)"
+  local model
+  for model in $FM_JEV_CLAUDE_MODELS; do
+    duplicate_claude "$1" "$model" "$2" "$3"
+    fm_jev_dd_send "$(fm_jev_decision_event "$(show_one "$1" "$model")" error "$model")"
+  done
 }
 
 cmd_record_mine() {
