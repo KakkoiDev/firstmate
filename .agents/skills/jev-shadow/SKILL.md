@@ -4,6 +4,7 @@ description: >-
   Agent-only protocol for Jev as the decision step at every typed decision point.
   Load at session start and follow it at each decision point it lists.
   The action scripts ask Jev themselves; Jev's answer acts only for a type the operator listed in config/jev-authority.
+  The one gating exception is claim-check: a confident contradicted or not-addressed answer holds the Notion write it guards.
 user-invocable: false
 metadata:
   internal: true
@@ -14,6 +15,7 @@ metadata:
 Every typed decision below is asked of Jev with firstmate's own choice recorded blind first.
 The acting answer is firstmate's choice unless the operator listed the type in `config/jev-authority` and Jev answered at or above its floor; `docs/configuration.md` "Jev authority" owns that file.
 No rule elsewhere in firstmate is relaxed by this skill, and Jev off or failing never blocks work.
+The one exception to shadow-only answers is `claim-check`, below.
 
 ## Protocol at each decision point
 
@@ -25,7 +27,7 @@ No rule elsewhere in firstmate is relaxed by this skill, and Jev off or failing 
 4. Act on the acting answer: the `acting:` line `ask` prints, the line a script prints on stderr, or your own choice when nothing was recorded.
 5. When a human later corrects or overrides that decision, run `bin/fm-jev.sh record-outcome <decision-id> "<what the human said>"`, adding `--final <choice>` when the choice actually taken changed; the outcome is graded against whichever party decided.
 
-Never wait on, retry, or argue with a Jev answer.
+Never wait on, retry, or argue with a Jev answer; a fresh `claim-check` on new evidence is the one re-ask, below.
 `bin/fm-jev.sh --help` owns the command syntax and record semantics, and `bin/fm-jev-gate-lib.sh` owns the script-embedded question wording.
 
 ## Decision points
@@ -54,3 +56,18 @@ The three manual types have no script boundary to enforce them; ask them with `-
 `merge-risk`, `finding-authority`, `report-has-captain-call`, and `mid-task-ask` are never handed to Jev, so firstmate's own choice always acts on them.
 For `report-has-captain-call`, a Jev answer can only add candidates to your inventory; it never closes or skips the inventory `captain-hold-lifecycle` requires.
 A chat-only request with no script boundary still starts at `deliverable-class`; the prompt reminder in `.claude/settings.json` points there and never blocks.
+
+## Structured asks
+
+`bin/fm-jev.sh ask --template <type> --target <kind>:<id> --mine <choice>` renders required fields into the English state and refuses an ask with a missing field; `bin/fm-jev.sh --help` owns the fields.
+
+| Type | Ask before | Options |
+| --- | --- | --- |
+| `claim-check` | any Notion write that asserts a state (merged, done, released, decided, closed) and any ticket status write; the evidence is a verbatim quote read from the source this turn | `supported`, `contradicted`, `not-addressed` |
+| `ticket-status` | moving a ticket from its current value to a proposed one | `<the proposed value>`, `keep-current` |
+| `ask-scope` | any other Notion write or Slack send, naming the operator's words and each target they could cover | `<each candidate>`, `several`, `unclear` |
+
+On a Claude Code primary, the PreToolUse hook refuses a Notion write or Slack send without a template ask bound to its target from the last 30 minutes, and its refusal prints the exact ask to run; an ask that found Jev off or failing counts as asked.
+`claim-check` is the one type that gates: an answer of `contradicted` or `not-addressed` at or above the claim-check floor keeps writes to that target refused until a fresh `claim-check` with new evidence is answered `supported`, or until `bin/fm-jev.sh record-outcome <decision-id> "<the operator's words>"` records the operator's explicit confirmation.
+Below the floor the write proceeds with a warning; `docs/configuration.md` "Jev authority" owns the floor file.
+Every other type, templated or not, stays shadow-only.

@@ -1875,6 +1875,10 @@ Every decision records which party's answer acted, and a later human correction 
 `bin/fm-jev.sh report` shows each type's decider split, overrules per decider, graduation readiness, and a flag when the Jev model changed while the type was listed; the flag never removes a type, and its header owns the thresholds.
 An ask whose text matches the never-send list above sends nothing and counts as Jev off.
 
+On a Claude Code primary, [`bin/fm-jev-pretool-check.sh`](../bin/fm-jev-pretool-check.sh) refuses a Notion write or a Slack send until a template ask bound to that target exists; its header owns the rules.
+A `claim-check` answered `contradicted` or `not-addressed` at or above the claim-check floor keeps writes to its target refused until a fresh `claim-check` on new evidence is answered `supported` or the operator's confirmation is recorded with `bin/fm-jev.sh record-outcome`; below the floor the write proceeds with a warning.
+The optional local, gitignored `config/jev-claim-check-floor` holds that floor as one number from 0 through 1; absent means 0.5, and a malformed value warns and uses 0.5.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with its exact install or upgrade command, or with manual instructions.
