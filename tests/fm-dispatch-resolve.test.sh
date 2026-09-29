@@ -166,7 +166,15 @@ chmod +x "$FAKEBIN/quota-axi"
 RESPONSE="$TMP_ROOT/response.json"
 export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" QUOTA_AXI_CALLS="$LOG/quota-axi.calls" QUOTA_AXI_FIXTURE="$QUOTA" CHILD_ENV_LOG="$LOG/child-env"
 
+# reset_log also clears the usage log, so a case's identical request is asked
+# rather than reused from an earlier case.
 reset_log() {
+  rm -rf "$LOG"
+  mkdir -p "$LOG"
+  rm -f "$HOME_DIR/state/jev-usage.jsonl"
+}
+
+reset_curl_log() {
   rm -rf "$LOG"
   mkdir -p "$LOG"
 }
@@ -369,8 +377,24 @@ assert_equals "$(jq -j .context "$audit" | shasum -a 256 | awk '{print $1}')" "$
 assert_equals "$(jq -cS . "$LOG/body")" "$(jq -cS .jev_request "$audit")" "the snapshot holds the exact request"
 grep -rqF -- "$KEY" "$HOME_DIR/state/jev-audit" && fail "the key is never in the audit snapshot"
 assert_absent "$LOG/dd-body" "no Datadog key sends nothing"
-reset_log
-TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF" --project pager
+first_out=$out
+reset_curl_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+# shellcheck disable=SC2001 # A regex over digits; parameter expansion has only globs.
+assert_equals "$(sed 's/latency_ms: [0-9]*/latency_ms: -/' <<<"$first_out")" "$out" \
+  "a repeated resolve prints the same outcome, with no latency because nothing was called"
+assert_contains "$err" "dispatch-resolve: reused Jev decision $id " "a repeated resolve names the decision it reused"
+assert_absent "$LOG/body" "a repeated resolve within the reuse window makes no Jev call"
+assert_equals 1 "$(jq -c 'select(.event == "call")' "$USAGE" | grep -c .)" "a repeated resolve records no second call"
+jq -c --arg id "$id" 'if .decision_id == $id and .event == "call" then .ts = "2026-01-01T00:00:00Z" else . end' "$USAGE" > "$USAGE.tmp" && mv "$USAGE.tmp" "$USAGE"
+reset_curl_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+assert_present "$LOG/body" "an answer older than the reuse window is asked again"
+assert_equals 2 "$(jq -c 'select(.event == "call")' "$USAGE" | grep -c .)" "the fresh ask records its own call"
+pass "a repeated resolve reuses a recent identical answer as one decision, and asks again once it is old"
+# Another project makes this a different request, so it is asked, not reused.
+reset_curl_log
+TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF" --project pager-retry
 assert_contains "$out" '  status: error' "a failed call keeps its error outcome"
 assert_equals 'error|' "$(jq -r 'select(.event == "call") | [.status, (.answer // "")] | join("|")' "$USAGE" | tail -n1)" "a failed call records an error"
 id=$(head -n1 "$USAGE" | jq -r .decision_id)
@@ -1087,6 +1111,7 @@ write_response "$RESPONSE" rule_9 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "an unknown rule id is an error outcome"
 assert_contains "$out" '  reason: rule rule_9 is not in the rules file' "unknown rule id is named"
+reset_log
 write_response "$RESPONSE" rule_0 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "rule zero is an error outcome"

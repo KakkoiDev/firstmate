@@ -67,6 +67,13 @@
 #   claude_status not-run because the resolver runs no duplicate Claude query,
 #   plus the issuing-request cost record and event (fm_jev_request_cost, issuer
 #   fm-dispatch-resolve.sh); stdout and exit status are unaffected.
+# Reuse: a request identical to one Jev answered in this home within the last
+#   REUSE_SECS (600) reuses that recorded answer, read back from its audit
+#   snapshot, instead of calling again, and prints one
+#   "dispatch-resolve: reused Jev decision <id> ..." line on stderr; no new
+#   record or event is written, so a repeated resolve of one brief stays one
+#   decision and `record-mine latest:dispatch-rule` labels it. Quota and every
+#   post-answer check still run fresh.
 #
 # Environment:
 #   FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL, TYPESAFE_API_KEY, and
@@ -105,6 +112,9 @@ fm_jev_capture_dd
 START_MS=$(fm_timing_now_ms)
 
 CONFIDENCE_FLOOR=0.6
+REUSE_SECS=600
+# The typesafe.ai base, timeout, and default model are fm_jev_post's
+# (bin/fm-jev-lib.sh); only OpenRouter's transport lives here.
 TS_MODEL=$FM_JEV_MODEL
 OR_BASE=https://openrouter.ai/api
 OR_TIMEOUT=10
@@ -288,6 +298,27 @@ trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT"' EXIT
 
 # One usage record per Jev call through the shared hook in bin/fm-jev-lib.sh;
 # `fm-jev.sh record-mine latest:dispatch-rule <rule>` labels it afterwards.
+# reuse_recent_answer: when a dispatch-rule call answered within REUSE_SECS
+# sent exactly this request, sets DECISION_ID to it and copies its recorded
+# response into RESP_FILE; returns 1 otherwise.
+reuse_recent_answer() {
+  local log since id
+  log=$(fm_jev_log_path)
+  [ -f "$log" ] || return 1
+  since=$(( $(date +%s) - REUSE_SECS ))
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    jq -e --argjson req "$REQUEST" '(.jev_request | tojson) == ($req | tojson)' \
+      "$(fm_jev_audit_path "$id")" >/dev/null 2>&1 || continue
+    jq -r '.jev_response' "$(fm_jev_audit_path "$id")" > "$RESP_FILE" 2>/dev/null || continue
+    DECISION_ID=$id
+    return 0
+  done < <(jq -sr --argjson since "$since" '
+    map(select(.event == "call" and .question_type == "dispatch-rule" and .status == "ok"
+      and ((.ts // "") | (try fromdateiso8601 catch 0)) >= $since)) | reverse | .[].decision_id' "$log" 2>/dev/null)
+  return 1
+}
+
 record_call() {  # <ok|error>
   local summary="Which dispatch rule fits this task brief" sha
   [ -z "$PROJECT" ] || summary="$summary for project $PROJECT"
@@ -367,25 +398,31 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
       }
     }')
   never_send_check
-  DECISION_ID=$(fm_jev_new_id)
-  if [ "$DISPATCH_PROVIDER" = openrouter ]; then
-    T0=$(fm_timing_now_ms)
-    HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$OR_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
-      -X POST "$OR_BASE/alpha/decisions" -H 'Content-Type: application/json' \
-      -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$OPENROUTER_API_KEY_PRIVATE") \
-      --data-binary @- 2>/dev/null) || HTTP=000
-    T1=$(fm_timing_now_ms)
-    LAT_MS=$(( T1 - T0 ))
-    if [ "$HTTP" != 200 ]; then
-      record_call error
-      emit_error "http $HTTP after ${LAT_MS} ms"
-    fi
+  REUSED=0
+  if reuse_recent_answer; then
+    REUSED=1
+    echo "dispatch-resolve: reused Jev decision $DECISION_ID (same request answered within ${REUSE_SECS}s; no new call)" >&2
   else
-    fm_jev_post "$REQUEST" "$RESP_FILE"
-    HTTP=$FM_JEV_HTTP LAT_MS=$FM_JEV_LAT_MS
-    if [ "$HTTP" != 200 ]; then
-      record_call error
-      emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
+    DECISION_ID=$(fm_jev_new_id)
+    if [ "$DISPATCH_PROVIDER" = openrouter ]; then
+      T0=$(fm_timing_now_ms)
+      HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$OR_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
+        -X POST "$OR_BASE/alpha/decisions" -H 'Content-Type: application/json' \
+        -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$OPENROUTER_API_KEY_PRIVATE") \
+        --data-binary @- 2>/dev/null) || HTTP=000
+      T1=$(fm_timing_now_ms)
+      LAT_MS=$(( T1 - T0 ))
+      if [ "$HTTP" != 200 ]; then
+        record_call error
+        emit_error "http $HTTP after ${LAT_MS} ms"
+      fi
+    else
+      fm_jev_post "$REQUEST" "$RESP_FILE"
+      HTTP=$FM_JEV_HTTP LAT_MS=$FM_JEV_LAT_MS
+      if [ "$HTTP" != 200 ]; then
+        record_call error
+        emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
+      fi
     fi
   fi
 jq -e --slurpfile rules "$RULES" '
@@ -401,8 +438,11 @@ jq -e --slurpfile rules "$RULES" '
       ((.usage | type) == "object" and
        (.usage.input_tokens | type) == "number" and
        (.usage.output_tokens | type) == "number"))' \
-  "$RESP_FILE" >/dev/null 2>&1 || { record_call error; emit_error "response is not a rule Choice answer"; }
-record_call ok
+  "$RESP_FILE" >/dev/null 2>&1 || {
+    [ "$REUSED" = 1 ] || record_call error
+    emit_error "response is not a rule Choice answer"
+  }
+[ "$REUSED" = 1 ] || record_call ok
 
 # ---- quota evidence: one quota-axi --json snapshot -----------------------------
 command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
