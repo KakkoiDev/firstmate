@@ -2632,8 +2632,15 @@ EOF
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "(none)" "empty fleet did not report (none) for in-flight tasks"
   assert_contains "$out" "absent" "empty fleet's AFK section did not report absent"
+  assert_not_contains "$out" "Jev Datadog failures" "a home with no failed Jev Datadog send printed the failure section"
 
-  pass "an empty fleet reports (none) for in-flight tasks and an absent AFK flag"
+  printf '%s\n' '{"v":1,"ts":"2026-09-29T03:11:06Z","decision_id":"jev-1","event":null,"reason":"event rendering failed"}' \
+    > "$home/state/jev-dd-failures.jsonl"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "jev datadog failures: 1 unacknowledged (first: event rendering failed for jev-1 at 2026-09-29T03:11:06Z" \
+    "the digest did not surface an unacknowledged Jev Datadog failure"
+
+  pass "an empty fleet reports (none) for in-flight tasks, an absent AFK flag, and any unacknowledged Jev Datadog failure"
 }
 
 test_next_step_sources_x_mode_cadence() {

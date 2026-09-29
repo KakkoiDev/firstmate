@@ -10,6 +10,7 @@
 #   fm-jev.sh record-mine <decision-id> <answer>
 #   fm-jev.sh record-outcome <decision-id> <text> [--final <choice>]
 #   fm-jev.sh show <decision-id>
+#   fm-jev.sh dd-failures [--quiet | --ack]
 #   fm-jev.sh report [--since <YYYY-MM-DD[THH:MM:SSZ]>] [--floor <0..1>]
 #                    [--audit-sample <n>] [--min-answered <n>]
 #                    [--min-agreement <0..1>] [--max-overruled <n>]
@@ -106,6 +107,12 @@
 #   the deciding party: "upheld" when the final choice equals the acting
 #   answer, "overruled" otherwise.
 #   Both send one Datadog label event after appending (bin/fm-jev-lib.sh).
+# dd-failures: prints "jev datadog failures: <n> unacknowledged" from
+#   $FM_HOME/state/jev-dd-failures.jsonl (bin/fm-jev-lib.sh owns the record),
+#   naming the first and last unacknowledged failure when n > 0. --quiet prints
+#   nothing when n is 0 (the session-start digest and fleet view use it).
+#   --ack acknowledges every failure recorded so far by storing that count in
+#   $FM_HOME/state/jev-dd-failures.acked.
 # show: prints {record, audit} as JSON: the joined record for one decision and
 #   its audit snapshot (null when none was written).
 # report: per question type, plain text: calls, answered, step-aside count,
@@ -509,10 +516,10 @@ settle() {
 duplicate_then_event() {  # <decision-id> <prompt> <options-json> <label: 0|1>
   local model
   fm_jev_request_cost "$1" "$qtype" "$start" "${FM_JEV_ISSUER:-fm-jev.sh}"
-  [ "$4" != 1 ] || fm_jev_dd_send "$(fm_jev_label_event "$(show_one "$1")")"
+  [ "$4" != 1 ] || fm_jev_dd_send "$(fm_jev_label_event "$(show_one "$1")")" "$1"
   for model in $FM_JEV_CLAUDE_MODELS; do
     duplicate_claude "$1" "$model" "$2" "$3"
-    fm_jev_dd_send "$(fm_jev_decision_event "$(show_one "$1" "$model")" error "$model")"
+    fm_jev_dd_send "$(fm_jev_decision_event "$(show_one "$1" "$model")" error "$model")" "$1"
   done
 }
 
@@ -528,7 +535,7 @@ cmd_record_mine() {
   fm_jev_append "$(jq -cn --arg id "$id" --arg mine "$answer" --arg ts "$(fm_jev_now_iso)" \
     '{v: 1, event: "mine", ts: $ts, decision_id: $id, mine: $mine}')"
   call=$(show_one "$id")
-  fm_jev_dd_send "$(fm_jev_label_event "$call")"
+  fm_jev_dd_send "$(fm_jev_label_event "$call")" "$id"
   jq -r '"jev: recorded \(.decision_id) mine=\(.mine) jev=\(.answer // "none") \(.decision)"' <<<"$call"
 }
 
@@ -551,7 +558,7 @@ cmd_record_outcome() {
     '{v: 1, event: "outcome", ts: $ts, decision_id: $id, outcome: $outcome,
       final: (if $final == "" then null else $final end)}')"
   joined=$(show_one "$id")
-  fm_jev_dd_send "$(fm_jev_label_event "$joined")"
+  fm_jev_dd_send "$(fm_jev_label_event "$joined")" "$id"
   jq -r '"jev: recorded outcome for \(.decision_id) final=\(.final // "none") jev=\(.answer // "none") \(.decision // "undecided") decider=\(.decider // "none") \(.graded // "ungraded")"' <<<"$joined"
 }
 
@@ -704,6 +711,31 @@ report_text() {  # <since> <floor> <min-answered> <min-agreement> <max-overruled
     end'
 }
 
+cmd_dd_failures() {
+  local mode=${1:-} path acked_path total acked n
+  [ $# -le 1 ] || die "dd-failures takes at most one of --quiet or --ack"
+  case "$mode" in ''|--quiet|--ack) ;; *) die "dd-failures takes --quiet or --ack" ;; esac
+  path=$(fm_jev_dd_failures_path)
+  acked_path="${path%.jsonl}.acked"
+  total=0
+  [ ! -f "$path" ] || total=$(grep -c . "$path")
+  acked=$(cat "$acked_path" 2>/dev/null) || acked=0
+  [[ $acked =~ ^[0-9]+$ ]] && [ "$acked" -le "$total" ] || acked=0
+  n=$((total - acked))
+  if [ "$mode" = --ack ]; then
+    printf '%s\n' "$total" > "$acked_path" || die "could not write $acked_path"
+    echo "jev: acknowledged $n datadog failure(s)"
+    return 0
+  fi
+  if [ "$n" -eq 0 ]; then
+    [ "$mode" = --quiet ] || echo "jev datadog failures: 0 unacknowledged"
+    return 0
+  fi
+  tail -n "$n" "$path" | jq -rs --argjson n "$n" '
+    def line($r): "\($r.reason) for \($r.decision_id // "an unknown decision") at \($r.ts)";
+    "jev datadog failures: \($n) unacknowledged (first: \(line(first)); last: \(line(last))); acknowledge with bin/fm-jev.sh dd-failures --ack"'
+}
+
 command -v jq >/dev/null 2>&1 || die "jq required"
 [ $# -gt 0 ] || { usage; exit 2; }
 sub=$1; shift
@@ -714,6 +746,7 @@ case "$sub" in
   record-outcome) cmd_record_outcome "$@" ;;
   show) cmd_show "$@" ;;
   report) cmd_report "$@" ;;
+  dd-failures) cmd_dd_failures "$@" ;;
   -h|--help) usage ;;
   *) die "unknown subcommand: $sub (see --help)" ;;
 esac
