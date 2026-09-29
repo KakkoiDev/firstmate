@@ -40,7 +40,9 @@
 #   empty temporary directory with --safe-mode, no setting sources, no MCP
 #   servers, no tools, no session persistence, no dynamic system prompt
 #   sections, and a strict one-option system prompt, so the measured input is
-#   the question rather than CLAUDE.md, hooks, or tool definitions. Each
+#   the question rather than CLAUDE.md, hooks, or tool definitions. It adds
+#   firstmate.role=jev-duplicate to OTEL_RESOURCE_ATTRIBUTES, so Claude Code
+#   telemetry can exclude these queries from the cost of real work. Each
 #   success appends one "duplicate" record: claude_model, claude_answer (null and
 #   status off-option when the reply is not exactly one option id),
 #   claude_wall_ms (measured around the process), claude_latency_ms
@@ -202,7 +204,8 @@ duplicate_claude() {
   dir=$(mktemp -d) || { duplicate_log "$id" "mktemp failed"; return 0; }
   out=$(mktemp) || { rmdir "$dir"; duplicate_log "$id" "mktemp failed"; return 0; }
   t0=$(fm_timing_now_ms)
-  if ! (cd "$dir" && printf '%s' "$prompt" | claude -p --safe-mode --setting-sources '' --strict-mcp-config \
+  if ! (cd "$dir" && printf '%s' "$prompt" \
+      | OTEL_RESOURCE_ATTRIBUTES="${OTEL_RESOURCE_ATTRIBUTES:+$OTEL_RESOURCE_ATTRIBUTES,}firstmate.role=jev-duplicate" claude -p --safe-mode --setting-sources '' --strict-mcp-config \
       --tools '' --no-session-persistence --exclude-dynamic-system-prompt-sections \
       --model "$model" --output-format json --system-prompt "$CLAUDE_SYSTEM_PROMPT" \
       > "$out" 2>/dev/null); then
