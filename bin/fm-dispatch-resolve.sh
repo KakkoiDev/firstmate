@@ -37,9 +37,8 @@
 #
 # Never-send check: when the optional $FM_HOME/config/dispatch-never-send list
 #   exists, every string value of the built request is checked against it
-#   before the POST. Each non-blank, non-# line is a literal matched
-#   case-insensitively, with surrounding whitespace trimmed and every run of
-#   whitespace, on both sides, treated as one space. A match, or a list that
+#   before the POST, through fm_jev_never_send_line in bin/fm-jev-lib.sh,
+#   which owns the matching rule. A match, or a list that
 #   is not a readable regular file, prints one
 #   "dispatch-resolve: off (...; nothing sent)" line on stderr naming at most
 #   the list line number, never its value, prints nothing on stdout, and exits
@@ -66,8 +65,9 @@
 #   question type dispatch-rule through bin/fm-jev-lib.sh, which owns the
 #   transport, the record format, the local audit snapshot (the brief text
 #   sent is its context), and the Datadog decision event, sent detached with
-#   claude_status not-run because the resolver runs no duplicate Claude query;
-#   stdout and exit status are unaffected.
+#   claude_status not-run because the resolver runs no duplicate Claude query,
+#   plus the issuing-request cost record and event (fm_jev_request_cost, issuer
+#   fm-dispatch-resolve.sh); stdout and exit status are unaffected.
 #
 # Environment:
 #   TYPESAFE_API_KEY is the only resolver-specific environment setting.
@@ -99,6 +99,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-jev-lib.sh
 . "$SCRIPT_DIR/fm-jev-lib.sh"
 fm_jev_capture_dd
+START_MS=$(fm_timing_now_ms)
 
 CONFIDENCE_FLOOR=0.6
 DEFAULT_WHEN="No listed rule applies to this task."
@@ -266,6 +267,7 @@ record_call() {  # <ok|error>
 }
 # shellcheck disable=SC2329 # Invoked through fm_jev_detach.
 send_decision_event() {
+  fm_jev_request_cost "$DECISION_ID" dispatch-rule "$START_MS" fm-dispatch-resolve.sh
   fm_jev_dd_send "$(fm_jev_decision_event "$(fm_jev_call_record "$DECISION_ID")" not-run '')"
 }
 
@@ -275,32 +277,20 @@ never_send_off() {
 }
 
 # Checks every string the request carries, so no text reaches the network
-# unchecked. grep's own stderr is discarded because it can echo the pattern.
+# unchecked; fm_jev_never_send_line in bin/fm-jev-lib.sh owns the match.
 never_send_check() {
-  local list value n=0 rc
+  local verdict rc
   [ -e "$NEVER_SEND_PATH" ] || [ -L "$NEVER_SEND_PATH" ] || return 0
-  { [ -f "$NEVER_SEND_PATH" ] && [ -r "$NEVER_SEND_PATH" ]; } \
-    || never_send_off "$NEVER_SEND_PATH is not a readable regular file"
   # Collapse whitespace runs on both sides so a value the brief wraps across
   # lines or spaces differently still matches
   jq -r '.. | strings | gsub("\\s+"; " ")' <<<"$REQUEST" > "$SEND_TEXT" 2>/dev/null \
     || never_send_off "could not extract the request text to check"
-  list=$(jq -Rr 'gsub("\\s+"; " ")' "$NEVER_SEND_PATH" 2>/dev/null) \
-    || never_send_off "could not read $NEVER_SEND_PATH"
-  while IFS= read -r value; do
-    n=$((n + 1))
-    value=${value# }
-    value=${value% }
-    case "$value" in
-      ''|'#'*) continue ;;
-    esac
-    grep -qiF -e "$value" "$SEND_TEXT" 2>/dev/null; rc=$?
-    case "$rc" in
-      0) never_send_off "brief text matches $NEVER_SEND_PATH line $n" ;;
-      1) ;;
-      *) never_send_off "could not check the request text against $NEVER_SEND_PATH line $n" ;;
-    esac
-  done <<<"$list"
+  verdict=$(FM_CONFIG_OVERRIDE="$CONFIG" fm_jev_never_send_line "$SEND_TEXT"); rc=$?
+  case "$rc" in
+    0) never_send_off "brief text matches $NEVER_SEND_PATH line $verdict" ;;
+    1) ;;
+    *) never_send_off "$verdict" ;;
+  esac
 }
 
 # Send Jev only the task-specific sections bin/fm-brief.sh scaffolds, plus a

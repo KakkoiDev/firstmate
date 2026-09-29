@@ -76,6 +76,9 @@ while [ $# -gt 0 ]; do
 done
 cat > "$FAKE_CURL_LOG/body"
 cat /dev/fd/3 > "$FAKE_CURL_LOG/header" 2>/dev/null || printf 'fd3 unreadable\n' > "$FAKE_CURL_LOG/header"
+# The usage log as it stood when the request left, so a case can prove what
+# was recorded before Jev answered.
+[ -z "${FAKE_CURL_USAGE:-}" ] || cp "$FAKE_CURL_USAGE" "$FAKE_CURL_LOG/usage-at-post" 2>/dev/null || true
 if [ "${FAKE_CURL_FAIL:-0}" = 1 ]; then
   exit 7
 fi
@@ -151,6 +154,9 @@ wait_for() {
   fail "$desc (timed out)"
 }
 calls() { jq -c 'select(.event == "call")' "$USAGE"; }
+# dd_decisions: the decision events sent, one per line, without the
+# request-cost event each ask also sends.
+dd_decisions() { jq -c '.[0] | select(.event == "decision")' "$LOG/dd-body"; }
 
 # run <exit-var> <out-var> <err-var> [args...]
 run() {
@@ -351,14 +357,16 @@ run code out err record-mine jev-0-0-0 looping
 expect_code 2 "$code" "an unknown decision id is refused"
 run code out err record-outcome "$id1" 'captain says it was confused' --final confused
 expect_code 0 "$code" "record-outcome exits 0"
-assert_equals "jev: recorded outcome for $id1 final=confused jev=looping overridden" "$out" "an outcome's final choice overrides"
+assert_equals "jev: recorded outcome for $id1 final=confused jev=looping overridden decider=firstmate overruled" "$out" "an outcome's final choice overrides and grades the deciding party"
 run code out err show "$id1"
 assert_equals 'looping|looping|captain says it was confused|confused|overridden' \
   "$(jq -r '.record | [.answer, .mine, .outcome, .final, .decision] | join("|")' <<<"$out")" "show joins call, mine, and outcome"
 run code out err show "$id2"
 assert_equals 'looping|confused||confused|overridden' \
   "$(jq -r '.record | [.answer, .mine, (.outcome // ""), .final, .decision] | join("|")' <<<"$out")" "without an outcome the final choice is firstmate's"
-assert_equals 'call call mine mine outcome' "$(jq -r 'select(.event != "duplicate") | .event' "$USAGE" | tr '\n' ' ' | sed 's/ $//')" "the log stays append-only"
+assert_equals 'call call mine mine outcome' "$(jq -r 'select(.event != "duplicate" and .event != "request") | .event' "$USAGE" | tr '\n' ' ' | sed 's/ $//')" "the log stays append-only"
+assert_equals 'unavailable unavailable' "$(jq -r 'select(.event == "request") | .status' "$USAGE" | tr '\n' ' ' | sed 's/ $//')" \
+  "outside a Claude Code session each call records its issuing request as unavailable"
 assert_equals 2 "$(jq -r 'select(.event == "duplicate") | .event' "$USAGE" | wc -l | tr -d ' ')" "one duplicate record per call"
 assert_absent "$LOG/dd-body" "no Datadog key sends nothing"
 assert_absent "$LOG/argv" "record subcommands never call curl"
@@ -370,10 +378,11 @@ write_response "$RESPONSE" looping 0.9
 TYPESAFE_API_KEY=$KEY DD_API_KEY=$DD_KEY DD_SITE=datadoghq.eu run code out err "${ASK[@]}"
 expect_code 0 "$code" "ask with Datadog exits 0"
 id=$(sed -n 's/^  decision_id: //p' <<<"$out")
-wait_for "the combined decision event is sent" lines_at_least "$LOG/dd-body" 1
-event=$(jq -c '.[0]' "$LOG/dd-body")
-assert_equals 1 "$(jq -s 'length' "$LOG/dd-body")" "one Datadog request per decision"
-assert_equals 1 "$(head -n1 "$LOG/dd-body" | jq 'length')" "the request holds one event"
+wait_for "the request-cost and decision events are sent" lines_at_least "$LOG/dd-body" 2
+event=$(jq -c '.[0] | select(.event == "decision")' "$LOG/dd-body")
+assert_equals 'decision request-cost' "$(jq -r '.[0].event' "$LOG/dd-body" | sort | tr '\n' ' ' | sed 's/ $//')" \
+  "one request-cost and one decision event per decision"
+assert_equals '1 1' "$(jq -r 'length' "$LOG/dd-body" | tr '\n' ' ' | sed 's/ $//')" "each request holds one event"
 assert_equals '["claude_answer","claude_cost_usd","claude_jev_agree","claude_latency_ms","claude_model","claude_status","claude_tokens_in","claude_tokens_out","claude_wall_ms","context_sha256","ddsource","ddtags","decision_id","event","firstmate_answer","jev_answer","jev_confidence","jev_cost_usd","jev_latency_ms","jev_model","jev_status","jev_tokens_in","jev_tokens_out","message","question_type","service","summary"]' \
   "$(jq -c 'keys' <<<"$event")" "the decision event carries exactly the documented fields"
 assert_equals "decision|$id|firstmate-jev|stuck-worker|What is the stuck worker doing|looping|jev-1.13.0|ok|looping|claude-opus-5-5|ok|true" \
@@ -392,8 +401,8 @@ for secret_text in 'CONTEXT-ONLY-MARKER' 'Which state best describes' 'Repeating
 done
 assert_contains "$(cat "$LOG/dd-argv")" 'https://http-intake.logs.datadoghq.eu/api/v2/logs' "DD_SITE picks the intake host"
 assert_not_contains "$(cat "$LOG/dd-argv")" "$DD_KEY" "the Datadog key never appears on curl argv"
-assert_equals "DD-API-KEY: $DD_KEY" "$(cat "$LOG/dd-header")" "the Datadog key reaches curl on the fd header"
-assert_equals 'dd:clean' "$(cat "$LOG/dd-env")" "no key is in the Datadog curl environment"
+assert_equals "DD-API-KEY: $DD_KEY" "$(sort -u "$LOG/dd-header")" "the Datadog key reaches curl on the fd header"
+assert_equals 'dd:clean' "$(sort -u "$LOG/dd-env")" "no key is in the Datadog curl environment"
 assert_equals clean "$(cat "$LOG/claude-env")" "the Datadog key never reaches claude"
 pass "Datadog decision event: one combined event after the duplicate, numeric fields, no text, key on fd 3"
 
@@ -404,8 +413,10 @@ rm -f "$HOME_DIR/.env"
 expect_code 0 "$code" "record-mine with Datadog exits 0"
 assert_equals '' "$err" "a sent label event is silent"
 label=$(jq -c '.[0]' "$LOG/dd-body")
-assert_equals '["ddsource","ddtags","decision_id","event","final_choice","firstmate_answer","followed_or_overridden","message","service"]' \
+assert_equals '["acting_answer","ddsource","ddtags","decider","decision_id","event","final_choice","firstmate_answer","followed_or_overridden","graded","message","service"]' \
   "$(jq -c 'keys' <<<"$label")" "the label event carries exactly the documented fields"
+assert_equals 'firstmate|confused|null' "$(jq -r '[.decider, .acting_answer, .graded] | map(tostring) | join("|")' <<<"$label")" \
+  "an ungraded label names firstmate as the decider"
 assert_equals "label|$id|confused|overridden|confused" \
   "$(jq -r '[.event, .decision_id, .firstmate_answer, .followed_or_overridden, .final_choice] | join("|")' <<<"$label")" \
   "record-mine sends the label with the final choice"
@@ -416,6 +427,8 @@ DD_API_KEY=$DD_KEY run code out err record-outcome "$id" 'captain agreed with Je
 assert_equals "label|$id|confused|followed|looping" \
   "$(jq -r '.[0] | [.event, .decision_id, .firstmate_answer, .followed_or_overridden, .final_choice] | join("|")' "$LOG/dd-body")" \
   "record-outcome sends the label with the overriding final choice"
+assert_equals 'firstmate|overruled' "$(jq -r '.[0] | [.decider, .graded] | join("|")' "$LOG/dd-body")" \
+  "record-outcome grades the deciding party in the label"
 DD_API_KEY=$DD_KEY FAKE_DD_HTTP=500 run code out err record-mine "$id" looping
 expect_code 0 "$code" "a Datadog failure never fails the record"
 assert_equals 'jev: datadog log not sent (http 500)' "$err" "a Datadog failure is one stderr line"
@@ -433,18 +446,18 @@ expect_code 0 "$code" "a claude failure never fails ask"
 assert_contains "$out" '  answer: looping' "a claude failure leaves the Jev answer intact"
 assert_equals '' "$err" "a claude failure writes nothing to the caller's stderr"
 id=$(sed -n 's/^  decision_id: //p' <<<"$out")
-wait_for "the decision event is sent after the claude failure" lines_at_least "$LOG/dd-body" 1
+wait_for "the decision event is sent after the claude failure" lines_at_least "$LOG/dd-body" 2
 assert_equals 0 "$(jq -r 'select(.event == "duplicate") | .event' "$USAGE" | wc -l | tr -d ' ')" "a claude failure writes no duplicate record"
 assert_contains "$(cat "$SIDELOG")" "$id: claude-opus-5-5: claude exited non-zero" "a claude failure is one side-log line"
-event=$(jq -c '.[0]' "$LOG/dd-body")
+event=$(dd_decisions)
 assert_equals 'looping|error|null|claude-opus-5-5|null|null|null|null|null|null' \
   "$(jq -r '[.jev_answer, .claude_status, .claude_answer, .claude_model, .claude_latency_ms, .claude_wall_ms, .claude_tokens_in, .claude_tokens_out, .claude_cost_usd, .claude_jev_agree] | map(tostring) | join("|")' <<<"$event")" \
   "a claude failure names its model and sends null Claude fields and a null agreement"
 reset
 TYPESAFE_API_KEY=$KEY DD_API_KEY=$DD_KEY FAKE_CURL_HTTP=503 run code out err "${ASK[@]}"
-wait_for "the decision event is sent after a Jev failure" lines_at_least "$LOG/dd-body" 1
+wait_for "the decision event is sent after a Jev failure" lines_at_least "$LOG/dd-body" 2
 assert_equals 'error|null|looping|null' \
-  "$(jq -r '.[0] | [.jev_status, .jev_answer, .claude_answer, .claude_jev_agree] | map(tostring) | join("|")' "$LOG/dd-body")" \
+  "$(dd_decisions | jq -r '[.jev_status, .jev_answer, .claude_answer, .claude_jev_agree] | map(tostring) | join("|")')" \
   "a Jev failure still sends one event with a null agreement"
 pass "claude failure: exit 0, no duplicate record, side-log line, null Claude fields in the event"
 
@@ -453,13 +466,13 @@ reset
 TYPESAFE_API_KEY=$KEY DD_API_KEY=$DD_KEY FM_JEV_CLAUDE_MODELS='' FAKE_CLAUDE_FAIL_MODEL=claude-sonnet-5 OTEL_RESOURCE_ATTRIBUTES=repo.url=x run code out err "${ASK[@]}"
 expect_code 0 "$code" "a three-model ask exits 0"
 id=$(sed -n 's/^  decision_id: //p' <<<"$out")
-wait_for "three decision events are sent" lines_at_least "$LOG/dd-body" 3
+wait_for "three decision events are sent" lines_at_least "$LOG/dd-body" 4
 assert_equals $'claude-opus-5-5\nclaude-sonnet-5\nclaude-haiku-4-5-20251001' "$(cat "$LOG/claude-models")" \
   "the default list asks Opus, Sonnet, then Haiku, one after another"
-assert_equals 3 "$(jq -s 'length' "$LOG/dd-body")" "one Datadog request per model"
+assert_equals 3 "$(dd_decisions | wc -l | tr -d ' ')" "one Datadog decision event per model"
 assert_equals repo.url=x,firstmate.role=jev-duplicate "$(cat "$LOG/claude-otel")" "the telemetry tag keeps existing resource attributes"
 assert_equals "decision|$id|claude-opus-5-5|ok|looping|decision|$id|claude-sonnet-5|error|null|decision|$id|claude-haiku-4-5-20251001|ok|looping" \
-  "$(jq -rs '[.[][0] | .event, .decision_id, .claude_model, .claude_status, .claude_answer] | map(tostring) | join("|")' "$LOG/dd-body")" \
+  "$(dd_decisions | jq -rs '[.[] | .event, .decision_id, .claude_model, .claude_status, .claude_answer] | map(tostring) | join("|")')" \
   "each event carries its own model, and a failed model still names itself"
 assert_equals 'claude-opus-5-5 claude-haiku-4-5-20251001' \
   "$(jq -r 'select(.event == "duplicate") | .claude_model' "$USAGE" | paste -sd ' ' -)" "one duplicate record per answering model"
@@ -538,6 +551,10 @@ project-match
   three-way all agree: 1/2 (50%)
   tokens: in 100   out 14
   cost: jev total $0.00000420 per decision $0.00000105   claude (API-equivalent) total $0.00700000 per decision $0.00233333
+  decider: jev 0   firstmate 3   overruled: jev 0   firstmate 0
+  authority: not listed
+  upper bound: issuing requests matched 0/5
+  graduation: not ready   answered 4 (>= 20)   confident (>= 0.6) blind agreement 0/0 (-) (>= 95%)   confident jev overruled 1 (<= 0)
 stuck-worker
   calls: 1   answered: 1   step-aside: 0
   agreement with firstmate: 0/1 (0%)
@@ -553,6 +570,10 @@ stuck-worker
   three-way all agree: 0/1 (0%)
   tokens: in 2   out 2
   cost: jev total $0.00000008 per decision $0.00000008   claude (API-equivalent) total $0.00300000 per decision $0.00300000
+  decider: jev 0   firstmate 1   overruled: jev 0   firstmate 0
+  authority: not listed
+  upper bound: issuing requests matched 0/1
+  graduation: not ready   answered 1 (>= 20)   confident (>= 0.6) blind agreement 0/0 (-) (>= 95%)   confident jev overruled 0 (<= 0)
 all types
   calls: 6   answered: 5   step-aside: 1
   agreement with firstmate: 2/4 (50%)
@@ -568,6 +589,7 @@ all types
   three-way all agree: 1/3 (33.3%)
   tokens: in 102   out 16
   cost: jev total $0.00000428 per decision $0.00000086   claude (API-equivalent) total $0.01000000 per decision $0.00250000
+  upper bound: issuing requests matched 0/6
 TXT
 )
 assert_equals "$expected" "$out" "report math over the fixture since the date"
@@ -597,3 +619,172 @@ rm -f "$USAGE"
 run code out err report
 assert_contains "$out" 'no recorded calls' "an empty log reports no calls"
 pass "report --audit-sample: n random agreements beside every disagreement, each with its snapshot path"
+
+# --- --mine: the blind choice is recorded before the request leaves ------------------
+reset
+write_response "$RESPONSE" looping 0.9
+TYPESAFE_API_KEY=$KEY FAKE_CURL_USAGE=$USAGE run code out err "${ASK[@]}" --mine confused
+expect_code 0 "$code" "ask --mine exits 0"
+id=$(sed -n 's/^  decision_id: //p' <<<"$out")
+assert_equals "mine|$id|confused|true" \
+  "$(jq -r 'select(.event == "mine") | [.event, .decision_id, .mine, .blind] | map(tostring) | join("|")' "$LOG/usage-at-post")" \
+  "the blind choice is in the log when the request is sent"
+assert_equals '' "$(jq -r 'select(.event == "call") | .event' "$LOG/usage-at-post")" "no Jev answer is in the log when the request is sent"
+assert_contains "$out" '  acting: confused   decider: firstmate' "an unlisted type acts on firstmate's blind choice"
+assert_equals 'firstmate|confused|false|null' \
+  "$(jq -r 'select(.event == "decided") | [.decider, .acting, .listed, .floor] | map(tostring) | join("|")' "$USAGE")" \
+  "one decided record names the deciding party"
+run code out err acting "$id"
+assert_equals 'confused firstmate' "$out" "acting prints the acting answer and its decider"
+run code out err record-mine "$id" looping
+expect_code 2 "$code" "a blind choice cannot be replaced by record-mine"
+assert_contains "$err" 'already carries firstmate' "the refusal names the blind choice"
+TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}" --mine sleeping
+expect_code 2 "$code" "a --mine outside the options is a usage error"
+reset
+run code out err "${ASK[@]}" --mine confused
+assert_equals '' "$out" "with Jev off, ask --mine prints nothing"
+assert_absent "$USAGE" "with Jev off, ask --mine records nothing"
+pass "ask --mine: blind choice recorded before the request, firstmate acts on an unlisted type, off records nothing"
+
+# --- authority file: listed above and below the floor, refused lines -----------------
+reset
+mkdir -p "$HOME_DIR/config"
+printf '%s\n' '# operator-owned' 'stuck-worker 0.85' > "$HOME_DIR/config/jev-authority"
+TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}" --mine confused
+id=$(sed -n 's/^  decision_id: //p' <<<"$out")
+assert_contains "$out" '  acting: looping   decider: jev' "a listed type at or above its floor acts on Jev's answer"
+assert_equals 'jev|looping|true|0.85' \
+  "$(jq -r 'select(.event == "decided") | [.decider, .acting, .listed, .floor] | map(tostring) | join("|")' "$USAGE")" \
+  "the decided record carries the listing and floor"
+run code out err acting "$id"
+assert_equals 'looping jev' "$out" "acting follows Jev on a listed type"
+run code out err record-outcome "$id" 'the worker was confused after all' --final confused
+assert_equals "jev: recorded outcome for $id final=confused jev=looping overridden decider=jev overruled" "$out" \
+  "an outcome that changes Jev's acting answer grades Jev as overruled"
+printf '%s\n' 'stuck-worker 0.95' > "$HOME_DIR/config/jev-authority"
+TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}" --mine confused
+assert_contains "$out" '  acting: confused   decider: firstmate' "below the listed floor firstmate's choice acts"
+printf '%s\n' 'merge-risk 0.5' 'stuck-worker high' 'stuck-worker 0.5' > "$HOME_DIR/config/jev-authority"
+TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}" --mine confused
+assert_contains "$err" 'jev: authority line 1 refused (merge-risk is never handed to Jev)' "a never-type is refused even when listed"
+assert_contains "$err" 'jev: authority line 2 refused (expected <type> <floor from 0 through 1>)' "a malformed line is refused"
+assert_contains "$out" '  acting: looping   decider: jev' "a valid line still grants authority beside refused ones"
+wait_for "every duplicate settles" settled 3
+run code out err report --floor 0.6
+assert_contains "$out" '  decider: jev 2   firstmate 1   overruled: jev 1   firstmate 0' "report splits deciders and counts overrules per decider"
+assert_contains "$out" '  authority: listed at floor 0.5' "report shows the current listing"
+assert_contains "$out" 'confident (>= 0.5) blind agreement 0/3 (0%) (>= 95%)   confident jev overruled 1 (<= 0)' \
+  "graduation reads confident blind choices at the listed floor"
+run code out err report --min-answered 1 --min-agreement 0 --max-overruled 5
+assert_contains "$out" '  graduation: ready   answered 3 (>= 1)' "the graduation thresholds are overridable"
+run code out err report --min-agreement 2
+expect_code 2 "$code" "an out-of-range --min-agreement is a usage error"
+rm -rf "$HOME_DIR/config"
+pass "authority file: listed at or above the floor acts on Jev, below it or refused acts on firstmate, graded per decider"
+
+# --- report: a Jev model change on a listed type is flagged ---------------------------
+reset
+mkdir -p "$HOME_DIR/state" "$HOME_DIR/config"
+printf '%s\n' 'project-match 0.6' > "$HOME_DIR/config/jev-authority"
+{
+  fixture_call m1 project-match 2026-09-21T00:00:00Z ok a 0.9 100 10 2
+  fixture_call m2 project-match 2026-09-22T00:00:00Z ok a 0.9 100 10 2 | jq -c '.model = "jev-1.14.0"'
+  printf '%s\n' '{"v":1,"event":"decided","ts":"2026-09-21T00:00:00Z","decision_id":"m1","decider":"jev","acting":"a","listed":true,"floor":0.6}'
+  printf '%s\n' '{"v":1,"event":"decided","ts":"2026-09-22T00:00:00Z","decision_id":"m2","decider":"jev","acting":"a","listed":true,"floor":0.6}'
+} > "$USAGE"
+run code out err report
+assert_contains "$out" '  flag: jev model changed while listed (jev-1.13.0 -> jev-1.14.0)' "a model change on a listed type is flagged"
+rm -rf "$HOME_DIR/config"
+pass "report flags a Jev model change across listed decisions"
+
+# --- issuing-request cost: fixture transcript lookup -------------------------------
+TRANSCRIPT="$TMP_ROOT/transcript.jsonl"
+tool_use() {  # <id> <ts> <command> [<input> <cache-create> <cache-1h> <cache-read> <output>]
+  jq -cn --arg id "$1" --arg ts "$2" --arg c "$3" --argjson i "${4:-10}" --argjson cc "${5:-2000}" \
+    --argjson c1 "${6:-1000}" --argjson cr "${7:-100000}" --argjson o "${8:-200}" '
+    {type: "assistant", timestamp: $ts, message: {id: "msg", model: "claude-opus-5-5",
+      usage: {input_tokens: $i, cache_creation_input_tokens: $cc, cache_creation: {ephemeral_1h_input_tokens: $c1},
+              cache_read_input_tokens: $cr, output_tokens: $o},
+      content: [{type: "text", text: "asking"}, {type: "tool_use", id: $id, name: "Bash", input: {command: $c}}]}}'
+}
+tool_result() {  # <tool-use-id> <ts>
+  jq -cn --arg id "$1" --arg ts "$2" '{type: "user", timestamp: $ts, message: {content: [{type: "tool_result", tool_use_id: $id, content: "done"}]}}'
+}
+request_record() { jq -c 'select(.event == "request")' "$USAGE"; }
+request_ask() {  # asks as fm-spawn.sh against $TRANSCRIPT and waits for the request record
+  reset
+  TYPESAFE_API_KEY=$KEY FM_JEV_ISSUER=fm-spawn.sh FM_JEV_TRANSCRIPT=${1:-$TRANSCRIPT} FM_JEV_TRANSCRIPT_WAIT=0 \
+    run code out err "${ASK[@]}"
+  wait_for "the request record lands" lines_at_least "$USAGE" 3
+  wait_for "the duplicate settles" settled 1
+}
+{
+  tool_use toolu_old 2026-01-01T00:00:00.000Z 'bin/fm-spawn.sh old projects/x'
+  tool_result toolu_old 2026-01-01T00:00:01.500Z
+  printf '%s\n' '{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","message":{"content":[{"type":"tool_use","id":"toolu_read","name":"Read","input":{"file_path":"bin/fm-spawn.sh"}}]}}'
+  tool_use toolu_live 2026-01-01T00:00:03.250Z 'cd x && bin/fm-spawn.sh t1 projects/x --concurrency parallel'
+  printf '%s\n' 'not json'
+} > "$TRANSCRIPT"
+request_ask
+assert_equals 'ok|toolu_live|claude-opus-5-5|10|2000|1000|100000|200' \
+  "$(request_record | jq -r '[.status, .tool_use_id, .request_model, .input_tokens, .cache_creation_input_tokens, .cache_creation_1h_input_tokens, .cache_read_input_tokens, .output_tokens] | map(tostring) | join("|")')" \
+  "the running Bash call that invokes the issuer is the issuing request"
+tool_use toolu_other 2026-01-01T00:00:04Z 'bin/fm-spawn.sh t2 projects/y' >> "$TRANSCRIPT"
+request_ask
+assert_equals 'ambiguous|null' "$(request_record | jq -r '[.status, .input_tokens] | map(tostring) | join("|")')" \
+  "two running calls invoking the issuer record ambiguous with null tokens"
+{ tool_use toolu_old 2026-01-01T00:00:00Z 'bin/fm-spawn.sh old'; tool_result toolu_old 2026-01-01T00:00:01Z; } > "$TRANSCRIPT"
+request_ask
+assert_equals 'unmatched|no running Bash tool call that invokes fm-spawn.sh in the transcript' \
+  "$(request_record | jq -r '[.status, .reason] | join("|")')" "a finished call is never the issuing request"
+request_ask "$TMP_ROOT/absent.jsonl"
+assert_equals 'unavailable|FM_JEV_TRANSCRIPT is not readable' "$(request_record | jq -r '[.status, .reason] | join("|")')" \
+  "an unreadable transcript records unavailable"
+reset
+TYPESAFE_API_KEY=$KEY DD_API_KEY=$DD_KEY run code out err "${ASK[@]}"
+wait_for "the request-cost event is sent" lines_at_least "$LOG/dd-body" 2
+assert_equals 'unavailable|question_type:stuck-worker,cost_source:issuing-request|null' \
+  "$(jq -r '.[0] | select(.event == "request-cost") | [.request_status, .ddtags, .request_context_tokens] | map(tostring) | join("|")' "$LOG/dd-body")" \
+  "outside a session the request-cost event is tagged apart from duplicates and carries no tokens"
+pass "issuing request: matched structurally from the transcript, ambiguous, unmatched, and unavailable recorded, never blocking"
+
+# --- report: the upper-bound cost line -------------------------------------------
+reset
+mkdir -p "$HOME_DIR/state"
+fixture_request() {  # <id> <input> <cache-create> <cache-1h> <cache-read> <output>
+  jq -cn --arg id "$1" --argjson i "$2" --argjson cc "$3" --argjson c1 "$4" --argjson cr "$5" --argjson o "$6" '
+    {v: 1, event: "request", ts: "2026-09-26T00:00:00Z", decision_id: $id, status: "ok", reason: null,
+     tool_use_id: "toolu", request_model: "claude-opus-5-5", input_tokens: $i, cache_creation_input_tokens: $cc,
+     cache_creation_1h_input_tokens: $c1, cache_read_input_tokens: $cr, output_tokens: $o}'
+}
+{
+  fixture_call u1 small-context 2026-09-21T00:00:00Z ok a 0.9 100 1000 2
+  fixture_request u1 10 2000 1000 100000 200
+  fixture_call u2 small-context 2026-09-21T00:00:00Z ok a 0.9 100 1000 2
+  printf '%s\n' '{"v":1,"event":"request","ts":"2026-09-26T00:00:00Z","decision_id":"u2","status":"unmatched","reason":"r"}'
+  fixture_call u3 big-context 2026-09-21T00:00:00Z ok a 0.9 100 1000 2
+  fixture_request u3 1000 0 0 250000 100
+} > "$USAGE"
+run code out err report
+# The dollar amounts are literal expected text.
+# shellcheck disable=SC2016
+assert_contains "$out" '  upper bound: issuing requests matched 1/2   opus $0.07125800 after jev $0.00004200   assumption: sonnet $0.04273800, haiku $0.01421800' \
+  "the upper bound prices matched requests at Opus rates minus Jev, with Sonnet and Haiku as the assumption"
+# shellcheck disable=SC2016
+assert_contains "$out" '  upper bound: issuing requests matched 1/1   opus $0.13245800 after jev $0.00004200   assumption: sonnet $0.07945800, haiku invalid (context over 200000)' \
+  "the Haiku figure is invalid when a request context exceeded 200k"
+pass "report upper bound: Opus net of Jev, Sonnet and Haiku as the assumption, Haiku invalid over 200k"
+
+# --- never-send list: a matching context sends nothing ---------------------------------
+reset
+mkdir -p "$HOME_DIR/config"
+printf '%s\n' '# private' 'THE SAME   test failing' > "$HOME_DIR/config/dispatch-never-send"
+TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}" --mine confused
+expect_code 0 "$code" "a never-send match exits 0"
+assert_equals '' "$out" "a never-send match prints nothing on stdout"
+assert_equals 'jev: off (context matches the never-send list line 2; nothing sent)' "$err" "the match names the line, never the value"
+assert_absent "$LOG/argv" "a never-send match never calls curl"
+assert_absent "$USAGE" "a never-send match records nothing"
+rm -rf "$HOME_DIR/config"
+pass "never-send list: a matching ask sends nothing and records nothing"

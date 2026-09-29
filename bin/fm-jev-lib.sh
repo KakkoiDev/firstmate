@@ -23,11 +23,21 @@
 #      "tokens_in","tokens_out","jev_cost_usd","context_sha256","status"}
 #   jev_cost_usd is tokens_in at FM_JEV_USD_PER_BILLION_INPUT; output is free.
 #   status is ok (a validated answer) or error (anything else, answer null).
-#   bin/fm-jev.sh appends later "mine" and "outcome" lines that carry the same
-#   decision_id; readers join on it, so the file stays append-only.
+#   bin/fm-jev.sh appends "mine", "decided", "request", "duplicate", and
+#   "outcome" lines that carry the same decision_id (its header owns their
+#   fields); readers join on it, so the file stays append-only.
 #   The record holds no question text, context, or request payload; its
 #   context_sha256 and decision_id point at the audit snapshot.
 #   A write failure is discarded: the record never changes what a caller does.
+#
+# Never-send list: fm_jev_never_send_line <text-file> checks text about to be
+#   sent against the optional $FM_HOME/config/dispatch-never-send list, whose
+#   matching rule docs/configuration.md "Typed dispatch resolution" owns: each
+#   non-blank, non-# line is a literal matched case-insensitively with
+#   surrounding whitespace trimmed and every whitespace run, on both sides,
+#   read as one space. Exit 0 prints the first matching line number, 1 means no
+#   match or no list, and 2 prints why the list could not be checked. Callers
+#   send nothing on 0 or 2 and never print the matched value.
 #
 # Audit snapshot: fm_jev_write_audit writes $FM_HOME/state/jev-audit/<id>.json,
 #   local only, so a later audit can re-judge the decision from what the models
@@ -54,9 +64,39 @@
 #       claude_latency_ms (API duration), claude_wall_ms, claude_tokens_in,
 #       claude_tokens_out, claude_cost_usd (API-equivalent), claude_jev_agree
 #       (null when either answer is missing), firstmate_answer.
-#     event=label (fm_jev_label_event), after record-mine or record-outcome:
-#       decision_id, firstmate_answer, followed_or_overridden, final_choice.
+#     event=label (fm_jev_label_event), after record-mine, record-outcome, or
+#       an ask that carried firstmate's blind choice: decision_id,
+#       firstmate_answer, followed_or_overridden, final_choice, decider (jev or
+#       firstmate), acting_answer, graded (upheld, overruled, or null before
+#       any outcome).
+#     event=request-cost (fm_jev_request_cost), one per Jev call, tagged
+#       cost_source:issuing-request so it never counts as a duplicate query:
+#       decision_id, question_type, request_status, request_reason,
+#       request_tool_use_id, request_model, request_input_tokens,
+#       request_cache_creation_input_tokens, request_cache_read_input_tokens,
+#       request_output_tokens, request_context_tokens, jev_cost_usd.
 #   No question text, context, options, or probabilities are sent.
+#
+# Issuing request: fm_jev_request_cost <decision-id> <question-type>
+#   <ask-start-ms> <issuer> finds the Claude Code request whose Bash tool call
+#   ran the ask, so its real cost can bound what Jev saves. The transcript is
+#   $FM_JEV_TRANSCRIPT when set, else the one file
+#   ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/*/$CLAUDE_CODE_SESSION_ID.jsonl.
+#   A candidate is an assistant Bash tool_use whose command contains <issuer>
+#   (the script basename that asked, such as fm-spawn.sh), written at or before
+#   the ask started, with no tool_result or one written at or after it; the
+#   command text and the still-running call identify it, never a timestamp
+#   alone. Exactly one candidate is a match; the line's message.usage and
+#   message.model are recorded. The transcript is written asynchronously, so
+#   the lookup polls for up to $FM_JEV_TRANSCRIPT_WAIT seconds (default 10);
+#   it runs detached and never blocks the ask. It appends one record:
+#     {"v":1,"event":"request","ts","decision_id","status","reason",
+#      "tool_use_id","request_model","input_tokens",
+#      "cache_creation_input_tokens","cache_creation_1h_input_tokens",
+#      "cache_read_input_tokens","output_tokens"}
+#   status is ok, unavailable (no session id, another harness, or no single
+#   transcript file), unmatched (no candidate), or ambiguous (several), and
+#   every token field is null unless ok. It makes no model call.
 
 # shellcheck disable=SC2034 # Read by the sourcing caller.
 FM_JEV_MODEL=jev-latest
@@ -96,13 +136,108 @@ fm_jev_decision_event() {
      firstmate_answer: (.mine // null)}' <<<"$1" 2>/dev/null
 }
 
-# fm_jev_label_event <joined-json>: the follow-up after record-mine or record-outcome.
+# fm_jev_label_event <joined-json>: the follow-up after record-mine,
+# record-outcome, or a blind-choice ask.
 fm_jev_label_event() {
   jq -c '
     {ddsource: "firstmate", service: "firstmate-jev", ddtags: ("question_type:" + .question_type),
-     message: ("\(.question_type) label: firstmate \(.mine // "none"), \(.decision // "undecided")"),
+     message: ("\(.question_type) label: firstmate \(.mine // "none"), \(.decision // "undecided"), decided by \(.decider // "none")"),
      event: "label", decision_id, firstmate_answer: (.mine // null),
-     followed_or_overridden: (.decision // null), final_choice: (.final // null)}' <<<"$1" 2>/dev/null
+     followed_or_overridden: (.decision // null), final_choice: (.final // null),
+     decider: (.decider // null), acting_answer: (.acting // null), graded: (.graded // null)}' <<<"$1" 2>/dev/null
+}
+
+# fm_jev_request_event <call-json> <request-json>: the issuing-request cost event.
+fm_jev_request_event() {
+  jq -c --argjson req "$2" '
+    def n($v): if ($v | type) == "number" then $v else 0 end;
+    {ddsource: "firstmate", service: "firstmate-jev",
+     ddtags: ("question_type:" + .question_type + ",cost_source:issuing-request"),
+     message: ("\(.question_type) issuing request: \($req.status) \($req.request_model // "")"),
+     event: "request-cost", decision_id, question_type,
+     request_status: $req.status, request_reason: ($req.reason // null),
+     request_tool_use_id: ($req.tool_use_id // null), request_model: ($req.request_model // null),
+     request_input_tokens: $req.input_tokens, request_cache_creation_input_tokens: $req.cache_creation_input_tokens,
+     request_cache_read_input_tokens: $req.cache_read_input_tokens, request_output_tokens: $req.output_tokens,
+     request_context_tokens: (if $req.status == "ok"
+       then n($req.input_tokens) + n($req.cache_creation_input_tokens) + n($req.cache_read_input_tokens) else null end),
+     jev_cost_usd: (.jev_cost_usd // null)}' <<<"$1" 2>/dev/null
+}
+
+# fm_jev_transcript_path: prints the one transcript file for this Claude Code
+# session, or fails with the reason on stdout.
+fm_jev_transcript_path() {
+  local dir id matches=()
+  if [ -n "${FM_JEV_TRANSCRIPT:-}" ]; then
+    [ -r "$FM_JEV_TRANSCRIPT" ] || { printf 'FM_JEV_TRANSCRIPT is not readable'; return 1; }
+    printf '%s' "$FM_JEV_TRANSCRIPT"
+    return 0
+  fi
+  id=${CLAUDE_CODE_SESSION_ID:-}
+  [ -n "$id" ] || { printf 'no Claude Code session id (another harness, or run outside a session)'; return 1; }
+  [[ $id =~ ^[A-Za-z0-9-]+$ ]] || { printf 'session id is not a transcript name'; return 1; }
+  dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects
+  shopt -s nullglob
+  matches=("$dir"/*/"$id".jsonl)
+  shopt -u nullglob
+  [ "${#matches[@]}" -eq 1 ] || { printf '%s transcript files for session %s' "${#matches[@]}" "$id"; return 1; }
+  printf '%s' "${matches[0]}"
+}
+
+# shellcheck disable=SC2016 # $names below are jq variables, not shell ones.
+FM_JEV_REQUEST_JQ='
+  def ms($t): ($t | tostring) as $s |
+    (($s | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) * 1000)
+    + ((($s | capture("\\.(?<f>[0-9]+)Z$").f // "0") + "000")[0:3] | tonumber);
+  reduce (inputs | try fromjson catch empty | select(type == "object")) as $l ({u: {}, r: {}};
+    if $l.type == "assistant" and ($l.message.content | type) == "array" then
+      reduce ($l.message.content[] | select(type == "object" and .type == "tool_use" and .name == "Bash"
+          and ((.input.command // "") | type) == "string" and (.input.command | contains($issuer)))) as $t (.;
+        .u[$t.id] = {ts: $l.timestamp, model: ($l.message.model // null), usage: ($l.message.usage // {})})
+    elif $l.type == "user" and ($l.message.content | type) == "array" then
+      reduce ($l.message.content[] | select(type == "object" and .type == "tool_result")) as $t (.;
+        .r[$t.tool_use_id] = $l.timestamp)
+    else . end)
+  | .r as $r
+  | [.u | to_entries[] | select((try ms(.value.ts) catch null) as $t | $t != null and $t <= $start)
+      | select($r[.key] == null or ((try ms($r[.key]) catch 0) >= $start))]
+  | if length == 1 then first | {status: "ok", tool_use_id: .key, request_model: .value.model,
+        input_tokens: (.value.usage.input_tokens // null),
+        cache_creation_input_tokens: (.value.usage.cache_creation_input_tokens // null),
+        cache_creation_1h_input_tokens: (.value.usage.cache_creation.ephemeral_1h_input_tokens // null),
+        cache_read_input_tokens: (.value.usage.cache_read_input_tokens // null),
+        output_tokens: (.value.usage.output_tokens // null)}
+    elif length == 0 then {status: "unmatched", reason: "no running Bash tool call that invokes \($issuer) in the transcript"}
+    else {status: "ambiguous", reason: "\(length) running Bash tool calls invoke \($issuer)"} end
+'
+
+# fm_jev_request_cost <decision-id> <question-type> <ask-start-ms> <issuer>:
+# records the issuing request (see the header) and sends its cost event.
+fm_jev_request_cost() {
+  local id=$1 qtype=$2 start=$3 issuer=$4 path reason found='' deadline line call
+  if ! path=$(fm_jev_transcript_path); then
+    reason=$path
+    found=$(jq -cn --arg r "$reason" '{status: "unavailable", reason: $r}')
+  else
+    deadline=$(( $(fm_timing_now_ms) + ${FM_JEV_TRANSCRIPT_WAIT:-10} * 1000 ))
+    while :; do
+      found=$(jq -Rcn --arg issuer "$issuer" --argjson start "$start" "$FM_JEV_REQUEST_JQ" "$path" 2>/dev/null) \
+        || found=$(jq -cn '{status: "unmatched", reason: "transcript unreadable"}')
+      [ "$(jq -r .status <<<"$found")" = unmatched ] || break
+      [ "$(fm_timing_now_ms)" -lt "$deadline" ] || break
+      sleep 0.5
+    done
+  fi
+  line=$(jq -c --arg id "$id" --arg ts "$(fm_jev_now_iso)" '
+    {v: 1, event: "request", ts: $ts, decision_id: $id, status, reason: (.reason // null),
+     tool_use_id: (.tool_use_id // null), request_model: (.request_model // null),
+     input_tokens: (.input_tokens // null), cache_creation_input_tokens: (.cache_creation_input_tokens // null),
+     cache_creation_1h_input_tokens: (.cache_creation_1h_input_tokens // null),
+     cache_read_input_tokens: (.cache_read_input_tokens // null), output_tokens: (.output_tokens // null)}' <<<"$found" 2>/dev/null) || return 0
+  fm_jev_append "$line"
+  call=$(fm_jev_call_record "$id")
+  [ -n "$call" ] || call=$(jq -cn --arg id "$id" --arg q "$qtype" '{decision_id: $id, question_type: $q}')
+  fm_jev_dd_send "$(fm_jev_request_event "$call" "$line")"
 }
 
 # fm_jev_dd_send <event-json>: one Datadog log event with the key on fd 3.
@@ -127,6 +262,36 @@ fm_jev_dd_send() {
     *) echo "jev: datadog log not sent (http $http)" >&2 ;;
   esac
   return 0
+}
+
+fm_jev_never_send_line() {  # <text-file>
+  local path="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/dispatch-never-send" norm list value n=0 rc
+  [ -e "$path" ] || [ -L "$path" ] || return 1
+  { [ -f "$path" ] && [ -r "$path" ]; } || { printf '%s is not a readable regular file' "$path"; return 2; }
+  norm=$(mktemp) || { printf 'mktemp failed'; return 2; }
+  # grep's own stderr is discarded because it can echo the pattern.
+  if ! jq -Rr 'gsub("\\s+"; " ")' "$1" > "$norm" 2>/dev/null \
+    || ! list=$(jq -Rr 'gsub("\\s+"; " ")' "$path" 2>/dev/null); then
+    rm -f "$norm"
+    printf 'could not read the text or %s' "$path"
+    return 2
+  fi
+  while IFS= read -r value; do
+    n=$((n + 1))
+    value=${value# }
+    value=${value% }
+    case "$value" in
+      ''|'#'*) continue ;;
+    esac
+    grep -qiF -e "$value" "$norm" 2>/dev/null; rc=$?
+    case "$rc" in
+      0) rm -f "$norm"; printf '%s' "$n"; return 0 ;;
+      1) ;;
+      *) rm -f "$norm"; printf 'could not check the text against %s line %s' "$path" "$n"; return 2 ;;
+    esac
+  done <<<"$list"
+  rm -f "$norm"
+  return 1
 }
 
 fm_jev_audit_path() {  # <decision-id>

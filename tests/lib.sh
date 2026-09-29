@@ -68,6 +68,11 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Clear the Claude Code session id so no Jev ask looks for the live session
+# transcript; a case that tests the issuing-request lookup names its fixture
+# with FM_JEV_TRANSCRIPT.
+unset CLAUDE_CODE_SESSION_ID
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
