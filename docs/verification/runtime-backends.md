@@ -663,6 +663,26 @@ The real pane renders this inside a bordered box, omitted here for readability; 
 That capture demonstrated why each signature function matches the FULL captured tail rather than the Grok/Rovo/AGY busy-footer convention of the last 12 non-blank lines: a bordered dialog box renders many short lines of pure border and padding (`│  ...  │`) that are NOT whitespace-only, so the 12-line reduction pushed this exact heading text out of the window and silently defeated the match on the first attempt.
 None of these three runs ever answered its dialog (Escape only, never Enter), so no credential store was written to and no model tokens were spent.
 
+## Jev hooks under Claude Code
+
+The tracked Claude Code entries for `bin/fm-jev-prompt-reminder.sh` (UserPromptSubmit), `bin/fm-jev-pretool-check.sh` (PreToolUse, matcher `Bash|mcp__.*`), and `bin/fm-jev-stop-check.sh` (Stop) were verified end to end against the installed Claude Code through `tests/fm-jev-claude-hooks-live-e2e.test.sh`, which is what refreshes this record after an upgrade.
+The guard spends no model tokens: the real `claude -p` runs against a local fake Anthropic endpoint set through `ANTHROPIC_BASE_URL`, which scripts each model turn from the conversation it receives, with a fake stdio Notion MCP server and a fake Jev endpoint.
+It proves that the matcher reaches an MCP tool, that an exit-2 PreToolUse refusal keeps the tool from running and reaches the model, that a bound claim-check lets the same Notion write through, and that an exit-2 Stop refusal continues the turn with its reason until the final message carries the Jev asks section and names the disagreement.
+
+Verified 2026-09-29 on Claude Code 2.1.284.
+
+```sh
+bash tests/fm-jev-claude-hooks-live-e2e.test.sh
+```
+
+```
+ok - claude 2.1.284 (Claude Code) runs the tracked prompt entry, which records the turn start
+ok - claude 2.1.284 (Claude Code) runs the tracked PreToolUse guard on Bash and MCP tools; a refused call never runs, and a bound claim-check lets it through
+ok - claude 2.1.284 (Claude Code) runs the tracked Stop check, which continues the turn until the section and the disagreement are in the final message
+```
+
+Not verified: whether Claude Code shows the PreToolUse warning's `additionalContext` to the model; the warning also goes out as `systemMessage`.
+
 ## Worker account pin sign-in check
 
 `bin/fm-worker-account-lib.sh` decides whether a pinned account is signed in from vendor output: the exit status of `claude auth status`, the JSON of `pi auth check`, and the provider column of `pi --list-models`.
