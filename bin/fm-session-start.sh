@@ -1026,6 +1026,14 @@ if fm_pf_relay_active "$FM_HOME" \
   fi
 fi
 
+# Datadog sends of Jev events that failed since the last acknowledgement, so a
+# lost event is never silent (bin/fm-jev.sh dd-failures owns the count).
+JEV_DD_FAILURES=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-jev.sh" dd-failures --quiet 2>/dev/null) || JEV_DD_FAILURES=
+if [ -n "$JEV_DD_FAILURES" ]; then
+  subsection "Jev Datadog failures"
+  printf '%s\n' "$JEV_DD_FAILURES"
+fi
+
 # --- 7. network checks ------------------------------------------------------
 # Deliberately here and not later: these lines are actionable (a stuck clone, a
 # secondmate that could not be relaunched, broken GitHub auth), and the section

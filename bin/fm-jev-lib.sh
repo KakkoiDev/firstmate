@@ -54,7 +54,11 @@
 #   nothing is sent. fm_jev_dd_send posts one event to
 #   https://http-intake.logs.$DD_SITE/api/v2/logs with the key on the fd 3
 #   DD-API-KEY header and service firstmate-jev; any failure is one
-#   "jev: datadog log not sent (...)" stderr line and never a caller failure.
+#   "jev: datadog log not sent (...)" stderr line and never a caller failure,
+#   and one durable line in $FM_HOME/state/jev-dd-failures.jsonl:
+#   {v, ts, decision_id, event, reason}. `fm-jev.sh dd-failures` counts the
+#   lines not yet acknowledged, which the session-start digest and the fleet
+#   view print.
 #   Two event shapes, numeric fields kept numeric:
 #     event=decision (fm_jev_decision_event), one per decision and Claude
 #       model: decision_id,
@@ -237,20 +241,39 @@ fm_jev_request_cost() {
   fm_jev_append "$line"
   call=$(fm_jev_call_record "$id")
   [ -n "$call" ] || call=$(jq -cn --arg id "$id" --arg q "$qtype" '{decision_id: $id, question_type: $q}')
-  fm_jev_dd_send "$(fm_jev_request_event "$call" "$line")"
+  fm_jev_dd_send "$(fm_jev_request_event "$call" "$line")" "$id"
 }
 
-# fm_jev_dd_send <event-json>: one Datadog log event with the key on fd 3.
+fm_jev_dd_failures_path() {
+  printf '%s/state/jev-dd-failures.jsonl' "$FM_HOME"
+}
+
+# fm_jev_dd_failure <reason> <event-json> [<decision-id>]: the stderr line and
+# the durable failure record for one unsent event.
+fm_jev_dd_failure() {
+  local id=${3:-} kind='' path
+  [ -n "$id" ] || id=$(jq -r '.decision_id // empty' <<<"$2" 2>/dev/null)
+  kind=$(jq -r '.event // empty' <<<"$2" 2>/dev/null)
+  echo "jev: datadog log not sent ($1)" >&2
+  path=$(fm_jev_dd_failures_path)
+  mkdir -p "${path%/*}" 2>/dev/null
+  jq -cn --arg ts "$(fm_jev_now_iso)" --arg id "$id" --arg kind "$kind" --arg reason "$1" \
+    '{v: 1, ts: $ts, decision_id: (if $id == "" then null else $id end),
+      event: (if $kind == "" then null else $kind end), reason: $reason}' >> "$path" 2>/dev/null || true
+}
+
+# fm_jev_dd_send <event-json> [<decision-id>]: one Datadog log event with the
+# key on fd 3. The decision id names a failure whose event did not render.
 fm_jev_dd_send() {
-  local event=$1 key site http
+  local event=$1 id=${2:-} key site http
   key=${DD_API_KEY_PRIVATE:-$(fmx_env_get DD_API_KEY "$FM_HOME/.env")}
   [ -n "$key" ] || return 0
   site=${DD_SITE_PRIVATE:-$(fmx_env_get DD_SITE "$FM_HOME/.env")}
   site=${site:-datadoghq.com}
-  [ -n "$event" ] || { echo "jev: datadog log not sent (event rendering failed)" >&2; return 0; }
-  command -v curl >/dev/null 2>&1 || { echo "jev: datadog log not sent (curl not installed)" >&2; return 0; }
+  [ -n "$event" ] || { fm_jev_dd_failure "event rendering failed" '' "$id"; return 0; }
+  command -v curl >/dev/null 2>&1 || { fm_jev_dd_failure "curl not installed" "$event" "$id"; return 0; }
   if [[ ! $site =~ ^[a-z0-9]+([.-][a-z0-9]+)*$ ]]; then
-    echo "jev: datadog log not sent (DD_SITE is not a Datadog site name)" >&2
+    fm_jev_dd_failure "DD_SITE is not a Datadog site name" "$event" "$id"
     return 0
   fi
   http=$(jq -c '[.]' <<<"$event" | curl -sS --max-time "$FM_JEV_DD_TIMEOUT" -o /dev/null -w '%{http_code}' \
@@ -259,7 +282,7 @@ fm_jev_dd_send() {
     --data-binary @- 2>/dev/null) || http=000
   case "$http" in
     2??) ;;
-    *) echo "jev: datadog log not sent (http $http)" >&2 ;;
+    *) fm_jev_dd_failure "http $http" "$event" "$id" ;;
   esac
   return 0
 }

@@ -439,6 +439,32 @@ assert_equals 'jev: datadog log not sent (DD_SITE is not a Datadog site name)' "
 assert_absent "$LOG/dd-body" "a malformed DD_SITE sends nothing"
 pass "Datadog label events: record-mine and record-outcome, .env key, failures step aside"
 
+# --- Datadog failures are durable and counted until acknowledged ----------------------
+FAILURES="$HOME_DIR/state/jev-dd-failures.jsonl"
+assert_equals "http 500|$id|label" "$(jq -r '[.reason, .decision_id, .event] | join("|")' "$FAILURES" | head -n1)" \
+  "an HTTP failure is recorded with its reason, decision id, and event"
+assert_equals "DD_SITE is not a Datadog site name|$id" "$(jq -r '[.reason, .decision_id] | join("|")' "$FAILURES" | tail -n1)" \
+  "a refused site is recorded too"
+run code out err dd-failures
+expect_code 0 "$code" "dd-failures"
+assert_contains "$out" "jev datadog failures: 2 unacknowledged (first: http 500 for $id at " "dd-failures counts and names the failures"
+assert_contains "$out" "acknowledge with bin/fm-jev.sh dd-failures --ack" "dd-failures names the acknowledgement"
+run code out err dd-failures --ack
+assert_equals "jev: acknowledged 2 datadog failure(s)" "$out" "--ack acknowledges what is recorded"
+run code out err dd-failures
+assert_equals "jev datadog failures: 0 unacknowledged" "$out" "an acknowledged failure no longer counts"
+run code out err dd-failures --quiet
+assert_equals "" "$out" "--quiet prints nothing at zero"
+DD_API_KEY=$DD_KEY FAKE_DD_HTTP=503 run code out err record-outcome "$id" 'second look' --final looping
+run code out err dd-failures --quiet
+assert_contains "$out" "jev datadog failures: 1 unacknowledged (first: http 503 for $id" "a later failure counts again after an acknowledgement"
+out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" "$ROOT/bin/fm-fleet-view.sh" 2>/dev/null) || true
+assert_contains "$out" "## Jev Datadog failures" "the fleet view reviewed at every heartbeat shows unacknowledged failures"
+run code out err dd-failures --ack
+out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" "$ROOT/bin/fm-fleet-view.sh" 2>/dev/null) || true
+assert_not_contains "$out" "Jev Datadog failures" "the fleet view is silent with nothing unacknowledged"
+pass "a failed Datadog send is recorded durably, counted by dd-failures and the fleet view, and cleared by --ack"
+
 # --- Claude failure: no duplicate record, null Claude fields ------------------------
 reset
 TYPESAFE_API_KEY=$KEY DD_API_KEY=$DD_KEY FAKE_CLAUDE_MODE=fail run code out err "${ASK[@]}"

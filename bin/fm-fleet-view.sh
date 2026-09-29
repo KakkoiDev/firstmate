@@ -94,3 +94,7 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   "## Secondmates",
   .secondmate_guidance.note
 '
+# Unacknowledged Jev Datadog send failures, reviewed at every heartbeat
+# (bin/fm-jev.sh dd-failures owns the count); nothing when there are none.
+JEV_DD_FAILURES=$("$SCRIPT_DIR/fm-jev.sh" dd-failures --quiet 2>/dev/null) || JEV_DD_FAILURES=
+[ -z "$JEV_DD_FAILURES" ] || printf '\n## Jev Datadog failures\n%s\n' "$JEV_DD_FAILURES"
