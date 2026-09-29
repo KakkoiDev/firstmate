@@ -32,6 +32,24 @@
 #   fm_jev_append adds "asker" to every line that lacks one: $FM_TASK_ID in a
 #   task worker, else "firstmate".
 #
+# Ask ledger: fm_jev_ask_record appends one line per bin/fm-jev.sh ask that
+#   passed its argument checks, whatever Jev then did, to
+#   $FM_HOME/state/jev-asks.jsonl:
+#     {"v":1,"ts","asker","question_type","target","decision_id","status",
+#      "mine","answer","confidence","evidence_sha256"}
+#   status is ok, error, or off (no key, the never-send list, or no curl), so
+#   an ask made while Jev was down is told apart from an ask never made;
+#   decision_id is null when off. target is the key fm_jev_target_key made
+#   from ask --target, else null. evidence_sha256 is the sha256 of a
+#   claim-check's whitespace-collapsed evidence, else null. It is the record
+#   bin/fm-jev-pretool-check.sh and bin/fm-jev-gate-lib.sh read.
+#
+# Target key: fm_jev_target_key <kind>:<value> prints the lowercased kind, a
+#   colon, and the value's first dashed UUID with its dashes removed, else its
+#   first free-standing 32-hex id, else the whole lowercased value; so a
+#   Notion URL, a dashed id, and a bare id name one page. Exit 1 when kind or
+#   value is empty.
+#
 # Never-send list: fm_jev_never_send_line <text-file> checks text about to be
 #   sent against the optional $FM_HOME/config/dispatch-never-send list, whose
 #   matching rule docs/configuration.md "Typed dispatch resolution" owns: each
@@ -403,6 +421,40 @@ fm_jev_append() {  # <json-line>
   log=$(fm_jev_log_path)
   line=$(jq -c --arg a "${FM_TASK_ID:-firstmate}" '. + {asker: (.asker // $a)}' <<<"$1" 2>/dev/null) || line=$1
   { mkdir -p "${log%/*}" && printf '%s\n' "$line" >> "$log"; } 2>/dev/null || true
+}
+
+fm_jev_ask_ledger_path() {
+  printf '%s/state/jev-asks.jsonl' "$FM_HOME"
+}
+
+fm_jev_target_key() {  # <kind>:<value>
+  local kind=${1%%:*} value=${1#*:}
+  [ "$kind" != "$1" ] && [ -n "$kind" ] && [ -n "$value" ] || return 1
+  kind=$(printf '%s' "$kind" | tr '[:upper:]' '[:lower:]')
+  value=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
+  if [[ $value =~ [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} ]]; then
+    value=${BASH_REMATCH[0]//-/}
+  elif [[ $value =~ (^|[^0-9a-f])([0-9a-f]{32})([^0-9a-f]|$) ]]; then
+    value=${BASH_REMATCH[2]}
+  fi
+  printf '%s:%s' "$kind" "$value"
+}
+
+# fm_jev_ask_record <type> <target> <decision-id> <status> <mine>
+#   <response-file> <question-key> <evidence-sha256>: one ask ledger line;
+#   empty strings become null.
+fm_jev_ask_record() {
+  local body='' line path
+  [ "$4" != ok ] || body=$(cat "$6" 2>/dev/null) || body=''
+  line=$(jq -cn --arg type "$1" --arg target "$2" --arg id "$3" --arg status "$4" --arg mine "$5" \
+    --arg body "$body" --arg q "$7" --arg ev "$8" --arg ts "$(fm_jev_now_iso)" --arg asker "${FM_TASK_ID:-firstmate}" '
+    def nul($s): if $s == "" then null else $s end;
+    (try ($body | fromjson) catch null) as $r | ($r.answers[$q] // null) as $a |
+    {v: 1, ts: $ts, asker: $asker, question_type: $type, target: nul($target), decision_id: nul($id),
+     status: $status, mine: nul($mine), answer: ($a.choice // null), confidence: ($a.confidence // null),
+     evidence_sha256: nul($ev)}' 2>/dev/null) || return 0
+  path=$(fm_jev_ask_ledger_path)
+  { mkdir -p "${path%/*}" && printf '%s\n' "$line" >> "$path"; } 2>/dev/null || true
 }
 
 # fm_jev_record_call <decision-id> <question-type> <summary> <options-json>

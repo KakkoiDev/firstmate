@@ -310,6 +310,7 @@ assert_absent "$TMP_ROOT/worker-dir/state/jev-usage.jsonl" "the worker's ask wri
 assert_equals 'call:t9 decided:t9 duplicate:t9 mine:t9' \
   "$(jq -rs --arg id "$id" '[.[] | select(.decision_id == $id and .event != "request") | "\(.event):\(.asker)"] | sort | join(" ")' "$USAGE")" \
   "every record of the worker's ask names its task id"
+assert_equals 't9' "$(jq -r .asker "$HOME_DIR/state/jev-asks.jsonl")" "the ask ledger names the worker too"
 pass "a task worker's ask lands in the home named by FM_JEV_HOME, every record naming its task id"
 
 # --- failures step aside: exit 0, nothing on stdout, error record ----------------
@@ -365,8 +366,11 @@ rm -f "$LOG/argv"
 run code out err record-mine "$id1" looping
 expect_code 0 "$code" "record-mine exits 0"
 assert_equals "jev: recorded $id1 mine=looping jev=looping followed" "$out" "record-mine confirms a followed decision"
+assert_equals '' "$err" "an agreeing record-mine warns nothing"
 run code out err record-mine latest:stuck-worker confused
 assert_equals "jev: recorded $id2 mine=confused jev=looping overridden" "$out" "latest:<type> labels the newest call of that type"
+assert_equals "jev: WARNING: firstmate disagrees with Jev on stuck-worker $id2: jev looping (0.9), firstmate confused" "$err" \
+  "a disagreeing record-mine prints one WARNING naming the type, Jev's answer and confidence, and firstmate's choice"
 run code out err record-mine "$id1" sleeping
 expect_code 2 "$code" "an answer outside the options is refused"
 run code out err record-mine jev-0-0-0 looping
@@ -427,7 +431,8 @@ printf '%s\n' "DD_API_KEY=$DD_KEY" > "$HOME_DIR/.env"
 run code out err record-mine "$id" confused
 rm -f "$HOME_DIR/.env"
 expect_code 0 "$code" "record-mine with Datadog exits 0"
-assert_equals '' "$err" "a sent label event is silent"
+assert_equals "jev: WARNING: firstmate disagrees with Jev on stuck-worker $id: jev looping (0.9), firstmate confused" "$err" \
+  "a sent label event is silent beside the disagreement WARNING"
 label=$(jq -c '.[0]' "$LOG/dd-body")
 assert_equals '["acting_answer","ddsource","ddtags","decider","decision_id","event","final_choice","firstmate_answer","followed_or_overridden","graded","message","service"]' \
   "$(jq -c 'keys' <<<"$label")" "the label event carries exactly the documented fields"
@@ -673,6 +678,8 @@ assert_equals "mine|$id|confused|true" \
   "the blind choice is in the log when the request is sent"
 assert_equals '' "$(jq -r 'select(.event == "call") | .event' "$LOG/usage-at-post")" "no Jev answer is in the log when the request is sent"
 assert_contains "$out" '  acting: confused   decider: firstmate' "an unlisted type acts on firstmate's blind choice"
+assert_contains "$err" "jev: WARNING: firstmate disagrees with Jev on stuck-worker $id: jev looping (0.9), firstmate confused" \
+  "ask --mine warns when the blind choice differs from Jev's answer"
 assert_equals 'firstmate|confused|false|null' \
   "$(jq -r 'select(.event == "decided") | [.decider, .acting, .listed, .floor] | map(tostring) | join("|")' "$USAGE")" \
   "one decided record names the deciding party"
@@ -830,3 +837,194 @@ assert_absent "$LOG/argv" "a never-send match never calls curl"
 assert_absent "$USAGE" "a never-send match records nothing"
 rm -rf "$HOME_DIR/config"
 pass "never-send list: a matching ask sends nothing and records nothing"
+
+# --- question templates: required fields rendered into the English state ----------------
+# write_choice <choice> <confidence> <option>...: a Jev answer over those options.
+write_choice() {
+  local c=$1 p=$2
+  shift 2
+  jq -n --arg c "$c" --argjson p "$p" --args '
+    ($ARGS.positional | map(select(. != $c))) as $rest |
+    {model: "jev-1.13.0",
+     answers: {q: {type: "choice", choice: $c, confidence: $p,
+       probabilities: ({($c): $p} + ($rest | map({(.): ((1 - $p) / ($rest | length))}) | add))}},
+     usage: {input_tokens: 420, output_tokens: 55}}' "$@" > "$RESPONSE"
+}
+LEDGER="$HOME_DIR/state/jev-asks.jsonl"
+SOURCE_FILE="$TMP_ROOT/pr-view.txt"
+printf '%s\n' 'state:   OPEN' 'title: fix the flaky login test' 'mergedAt: null' > "$SOURCE_FILE"
+PAGE_URL='https://www.notion.so/Login-flake-26ab1f9f4c5f80b18d3bd10a6b1d2f4e?v=0123456789abcdef0123456789abcdef'
+CLAIM=(ask --template claim-check --claim 'PR 42 is merged.' --source "$SOURCE_FILE"
+  --evidence 'state: OPEN' --target "notion:$PAGE_URL")
+
+reset
+run code out err "${CLAIM[@]:0:7}" --mine supported
+expect_code 2 "$code" "a claim-check without evidence"
+assert_equals 'error: --template claim-check needs --evidence (a verbatim quote read from that source in this turn)' "$err" \
+  "the refusal names the missing field and what it holds"
+run code out err ask --template claim-check --claim 'PR 42 is merged. It shipped.' --source "$SOURCE_FILE" --evidence 'state: OPEN' --mine supported
+expect_code 2 "$code" "a two-sentence claim"
+assert_equals 'error: --claim must be one sentence' "$err" "a claim is one sentence"
+run code out err ask --template claim-check --claim 'PR 42 is merged.' --source "$SOURCE_FILE" --evidence 'state: MERGED' --mine supported
+expect_code 2 "$code" "evidence missing from its file source"
+assert_contains "$err" "--evidence is not a verbatim quote of $SOURCE_FILE" "a quote absent from the file source is refused"
+run code out err "${CLAIM[@]}" --type claim-check --mine supported
+expect_code 2 "$code" "--type beside --template"
+run code out err "${CLAIM[@]}"
+expect_code 2 "$code" "--target without --mine"
+assert_equals "error: --target needs --mine, firstmate's own choice" "$err" "a bound ask records firstmate's choice"
+run code out err ask --template ticket-status --ticket LOG-7 --proposed Merged --evidence 'state: OPEN' --mine keep-current
+expect_code 2 "$code" "a ticket-status without the current value"
+assert_contains "$err" '--template ticket-status needs --current (the status the ticket shows now)' "ticket-status names its missing field"
+run code out err ask --template ask-scope --words 'update the ticket' --mine a
+assert_contains "$err" '--template ask-scope needs at least one --candidate' "ask-scope needs its candidates"
+run code out err ask --template ask-scope --words 'update the ticket' --candidate several --mine several
+expect_code 2 "$code" "a candidate named like a fixed option"
+run code out err ask --template nope --mine a
+expect_code 2 "$code" "an unknown template"
+assert_absent "$LEDGER" "a refused ask writes no ledger line"
+assert_absent "$LOG/argv" "a refused ask never calls curl"
+pass "templates refuse a missing or malformed field, a quote absent from its file, and flags the template sets"
+
+reset
+write_choice contradicted 0.8 supported contradicted not-addressed
+printf 'The operator asked for the ticket to show the PR state.\n' > "$CONTEXT.extra"
+TYPESAFE_API_KEY=$KEY run code out err "${CLAIM[@]}" --mine supported --context "$CONTEXT.extra"
+expect_code 0 "$code" "an answered claim-check"
+cc_id=$(sed -n 's/^  decision_id: //p' <<<"$out")
+body=$(cat "$LOG/body")
+assert_equals '["supported","contradicted","not-addressed"]' "$(jq -c '.questions.q.criteria | keys_unsorted' <<<"$body")" "claim-check options"
+assert_equals 'Does the quoted evidence, read from the named source, support the claim?' "$(jq -r .questions.q.instructions <<<"$body")" "claim-check question"
+assert_equals "Claim: PR 42 is merged.
+Source: $SOURCE_FILE
+Evidence, quoted verbatim from the source:
+state: OPEN
+
+Additional context:
+The operator asked for the ticket to show the PR state." "$(jq -r .state.context <<<"$body")" "the fields are the English state, then the extra context"
+assert_equals 'claim-check|PR 42 is merged.' "$(calls | jq -r '[.question_type, .summary] | join("|")')" "the summary defaults to the claim, since the type is its own field"
+assert_contains "$err" "jev: WARNING: firstmate disagrees with Jev on claim-check $cc_id: jev contradicted (0.8), firstmate supported" "a disagreeing claim-check warns"
+assert_equals "firstmate|claim-check|notion:26ab1f9f4c5f80b18d3bd10a6b1d2f4e|$cc_id|ok|supported|contradicted|0.8" \
+  "$(jq -r '[.asker, .question_type, .target, .decision_id, .status, .mine, .answer, .confidence] | map(tostring) | join("|")' "$LEDGER")" \
+  "the ledger binds the ask to the page id taken from its URL"
+assert_equals "$(printf 'state: OPEN' | shasum -a 256 | awk '{print $1}')" "$(jq -r .evidence_sha256 "$LEDGER")" "the ledger names the evidence by its sha256"
+wait_for "the claim-check duplicate settles" settled 1
+pass "claim-check: fields rendered into the state, bound to its normalized target, ledgered with the answer"
+
+reset
+write_choice in-review 0.7 in-review keep-current
+TYPESAFE_API_KEY=$KEY run code out err ask --template ticket-status --ticket LOG-7 --current Open --proposed 'In review' \
+  --evidence 'state: OPEN' --mine keep-current
+body=$(cat "$LOG/body")
+assert_equals '{"in-review":"Change the status to In review.","keep-current":"Keep the status at Open."}' "$(jq -c .questions.q.criteria <<<"$body")" "ticket-status options"
+assert_equals 'Should ticket LOG-7 move from Open to In review, given the evidence?' "$(jq -r .questions.q.instructions <<<"$body")" "ticket-status question"
+assert_contains "$(jq -r .state.context <<<"$body")" $'Ticket: LOG-7\nCurrent status: Open\nProposed status: In review' "ticket-status state"
+write_choice several 0.6 page-a page-b several unclear
+TYPESAFE_API_KEY=$KEY run code out err ask --template ask-scope --words 'update the login ticket' \
+  --candidate 'page-a=The login flake ticket' --candidate page-b --mine page-a
+body=$(cat "$LOG/body")
+assert_equals '["page-a","page-b","several","unclear"]' "$(jq -c '.questions.q.criteria | keys_unsorted' <<<"$body")" "ask-scope options"
+assert_equals "The operator's words, verbatim:
+update the login ticket
+Candidate targets:
+- page-a: The login flake ticket
+- page-b: page-b" "$(jq -r .state.context <<<"$body")" "ask-scope state"
+wait_for "both template duplicates settle" settled 2
+pass "ticket-status and ask-scope render their fields and options"
+
+# --- ask ledger: Jev off still counts as asked; asked reads the recent window --------
+reset
+run code out err ask --template claim-check --claim 'PR 42 is merged.' --source https://github.com/o/r/pull/42 \
+  --evidence 'Merged' --target notion:26ab1f9f-4c5f-80b1-8d3b-d10a6b1d2f4e --mine supported
+expect_code 0 "$code" "an off claim-check"
+assert_absent "$USAGE" "an off ask writes no usage record"
+assert_equals 'claim-check|notion:26ab1f9f4c5f80b18d3bd10a6b1d2f4e|null|off|supported' \
+  "$(jq -r '[.question_type, .target, .decision_id, .status, .mine] | map(tostring) | join("|")' "$LEDGER")" \
+  "an off ask is ledgered, the dashed id normalized to the same key"
+run code out err asked --type ask-scope,claim-check --status off,error
+expect_code 0 "$code" "asked finds the recent off ask"
+assert_equals off "$(jq -r .status <<<"$out")" "asked prints the ledger line"
+run code out err asked --type claim-check --status ok
+expect_code 1 "$code" "asked filters on status"
+jq -c '.ts = "2026-01-01T00:00:00Z"' "$LEDGER" > "$LEDGER.tmp" && mv "$LEDGER.tmp" "$LEDGER"
+run code out err asked --type claim-check
+expect_code 1 "$code" "an ask older than the window is not recent"
+pass "the ask ledger records an off ask, and asked reads only the recent window"
+
+# --- target-status: the claim-check gate --------------------------------------------------
+# ledger_line <id> <type> <status> <answer> <confidence> <evidence-sha> [<ts>]
+ledger_line() {
+  jq -cn --arg id "$1" --arg t "$2" --arg s "$3" --arg a "$4" --argjson c "$5" --arg e "$6" \
+    --arg ts "${7:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" '
+    {v: 1, ts: $ts, asker: "firstmate", question_type: $t, target: "notion:26ab1f9f4c5f80b18d3bd10a6b1d2f4e",
+     decision_id: (if $id == "" then null else $id end), status: $s, mine: "supported",
+     answer: (if $a == "" then null else $a end), confidence: $c, evidence_sha256: $e}' >> "$LEDGER"
+}
+status_of() {  # <require>: prints the verdict
+  run code out err target-status --target "notion:$PAGE_URL" --require "$1"
+  expect_code 0 "$code" "target-status exits 0"
+  printf '%s' "$out"
+}
+reset
+mkdir -p "$HOME_DIR/state"
+assert_equals missing "$(status_of template)" "no ask on the target"
+ledger_line s1 ask-scope ok page-a 0.9 ''
+assert_equals ok "$(status_of template)" "a recent ask-scope satisfies a template requirement"
+assert_equals missing "$(status_of claim-check)" "an ask-scope never stands in for a claim-check"
+ledger_line c1 claim-check ok contradicted 0.8 ev1 2026-01-01T00:00:00Z
+assert_equals 'blocked c1 contradicted 0.8' "$(status_of template)" "a confident contradiction blocks however old"
+ledger_line c2 claim-check ok supported 0.9 ev1
+assert_equals 'blocked c1 contradicted 0.8' "$(status_of claim-check)" "supported on the same evidence does not clear the block"
+ledger_line c3 claim-check ok supported 0.9 ev2
+assert_equals ok "$(status_of claim-check)" "supported on new evidence clears the block"
+ledger_line c4 claim-check ok not-addressed 0.5 ev3
+assert_equals 'blocked c4 not-addressed 0.5' "$(status_of claim-check)" "not-addressed at the default floor of 0.5 blocks"
+jq -cn '{v: 1, event: "outcome", ts: "2026-09-29T00:00:00Z", decision_id: "c4", outcome: "the operator confirmed it", final: null}' >> "$USAGE"
+assert_equals ok "$(status_of claim-check)" "an outcome recorded on the blocking decision clears it"
+ledger_line c5 claim-check ok contradicted 0.3 ev4
+assert_equals 'warn c5 contradicted 0.3' "$(status_of claim-check)" "a contradiction below the floor warns"
+mkdir -p "$HOME_DIR/config"
+printf '0.25\n' > "$HOME_DIR/config/jev-claim-check-floor"
+assert_equals 'blocked c5 contradicted 0.3' "$(status_of claim-check)" "the operator's floor file moves the line"
+printf 'high\n' > "$HOME_DIR/config/jev-claim-check-floor"
+run code out err target-status --target "notion:$PAGE_URL" --require claim-check
+assert_equals 'warn c5 contradicted 0.3' "$out" "a malformed floor falls back to 0.5"
+assert_contains "$err" 'is not a number from 0 through 1; using 0.5' "a malformed floor says so"
+rm -rf "$HOME_DIR/config"
+ledger_line '' claim-check off '' null ev5
+assert_equals ok "$(status_of claim-check)" "a claim-check that found Jev off counts as asked"
+pass "target-status: a confident contradiction blocks until new supported evidence or an outcome; below the floor warns"
+
+# --- turn: the section the operator's ledger carries ------------------------------------
+# turn_call <id> <type> <ts> <asker> <status> <answer> <confidence> <sha>
+turn_call() {
+  jq -cn --arg id "$1" --arg t "$2" --arg ts "$3" --arg who "$4" --arg s "$5" --arg a "$6" --argjson c "$7" --arg sha "$8" '
+    {v: 1, event: "call", ts: $ts, decision_id: $id, question_type: $t, summary: "about \($id)",
+     options: ["a", "b"], answer: (if $a == "" then null else $a end), confidence: $c, status: $s,
+     context_sha256: $sha, asker: $who}'
+}
+reset
+mkdir -p "$HOME_DIR/state"
+{
+  turn_call t0 project-match 2026-09-29T05:59:59Z firstmate ok a 0.9 x0
+  turn_call t1 deliverable-class 2026-09-29T06:00:00Z firstmate ok a 0.9 x1
+  fixture_mine t1 a
+  turn_call t2 dispatch-rule 2026-09-29T06:00:05Z firstmate ok a 0.7 same
+  turn_call t3 dispatch-rule 2026-09-29T06:00:30Z firstmate ok a 0.7 same
+  fixture_mine t3 b
+  turn_call t4 stuck-worker 2026-09-29T06:01:00Z jev-decider error '' null x4
+  turn_call t5 claim-check 2026-09-29T06:02:00Z firstmate ok a 0.6 x5
+} > "$USAGE"
+run code out err turn --since 2026-09-29T06:00:00.123Z
+expect_code 0 "$code" "turn exits 0"
+assert_equals 'Jev asks this turn (4)
+firstmate deliverable-class: about t1 - jev a (0.9), mine a
+firstmate dispatch-rule: about t3 - jev a (0.7), mine b [DISAGREE]
+jev-decider stuck-worker: about t4 - jev error (-), mine unrecorded
+firstmate claim-check: about t5 - jev a (0.6), mine unrecorded' "$out" \
+  "one line per decision since the turn start, oldest first, the dispatch-rule double collapsed onto its labelled call"
+run code out err turn --since 2026-09-30T00:00:00Z
+assert_equals $'Jev asks this turn (0)\nnone' "$out" "no ask since the turn start prints none"
+run code out err turn --since '2026-09-29 06:00:00 UTC'
+expect_code 2 "$code" "a turn start that is not ISO-8601 UTC"
+pass "turn prints the Jev asks section: oldest first, asker, answers, [DISAGREE], collapsed dispatch-rule doubles, none when empty"

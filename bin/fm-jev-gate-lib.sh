@@ -12,7 +12,9 @@
 #   - firstmate's choice arrives as an explicit argument: a value the script
 #     asks with, or, for a choice made before the script runs, the decision id
 #     `bin/fm-jev.sh ask ... --mine <choice>` printed ("off" when it printed
-#     nothing because Jev was off or failed);
+#     nothing because Jev was off or failed, accepted only when the ask ledger
+#     holds an ask of that type from the last 30 minutes that found Jev off or
+#     failing: `bin/fm-jev.sh asked`);
 #   - a missing argument refuses with exit 2 and names the exact argument or
 #     the exact bin/fm-jev.sh command to run;
 #   - the script asks with its choice as --mine, so the choice is recorded
@@ -181,11 +183,19 @@ fm_jev_gate_ask() {
 # fm_jev_gate_recorded <issuer> <type> <decision-id|off>
 # Validates a decision asked before the script and sets the same variables;
 # "off" means the ask printed nothing, so FM_JEV_GATE_ACTING stays empty and
-# the caller's own evidence acts.
+# the caller's own evidence acts, and it is refused unless that ask is in the
+# ask ledger.
 fm_jev_gate_recorded() {
   local issuer=$1 qtype=$2 id=$3 row rtype
   FM_JEV_GATE_ID='' FM_JEV_GATE_ACTING='' FM_JEV_GATE_DECIDER=''
-  [ "$id" != off ] || { printf '%s: jev %s not recorded (off or failed)\n' "$issuer" "$qtype" >&2; return 0; }
+  if [ "$id" = off ]; then
+    FM_HOME=$FM_HOME "$SCRIPT_DIR/fm-jev.sh" asked --type "$qtype" --status off,error >/dev/null 2>&1 \
+      || fm_jev_gate_refuse "$issuer" \
+        "$qtype=off needs a $qtype ask from the last 30 minutes that found Jev off or failing, and none is recorded; ask first" \
+        "$(fm_jev_gate_ask_command "$qtype")"
+    printf '%s: jev %s not recorded (off or failed)\n' "$issuer" "$qtype" >&2
+    return 0
+  fi
   row=$(FM_HOME=$FM_HOME "$SCRIPT_DIR/fm-jev.sh" show "$id" 2>/dev/null \
     | jq -r '.record | [.question_type // "", .acting // "", .decider // ""] | @tsv' 2>/dev/null) || row=''
   IFS=$'\t' read -r rtype FM_JEV_GATE_ACTING FM_JEV_GATE_DECIDER <<<"$row"

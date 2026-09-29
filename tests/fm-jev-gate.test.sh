@@ -105,6 +105,19 @@ assert_contains "$out" "--mine <your choice>" "spawn refusal ask command records
 assert_absent "$H/state/jev-usage.jsonl" "a refused spawn asks nothing"
 pass "fm-spawn refuses a fresh spawn without the project-match decision and names the ask"
 
+run "$H" code out -- "${SPAWN[@]}" --decision project-match=off --decision deliverable-class=off --concurrency parallel
+expect_code 2 "$code" "spawn with an off decision nobody asked"
+assert_contains "$out" "fm-spawn.sh: refused: project-match=off needs a project-match ask from the last 30 minutes that found Jev off or failing, and none is recorded; ask first" \
+  "an off decision needs a ledgered off ask"
+assert_contains "$out" "  run: bin/fm-jev.sh ask --type project-match " "the off refusal names the ask"
+printf 'Fix the flaky login test.\n' > "$TMP_ROOT/off-context"
+run "$H" code out -- fm-jev.sh ask --type project-match --summary "which project" --question q \
+  --option spawn-proj --option none --context "$TMP_ROOT/off-context" --mine spawn-proj
+assert_contains "$out" "jev: off (TYPESAFE_API_KEY absent" "the project-match ask finds Jev off"
+run "$H" code out -- fm-jev.sh ask --type deliverable-class --summary "which deliverable" --question q \
+  --option ship --option scout --context "$TMP_ROOT/off-context" --mine ship
+pass "fm-spawn refuses an off decision until an ask that found Jev off is in the ask ledger"
+
 run "$H" code out -- "${SPAWN[@]}" --decision project-match=off --decision deliverable-class=off
 expect_code 2 "$code" "spawn without --concurrency"
 assert_contains "$out" "needs --concurrency <parallel|semantic-dependency|shared-external-state|migration-conflict>" "spawn refusal names concurrency"
