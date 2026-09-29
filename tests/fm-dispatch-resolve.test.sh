@@ -347,18 +347,24 @@ assert_absent "$USAGE" "absent key writes no usage record"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
-assert_equals 1 "$(wc -l < "$USAGE" | tr -d ' ')" "one record per resolver call"
+request_landed() { [ -f "$USAGE" ] && grep -q '"event":"request"' "$USAGE"; }
+for _ in $(seq 1 100); do request_landed && break; sleep 0.1; done
+request_landed || fail "the resolver records its issuing request (timed out)"
+CALL=$(jq -c 'select(.event == "call")' "$USAGE")
+assert_equals 1 "$(grep -c . <<<"$CALL")" "one call record per resolver call"
+assert_equals 'unavailable' "$(jq -r 'select(.event == "request") | .status' "$USAGE")" \
+  "outside a Claude Code session the issuing request is recorded as unavailable"
 assert_equals 'call|dispatch-rule|Which dispatch rule fits this task brief for project pager|rule_4|0.9|jev-1.13.0|812|60|ok' \
-  "$(jq -r '[.event, .question_type, .summary, .answer, .confidence, .model, .tokens_in, .tokens_out, .status] | join("|")' "$USAGE")" \
+  "$(jq -r '[.event, .question_type, .summary, .answer, .confidence, .model, .tokens_in, .tokens_out, .status] | join("|")' <<<"$CALL")" \
   "the resolver records its rule answer"
-assert_equals '["rule_1","rule_2","rule_3","rule_4","default"]' "$(jq -c .options "$USAGE")" "the record lists every rule option"
+assert_equals '["rule_1","rule_2","rule_3","rule_4","default"]' "$(jq -c .options <<<"$CALL")" "the record lists every rule option"
 assert_not_contains "$(cat "$USAGE")" "$KEY" "the key is never recorded"
 assert_not_contains "$(cat "$USAGE")" 'off-by-one' "the brief is never recorded"
-id=$(jq -r .decision_id "$USAGE")
+id=$(jq -r .decision_id <<<"$CALL")
 audit="$HOME_DIR/state/jev-audit/$id.json"
 assert_present "$audit" "the resolver writes an audit snapshot"
 assert_contains "$(jq -r .context "$audit")" 'off-by-one' "the snapshot holds the brief text sent"
-assert_equals "$(jq -j .context "$audit" | shasum -a 256 | awk '{print $1}')" "$(jq -r .context_sha256 "$USAGE")" \
+assert_equals "$(jq -j .context "$audit" | shasum -a 256 | awk '{print $1}')" "$(jq -r .context_sha256 <<<"$CALL")" \
   "the record's sha256 matches the snapshot's context bytes"
 assert_equals "$(jq -cS . "$LOG/body")" "$(jq -cS .jev_request "$audit")" "the snapshot holds the exact request"
 grep -rqF -- "$KEY" "$HOME_DIR/state/jev-audit" && fail "the key is never in the audit snapshot"
@@ -366,7 +372,7 @@ assert_absent "$LOG/dd-body" "no Datadog key sends nothing"
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF" --project pager
 assert_contains "$out" '  status: error' "a failed call keeps its error outcome"
-assert_equals 'error|' "$(tail -n1 "$USAGE" | jq -r '[.status, (.answer // "")] | join("|")')" "a failed call records an error"
+assert_equals 'error|' "$(jq -r 'select(.event == "call") | [.status, (.answer // "")] | join("|")' "$USAGE" | tail -n1)" "a failed call records an error"
 id=$(head -n1 "$USAGE" | jq -r .decision_id)
 assert_equals "jev: recorded $id mine=rule_2 jev=rule_4 overridden" \
   "$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-jev.sh" record-mine "$id" rule_2)" "fm-jev.sh labels a resolver decision"
@@ -375,14 +381,16 @@ reset_log
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY DD_API_KEY=dd-resolver-key run code out err "$BRIEF" --project pager
 assert_contains "$out" '  status: clear' "Datadog leaves the resolver outcome unchanged"
-dd_sent() { [ -s "$LOG/dd-body" ]; }
+dd_sent() { [ -f "$LOG/dd-body" ] && [ "$(grep -c . "$LOG/dd-body")" -ge 2 ]; }
 for _ in $(seq 1 100); do dd_sent && break; sleep 0.1; done
 dd_sent || fail "the resolver sends one decision event (timed out)"
 assert_equals "decision|dispatch-rule|rule_4|ok|not-run|null|null" \
-  "$(jq -r '.[0] | [.event, .question_type, .jev_answer, .jev_status, .claude_status, .claude_answer, .claude_jev_agree] | map(tostring) | join("|")' "$LOG/dd-body")" \
+  "$(jq -r '.[0] | select(.event == "decision") | [.event, .question_type, .jev_answer, .jev_status, .claude_status, .claude_answer, .claude_jev_agree] | map(tostring) | join("|")' "$LOG/dd-body")" \
   "the resolver event says no duplicate query ran"
 assert_not_contains "$(cat "$LOG/dd-body")" 'off-by-one' "the brief never reaches Datadog"
-assert_equals 'DD-API-KEY: dd-resolver-key' "$(cat "$LOG/dd-header")" "the resolver's Datadog key reaches curl on the fd header"
+assert_equals 'request-cost' "$(jq -r '.[0] | select(.event != "decision") | .event' "$LOG/dd-body")" \
+  "the resolver also sends its issuing-request cost event"
+assert_equals 'DD-API-KEY: dd-resolver-key' "$(sort -u "$LOG/dd-header")" "the resolver's Datadog key reaches curl on the fd header"
 rm -f "$USAGE"
 pass "usage record: every resolver Jev call appends one dispatch-rule record, and fm-jev.sh labels it"
 

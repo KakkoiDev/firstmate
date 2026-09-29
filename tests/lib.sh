@@ -69,6 +69,11 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Clear the Claude Code session id so no Jev ask looks for the live session
+# transcript; a case that tests the issuing-request lookup names its fixture
+# with FM_JEV_TRANSCRIPT.
+unset CLAUDE_CODE_SESSION_ID
+
 # Clear the Rex block identity an operator's terminal exports. Run directly
 # inside a Rex block, the suite would otherwise auto-detect the rex backend
 # (bin/fm-backend.sh's fm_backend_detect) and place fixture tasks into the
