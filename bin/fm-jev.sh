@@ -5,7 +5,18 @@
 # Usage:
 #   fm-jev.sh ask --type <slug> --summary <line> --question <text>
 #                 (--option <id>[=<meaning>] ... | --yes-no) [--context <file>]
-#                 [--mine <answer>]
+#                 [--mine <answer>] [--target <kind>:<value>]
+#   fm-jev.sh ask --template claim-check --claim <one sentence>
+#                 --source <URL|file> --evidence <verbatim quote> [common]
+#   fm-jev.sh ask --template ticket-status --ticket <id> --current <value>
+#                 --proposed <value> --evidence <verbatim quote> [common]
+#   fm-jev.sh ask --template ask-scope --words <the operator's words>
+#                 --candidate <id>[=<meaning>] ... [common]
+#     [common]: [--summary <line>] [--context <file>] [--mine <answer>]
+#               [--target <kind>:<value>]
+#   fm-jev.sh asked --type <type>[,<type>...] [--status <status>[,...]]
+#   fm-jev.sh target-status --target <kind>:<value> --require <claim-check|template>
+#   fm-jev.sh turn --since <ISO-8601 UTC time>
 #   fm-jev.sh acting <decision-id>
 #   fm-jev.sh record-mine <decision-id> <answer>
 #   fm-jev.sh record-outcome <decision-id> <text> [--final <choice>]
@@ -35,6 +46,51 @@
 #   never-types (merge-risk, finding-authority, report-has-captain-call,
 #   mid-task-ask) and malformed lines are refused with one stderr warning
 #   each and never grant authority.
+# --mine that differs from Jev's answer prints one stderr line
+#   "jev: WARNING: firstmate disagrees with Jev on <type> <id>: jev <answer>
+#   (<confidence>), firstmate <choice>"; record-mine prints the same line.
+# --template: a question format whose fields are rendered, in English, into
+#   the state ahead of any --context text; it sets --type, --question, and
+#   the options, so those flags are refused beside it, and a missing field is
+#   refused with exit 2 naming it. The summary defaults to the type and the
+#   claim, ticket, or words.
+#   claim-check: options supported, contradicted, not-addressed. --claim is one
+#     sentence on one line. When --source is not an http(s) URL it must be a
+#     readable file that contains --evidence (whitespace runs read as one
+#     space), so a quote not read from that file is refused.
+#   ticket-status: options <the proposed value as a slug> and keep-current.
+#   ask-scope: options each --candidate, then several and unclear.
+# --target: binds the ask to what it guards, such as notion:<page id or URL>
+#   or slack:<channel id>, normalized by fm_jev_target_key in
+#   bin/fm-jev-lib.sh; it needs --mine. Every ask that passes its argument
+#   checks appends one ask ledger line (bin/fm-jev-lib.sh), Jev off included.
+# asked: prints the newest ask ledger line of one of the types (and, with
+#   --status, one of the statuses) from the last ASK_WINDOW_SECS (30 minutes);
+#   exit 1 when there is none. bin/fm-jev-gate-lib.sh reads it to accept a
+#   decision passed as "off".
+# target-status: prints one verdict for a target, which
+#   bin/fm-jev-pretool-check.sh acts on:
+#     blocked <id> <answer> <confidence>: a claim-check on the target answered
+#       contradicted or not-addressed at or above the claim-check floor, with
+#       no record-outcome on that decision and no later claim-check answered
+#       supported on different evidence (evidence_sha256), however old;
+#     missing: no ask on the target in the last ASK_WINDOW_SECS, of type
+#       claim-check for --require claim-check, else of any template type;
+#     warn <id> <answer> <confidence>: the newest recent claim-check answered
+#       contradicted or not-addressed below the floor;
+#     ok: otherwise, including an ask that found Jev off or failing.
+#   The floor is ${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/jev-claim-check-floor,
+#   one number from 0 through 1 (default CLAIM_FLOOR, 0.5); docs/configuration.md
+#   "Jev authority" owns that file.
+# turn: prints the section "Jev asks this turn (<n>)" for the decisions called
+#   at or after --since (fractional seconds dropped), oldest first, one line
+#   each:
+#     <asker> <type>: <summary> - jev <answer> (<confidence>), mine <choice>
+#   with "jev error (-)" for a failed call, "mine unrecorded" without a
+#   firstmate choice, and " [DISAGREE]" appended when both answered and
+#   differ; "none" follows the header when there are none. dispatch-rule calls
+#   with one context_sha256 print once (the labelled one, else the newest).
+#   bin/fm-jev-stop-check.sh reads it.
 # acting: prints "<acting-answer> <decider>" for a recorded decision: the
 #   decided record when there is one, else firstmate's recorded choice with
 #   decider firstmate. Exit 2 when the decision carries no firstmate choice.
@@ -172,6 +228,10 @@ FM_HOME="${FM_JEV_HOME:-${FM_HOME:-$FM_ROOT}}"
 fm_jev_capture_dd
 
 REPORT_FLOOR=0.6
+# An ask counts as made for a guard (asked, target-status) for this long.
+ASK_WINDOW_SECS=1800
+# Default claim-check floor; config/jev-claim-check-floor overrides it.
+CLAIM_FLOOR=0.5
 QKEY=q
 AUTHORITY_FILE="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/jev-authority"
 NEVER_TYPES='merge-risk finding-authority report-has-captain-call mid-task-ask'
@@ -358,9 +418,101 @@ show_one() {  # <decision-id> [model]
     [.[] | select(.decision_id == $id)] | joined | first // empty'
 }
 
+# add_option <id>[=<meaning>]: one criterion into cmd_ask's criteria.
+add_option() {
+  local slug=${1%%=*} meaning
+  if [ "$slug" = "$1" ]; then meaning=$slug; else meaning=${1#*=}; fi
+  option_ok "$slug" || die "option id must be letters, digits, dot, dash, or underscore: $slug"
+  [ -n "$meaning" ] || die "option meaning is empty: $slug"
+  [ "$(jq -r --arg s "$slug" 'has($s)' <<<"$criteria")" = false ] || die "duplicate option: $slug"
+  criteria=$(jq -c --arg s "$slug" --arg m "$meaning" '. + {($s): $m}' <<<"$criteria")
+}
+
+squash() { tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'; }
+
+# template_fill: uses cmd_ask's locals. Checks the template's fields and sets
+# qtype, question, criteria, the rendered English state, and a default summary.
+template_fill() {
+  local f cand quoted
+  [ -z "$qtype$question" ] && [ "$yes_no" = 0 ] && [ "$criteria" = '{}' ] \
+    || die "--template sets the type, question, and options; drop --type, --question, --option, and --yes-no"
+  case "$template" in
+    claim-check)
+      for f in claim source evidence; do
+        f="tf_$f"; [ -n "${!f}" ] || die "--template claim-check needs --${f#tf_} ($(template_field_help "${f#tf_}"))"
+      done
+      case "${tf_claim}" in *$'\n'*) die "--claim must be one sentence on one line" ;; esac
+      [[ ! ${tf_claim} =~ [.!?][[:space:]]+[[:upper:]] ]] || die "--claim must be one sentence"
+      if [[ ! ${tf_source} =~ ^https?:// ]]; then
+        [ -f "${tf_source}" ] && [ -r "${tf_source}" ] \
+          || die "--source must be a URL or a readable file: ${tf_source}"
+        quoted=$(squash < "${tf_source}")
+        [[ $quoted == *"$(squash <<<"${tf_evidence}")"* ]] \
+          || die "--evidence is not a verbatim quote of ${tf_source}; quote the text as read"
+      fi
+      evidence_sha=$(fm_jev_sha256 <(squash <<<"${tf_evidence}" | tr -d '\n'))
+      qtype=claim-check
+      question='Does the quoted evidence, read from the named source, support the claim?'
+      add_option 'supported=The evidence states what the claim says.'
+      add_option 'contradicted=The evidence states something the claim contradicts.'
+      add_option 'not-addressed=The evidence does not settle the claim either way.'
+      template_text=$(printf 'Claim: %s\nSource: %s\nEvidence, quoted verbatim from the source:\n%s\n' \
+        "${tf_claim}" "${tf_source}" "${tf_evidence}")
+      default_summary=$tf_claim
+      ;;
+    ticket-status)
+      for f in ticket current proposed evidence; do
+        f="tf_$f"; [ -n "${!f}" ] || die "--template ticket-status needs --${f#tf_} ($(template_field_help "${f#tf_}"))"
+      done
+      cand=$(printf '%s' "${tf_proposed}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\{1,\}/-/g; s/^-//; s/-$//')
+      [ -n "$cand" ] || die "--proposed has no letters or digits: ${tf_proposed}"
+      [ "$cand" != keep-current ] || die "--proposed cannot be named keep-current"
+      qtype=ticket-status
+      question="Should ticket ${tf_ticket} move from ${tf_current} to ${tf_proposed}, given the evidence?"
+      add_option "$cand=Change the status to ${tf_proposed}."
+      add_option "keep-current=Keep the status at ${tf_current}."
+      template_text=$(printf 'Ticket: %s\nCurrent status: %s\nProposed status: %s\nEvidence, quoted verbatim:\n%s\n' \
+        "${tf_ticket}" "${tf_current}" "${tf_proposed}" "${tf_evidence}")
+      default_summary="${tf_ticket} ${tf_current} -> ${tf_proposed}"
+      ;;
+    ask-scope)
+      [ -n "$tf_words" ] || die "--template ask-scope needs --words ($(template_field_help words))"
+      [ "${#candidates[@]}" -ge 1 ] || die "--template ask-scope needs at least one --candidate ($(template_field_help candidate))"
+      template_text="The operator's words, verbatim:"$'\n'"${tf_words}"$'\n'"Candidate targets:"
+      for cand in "${candidates[@]}"; do
+        case "${cand%%=*}" in several|unclear) die "--candidate cannot be named ${cand%%=*}" ;; esac
+        add_option "$cand"
+        template_text="$template_text"$'\n'"- ${cand%%=*}: $(jq -r --arg s "${cand%%=*}" '.[$s]' <<<"$criteria")"
+      done
+      add_option 'several=The words cover more than one candidate.'
+      add_option 'unclear=The words do not say which candidate they cover.'
+      qtype=ask-scope
+      question="Which candidate target do the operator's words cover?"
+      default_summary="$(squash <<<"${tf_words}" | cut -c1-120)"
+      ;;
+    *) die "unknown --template: $template (claim-check, ticket-status, ask-scope)" ;;
+  esac
+}
+
+template_field_help() {
+  case "$1" in
+    claim) printf 'the claim, one sentence' ;;
+    source) printf 'the URL or file path the evidence was read from' ;;
+    evidence) printf 'a verbatim quote read from that source in this turn' ;;
+    ticket) printf 'the ticket id or URL' ;;
+    current) printf 'the status the ticket shows now' ;;
+    proposed) printf 'the status about to be written' ;;
+    words) printf "the operator's words, verbatim" ;;
+    candidate) printf 'a target the words could cover, as <id>[=<meaning>]' ;;
+  esac
+}
+
 cmd_ask() {
-  local qtype='' summary='' question='' context='' yes_no=0 opt slug meaning mine='' have_mine=0
-  local criteria='{}' request resp options id http lat answer_ok prompt ctx sha start never
+  local qtype='' summary='' question='' context='' yes_no=0 mine='' have_mine=0 template='' target=''
+  local criteria='{}' request resp='' options id='' http lat answer_ok prompt ctx sha start never
+  local template_text='' default_summary='' evidence_sha='' f
+  local tf_claim='' tf_source='' tf_evidence='' tf_ticket='' tf_current='' tf_proposed='' tf_words=''
+  local -a candidates=()
   start=$(fm_timing_now_ms)
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -369,20 +521,27 @@ cmd_ask() {
       --summary) [ $# -ge 2 ] || die "--summary needs a value"; summary=$2; shift 2 ;;
       --question) [ $# -ge 2 ] || die "--question needs a value"; question=$2; shift 2 ;;
       --context) [ $# -ge 2 ] || die "--context needs a value"; context=$2; shift 2 ;;
+      --template) [ $# -ge 2 ] || die "--template needs a value"; template=$2; shift 2 ;;
+      --target) [ $# -ge 2 ] || die "--target needs a value"; target=$2; shift 2 ;;
+      --claim|--source|--evidence|--ticket|--current|--proposed|--words)
+        [ $# -ge 2 ] || die "$1 needs a value"; printf -v "tf_${1#--}" '%s' "$2"; shift 2 ;;
+      --candidate) [ $# -ge 2 ] || die "--candidate needs a value"; candidates+=("$2"); shift 2 ;;
       --yes-no) yes_no=1; shift ;;
-      --option)
-        [ $# -ge 2 ] || die "--option needs a value"
-        opt=$2; shift 2
-        slug=${opt%%=*}
-        if [ "$slug" = "$opt" ]; then meaning=$slug; else meaning=${opt#*=}; fi
-        option_ok "$slug" || die "option id must be letters, digits, dot, dash, or underscore: $slug"
-        [ -n "$meaning" ] || die "option meaning is empty: $slug"
-        [ "$(jq -r --arg s "$slug" 'has($s)' <<<"$criteria")" = false ] || die "duplicate option: $slug"
-        criteria=$(jq -c --arg s "$slug" --arg m "$meaning" '. + {($s): $m}' <<<"$criteria")
-        ;;
+      --option) [ $# -ge 2 ] || die "--option needs a value"; add_option "$2"; shift 2 ;;
       *) die "unknown ask argument: $1" ;;
     esac
   done
+  if [ -n "$template" ]; then
+    template_fill
+    [ -n "$summary" ] || summary=$default_summary
+  else
+    [ -z "$tf_claim$tf_source$tf_evidence$tf_ticket$tf_current$tf_proposed$tf_words" ] \
+      && [ "${#candidates[@]}" = 0 ] || die "template fields need --template"
+  fi
+  if [ -n "$target" ]; then
+    target=$(fm_jev_target_key "$target") || die "--target must be <kind>:<value>, such as notion:<page id>"
+    [ "$have_mine" = 1 ] || die "--target needs --mine, firstmate's own choice"
+  fi
   [ -n "$qtype" ] || die "--type required"
   slug_ok "$qtype" || die "--type must be a kebab slug: $qtype"
   [ -n "$summary" ] || die "--summary required"
@@ -403,11 +562,11 @@ cmd_ask() {
   fi
   if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
     echo "jev: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-    exit 0
+    ledger off
   fi
   if ! command -v curl >/dev/null 2>&1; then
     echo "jev: error (curl not installed)" >&2
-    exit 0
+    ledger off
   fi
 
   # One private copy of the context, so the bytes sent, hashed, and snapshotted
@@ -415,7 +574,9 @@ cmd_ask() {
   ctx=$(mktemp) || die "mktemp failed"
   resp=$(mktemp) || { rm -f "$ctx"; die "mktemp failed"; }
   trap 'rm -f "$resp" "$ctx"' EXIT
-  cat "${context:-/dev/null}" > "$ctx" 2>/dev/null || die "context file not readable: $context"
+  { [ -z "$template_text" ] || printf '%s\n' "$template_text"
+    if [ -n "$template_text" ] && [ -n "$context" ]; then printf '\nAdditional context:\n'; fi
+    cat "${context:-/dev/null}"; } > "$ctx" 2>/dev/null || die "context file not readable: $context"
   sha=$(fm_jev_sha256 "$ctx")
   request=$(jq -n --rawfile context "$ctx" --arg model "$FM_JEV_MODEL" \
     --arg question "$question" --arg qkey "$QKEY" --argjson criteria "$criteria" '
@@ -426,13 +587,13 @@ cmd_ask() {
   # The never-send list covers every string about to leave this machine, for
   # Jev and the duplicate queries alike.
   jq -r '.. | strings | gsub("\\s+"; " ")' <<<"$request" > "$resp" 2>/dev/null \
-    || { echo "jev: off (could not extract the request text to check; nothing sent)" >&2; exit 0; }
+    || { echo "jev: off (could not extract the request text to check; nothing sent)" >&2; ledger off; }
   if never=$(fm_jev_never_send_line "$resp"); then
     echo "jev: off (context matches the never-send list line $never; nothing sent)" >&2
-    exit 0
+    ledger off
   elif [ $? = 2 ]; then
     echo "jev: off ($never; nothing sent)" >&2
-    exit 0
+    ledger off
   fi
   : > "$resp"
   prompt=$(jq -rn --rawfile context "$ctx" --arg question "$question" --argjson criteria "$criteria" '
@@ -450,7 +611,7 @@ cmd_ask() {
   if [ "$http" != 200 ]; then
     settle error
     echo "jev: error (http $http after ${lat} ms)" >&2
-    exit 0
+    ledger error
   fi
   answer_ok=$(jq -e --arg qkey "$QKEY" --argjson options "$options" '
     .answers[$qkey] as $a |
@@ -467,7 +628,7 @@ cmd_ask() {
   if [ "$answer_ok" != true ]; then
     settle error
     echo "jev: error (response is not a Choice answer over the options)" >&2
-    exit 0
+    ledger error
   fi
   settle ok
   jq -r --arg id "$id" --arg qkey "$QKEY" --arg lat "$lat" --arg acting "$ACTING" --arg decider "$DECIDER" '
@@ -480,7 +641,22 @@ cmd_ask() {
     "  model: \(show(.model))   latency_ms: \($lat)   tokens: \(show(.usage.input_tokens))/\(show(.usage.output_tokens))",
     (if $acting == "" then empty else "  acting: \($acting)   decider: \($decider)" end)' "$resp" \
     || echo "jev: error (output rendering failed)" >&2
+  [ "$have_mine" = 0 ] || warn_disagreement "$qtype" "$id" "$mine" \
+    "$(jq -r --arg q "$QKEY" '.answers[$q].choice' "$resp")" "$(jq -r --arg q "$QKEY" '.answers[$q].confidence' "$resp")"
+  ledger ok
+}
+
+# ledger <ok|error|off>: uses cmd_ask's locals. Appends the ask ledger line
+# (bin/fm-jev-lib.sh) and ends the ask with exit 0.
+ledger() {
+  fm_jev_ask_record "$qtype" "$target" "$id" "$1" "$mine" "$resp" "$QKEY" "$evidence_sha"
   exit 0
+}
+
+# warn_disagreement <type> <decision-id> <mine> <jev-answer> <confidence>
+warn_disagreement() {
+  [ -n "$4" ] && [ "$4" != null ] && [ "$3" != "$4" ] || return 0
+  echo "jev: WARNING: firstmate disagrees with Jev on $1 $2: jev $4 ($5), firstmate $3" >&2
 }
 
 # settle <ok|error>: uses cmd_ask's locals. Records the call, writes the audit
@@ -540,6 +716,8 @@ cmd_record_mine() {
   call=$(show_one "$id")
   fm_jev_dd_send "$(fm_jev_label_event "$call")" "$id"
   jq -r '"jev: recorded \(.decision_id) mine=\(.mine) jev=\(.answer // "none") \(.decision)"' <<<"$call"
+  warn_disagreement "$(jq -r .question_type <<<"$call")" "$id" "$answer" \
+    "$(jq -r '.answer // empty' <<<"$call")" "$(jq -r '.confidence // "-"' <<<"$call")"
 }
 
 cmd_record_outcome() {
@@ -714,6 +892,103 @@ report_text() {  # <since> <floor> <min-answered> <min-agreement> <max-overruled
     end'
 }
 
+# ledger_rows: every ask ledger line as one JSON array.
+ledger_rows() {
+  local path
+  path=$(fm_jev_ask_ledger_path)
+  if [ -f "$path" ]; then
+    jq -cR 'try fromjson catch empty | select(type == "object")' "$path" | jq -cs .
+  else
+    printf '[]'
+  fi
+}
+
+cmd_asked() {
+  local types='' statuses=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --type) [ $# -ge 2 ] || die "--type needs a value"; types=$2; shift 2 ;;
+      --status) [ $# -ge 2 ] || die "--status needs a value"; statuses=$2; shift 2 ;;
+      *) die "unknown asked argument: $1" ;;
+    esac
+  done
+  [ -n "$types" ] || die "asked needs --type"
+  ledger_rows | jq -ce --arg types "$types" --arg st "$statuses" --argjson w "$ASK_WINDOW_SECS" '
+    ((now - $w) | todate) as $since | ($types | split(",")) as $t |
+    [.[] | select(.ts >= $since and (.question_type as $q | $t | index($q)) != null
+      and ($st == "" or (.status as $s | $st | split(",") | index($s)) != null))] | last // empty' \
+    || exit 1
+}
+
+# claim_floor: the operator's claim-check floor, else CLAIM_FLOOR.
+claim_floor() {
+  local path="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/jev-claim-check-floor" v=''
+  [ ! -f "$path" ] || v=$(tr -d '[:space:]' < "$path")
+  if [ -z "$v" ]; then printf '%s' "$CLAIM_FLOOR"
+  elif [[ $v =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]]; then printf '%s' "$v"
+  else echo "jev: $path is not a number from 0 through 1; using $CLAIM_FLOOR" >&2; printf '%s' "$CLAIM_FLOOR"
+  fi
+}
+
+cmd_target_status() {
+  local target='' require='' key outcomes
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --target) [ $# -ge 2 ] || die "--target needs a value"; target=$2; shift 2 ;;
+      --require) [ $# -ge 2 ] || die "--require needs a value"; require=$2; shift 2 ;;
+      *) die "unknown target-status argument: $1" ;;
+    esac
+  done
+  case "$require" in claim-check|template) ;; *) die "--require must be claim-check or template" ;; esac
+  key=$(fm_jev_target_key "$target") || die "--target must be <kind>:<value>"
+  outcomes=$(records | jq -cs '[.[] | select(.event == "outcome") | .decision_id] | unique')
+  ledger_rows | jq -r --arg t "$key" --arg req "$require" --argjson floor "$(claim_floor)" \
+    --argjson w "$ASK_WINDOW_SECS" --argjson outcomes "$outcomes" '
+    ((now - $w) | todate) as $since |
+    [.[] | select(.target == $t)] as $rows |
+    [$rows[] | select(.question_type == "claim-check")] as $cc |
+    def against: .answer == "contradicted" or .answer == "not-addressed";
+    def verdict($word): "\($word) \(.decision_id) \(.answer) \(.confidence)";
+    [range(0; $cc | length) as $i | $cc[$i] |
+      select(.status == "ok" and against and .confidence >= $floor
+        and ((.decision_id as $d | $outcomes | index($d)) == null)) |
+      . as $b |
+      select([$cc[($i + 1):][] | select(.answer == "supported" and .evidence_sha256 != $b.evidence_sha256)]
+        | length == 0)] as $open |
+    [$rows[] | select(.ts >= $since and
+      (if $req == "claim-check" then .question_type == "claim-check"
+       else (.question_type | IN("claim-check", "ticket-status", "ask-scope")) end))] as $recent |
+    ([$recent[] | select(.question_type == "claim-check")] | last) as $last |
+    if ($open | length) > 0 then $open | last | verdict("blocked")
+    elif ($recent | length) == 0 then "missing"
+    elif $last != null and $last.status == "ok" and ($last | against)
+      and ((($last.decision_id) as $d | $outcomes | index($d)) == null) then $last | verdict("warn")
+    else "ok" end'
+}
+
+cmd_turn() {
+  local since=''
+  [ $# -eq 2 ] && [ "$1" = --since ] || die "turn needs --since <ISO-8601 UTC time>"
+  since=$2
+  [[ $since =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]+)?Z$ ]] \
+    || die "--since must be an ISO-8601 UTC time such as 2026-09-29T03:11:06Z"
+  since="${BASH_REMATCH[1]}Z"
+  records | jq -rs --arg since "$since" "$JOIN_JQ"'
+    def show($v): ($v // "-") | tostring | gsub("[\t\r\n]"; " ");
+    [joined[] | select(.ts >= $since)] as $all |
+    ([$all[] | select(.question_type == "dispatch-rule" and .context_sha256 != null)]
+      | group_by(.context_sha256) | map(([.[] | select(.mine != null)] | last) // (sort_by(.ts) | last))) as $dr |
+    ([$all[] | select(.question_type != "dispatch-rule" or .context_sha256 == null)] + $dr | sort_by(.ts)) as $rows |
+    "Jev asks this turn (\($rows | length))",
+    if ($rows | length) == 0 then "none" else
+      ($rows[] |
+        "\(.asker // "firstmate") \(.question_type): \(show(.summary)) - jev "
+        + (if .status == "ok" then "\(.answer) (\(.confidence))" else "error (-)" end)
+        + ", mine \(.mine // "unrecorded")"
+        + (if .answer != null and .mine != null and .answer != .mine then " [DISAGREE]" else "" end))
+    end'
+}
+
 cmd_dd_failures() {
   local mode=${1:-} path acked_path total acked n
   [ $# -le 1 ] || die "dd-failures takes at most one of --quiet or --ack"
@@ -750,6 +1025,9 @@ case "$sub" in
   show) cmd_show "$@" ;;
   report) cmd_report "$@" ;;
   dd-failures) cmd_dd_failures "$@" ;;
+  asked) cmd_asked "$@" ;;
+  turn) cmd_turn "$@" ;;
+  target-status) cmd_target_status "$@" ;;
   -h|--help) usage ;;
   *) die "unknown subcommand: $sub (see --help)" ;;
 esac
