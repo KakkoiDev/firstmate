@@ -1108,6 +1108,7 @@ bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON blo
 **When firstmate invokes the resolver**
 
 Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome.
+A second resolve of the same request within 10 minutes reuses the recorded Jev answer, prints a `dispatch-resolve: reused Jev decision <id>` line on stderr, and records no second call, so one brief stays one decision; quota and every later check still run fresh.
 
 **What the model receives**
 
