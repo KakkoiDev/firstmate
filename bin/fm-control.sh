@@ -2,11 +2,14 @@
 # fm-control.sh - the CONTROL PLANE for a firstmate-owned agent: allowlisted
 # lifecycle verbs addressed to an exact task id.
 #
-# Usage: fm-control.sh <task-id> interrupt
+# Usage: fm-control.sh <task-id> interrupt [--worker-state <state>]
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
-#                                         [--effort <level>]
+#                                         [--effort <level>] [--worker-state <state>]
 #                                         (--note <text> | --note-file <path>)
+#   --worker-state <working|waiting-on-answered-question|looping|confused|unresponsive>
+#   is required for an interrupt or relaunch of a crewmate or scout;
+#   control_jev_gate below owns the ask.
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -195,6 +198,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-polytoken-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-jev-gate-lib.sh
+. "$SCRIPT_DIR/fm-jev-gate-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
@@ -270,6 +275,7 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+WORKER_STATE=
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -281,6 +287,7 @@ for control_arg in "$@"; do
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
+      worker_state) WORKER_STATE=$control_arg ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
         NOTE=$(cat "$control_arg")
@@ -298,6 +305,8 @@ for control_arg in "$@"; do
     --effort) control_want_value=effort ;;
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
     --note) control_want_value=note ;;
+    --worker-state) control_want_value=worker_state ;;
+    --worker-state=*) WORKER_STATE=${control_arg#--worker-state=} ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
     --note-file=*)
@@ -310,8 +319,10 @@ for control_arg in "$@"; do
 done
 if [ -n "$control_want_value" ]; then
   [ "$control_want_value" = note_file ] && die "--note-file requires a value"
+  [ "$control_want_value" = worker_state ] && die "--worker-state requires a value"
   die "--$control_want_value requires a value"
 fi
+[ -z "$WORKER_STATE" ] || [ "$VERB" != exit ] || die "--worker-state applies to 'interrupt' and 'relaunch' only"
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
@@ -340,6 +351,36 @@ ID=$RAW_ID
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_guard "$ID" "lifecycle control (fm-control)"
+
+# Jev decision gate (bin/fm-jev-gate-lib.sh owns the ask and the refusal): an
+# interrupt or relaunch of a crewmate or scout carries firstmate's stuck-worker
+# reading as --worker-state, asked with the task's brief, recent status lines,
+# and any relaunch note as context before the control lock is taken. The
+# action runs whatever the answer; an acting "working" prints a notice.
+control_jev_gate() {
+  local ctx lines note_file kind
+  fm_jev_gate_enabled || return 0
+  case "$VERB" in interrupt|relaunch) ;; *) return 0 ;; esac
+  [ -f "$STATE/$ID.meta" ] || return 0
+  kind=$(fm_meta_get "$STATE/$ID.meta" kind)
+  [ "$kind" != secondmate ] || return 0
+  [ -n "$WORKER_STATE" ] || fm_jev_gate_refuse fm-control.sh \
+    "$VERB needs --worker-state <$(fm_jev_gate_choices stuck-worker)>, firstmate's own reading of the worker; nothing was changed"
+  fm_jev_gate_is_option stuck-worker "$WORKER_STATE" || fm_jev_gate_refuse fm-control.sh \
+    "--worker-state must be one of $(fm_jev_gate_choices stuck-worker) (got '$WORKER_STATE'); nothing was changed"
+  ctx=$(mktemp) || fm_jev_gate_refuse fm-control.sh "mktemp failed; nothing was changed"
+  lines=$(mktemp) || { rm -f "$ctx"; fm_jev_gate_refuse fm-control.sh "mktemp failed; nothing was changed"; }
+  note_file=$(mktemp) || { rm -f "$ctx" "$lines"; fm_jev_gate_refuse fm-control.sh "mktemp failed; nothing was changed"; }
+  tail -n 20 "$STATE/$ID.status" > "$lines" 2>/dev/null || true
+  printf '%s\n' "$NOTE" > "$note_file"
+  fm_jev_gate_context "$ctx" "$DATA/$ID/brief.md" "Recent status lines" "$lines" "Relaunch note" "$note_file"
+  fm_jev_gate_ask fm-control.sh stuck-worker "$WORKER_STATE" \
+    "Which state best describes the worker of task $ID before this $VERB" "$ctx"
+  rm -f "$ctx" "$lines" "$note_file"
+  [ "$FM_JEV_GATE_ACTING" != working ] \
+    || echo "fm-control.sh: the worker of $ID reads as working; this $VERB goes ahead as asked" >&2
+}
+control_jev_gate
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 trap control_cleanup EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" \

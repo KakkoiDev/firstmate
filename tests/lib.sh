@@ -69,9 +69,13 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
-# Clear the Claude Code session id so no Jev ask looks for the live session
-# transcript; a case that tests the issuing-request lookup names its fixture
-# with FM_JEV_TRANSCRIPT.
+# Disarm the Jev decision gate in the action scripts (bin/fm-jev-gate-lib.sh),
+# so a suite that drives fm-spawn, fm-send, fm-teardown, fm-pr-merge,
+# fm-merge-local, or fm-control is not refused for a missing decision
+# argument; tests/fm-jev-gate.test.sh arms it. Clear the Claude Code session
+# id so no Jev ask looks for the live session transcript; a case that tests
+# the issuing-request lookup names its fixture with FM_JEV_TRANSCRIPT.
+export FM_JEV_GATE=off
 unset CLAUDE_CODE_SESSION_ID
 
 # Clear the Rex block identity an operator's terminal exports. Run directly

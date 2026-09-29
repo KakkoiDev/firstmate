@@ -198,6 +198,9 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+#          [--report-has-captain-call <yes|no> --scout-recommends-ship <yes|no>]
+#   The two yes/no flags are required for an ordinary scout teardown and
+#   ignored otherwise; teardown_jev_gate below owns the asks.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -391,6 +394,8 @@ for _teardown_source in \
   fm-composer-lib.sh \
   fm-cursor-lib.sh \
   fm-nm-run-lib.sh \
+  fm-brief-heading-lib.sh \
+  fm-jev-gate-lib.sh \
   fm-wake-lib.sh \
   fm-path-lib.sh \
   fm-lease-lib.sh
@@ -422,6 +427,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-jev-gate-lib.sh
+. "$SCRIPT_DIR/fm-jev-gate-lib.sh"
 # Archive paths live only in teardown; presentation/wake readers stay unaware.
 teardown_archive_directory() {  # <directory>
   if [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }; then
@@ -523,11 +530,18 @@ ID=$1
 TEARDOWN_LOST_SLOT_EXIT=4
 FORCE=
 LEGACY_RECORD_GIVEN=0
+REPORT_CALL=
+RECOMMENDS_SHIP=
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --report-has-captain-call|--scout-recommends-ship)
+      [ "$#" -ge 2 ] || { echo "error: $1 requires yes or no" >&2; exit 2; }
+      if [ "$1" = --scout-recommends-ship ]; then RECOMMENDS_SHIP=$2; else REPORT_CALL=$2; fi
+      shift
+      ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -555,6 +569,41 @@ if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
   exit "$FM_LEASE_REFUSE_EXIT"
 fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
+
+# Jev decision gate (bin/fm-jev-gate-lib.sh owns the asks and the refusal): an
+# ordinary scout teardown carries firstmate's yes/no reading of the report for
+# report-has-captain-call and scout-recommends-ship, each asked with the report
+# as context before any lock is taken. report-has-captain-call is never handed
+# to Jev; the completion gate below still decides whether cleanup may proceed.
+# An acting yes on either prints a notice and never blocks by itself.
+teardown_jev_gate() {
+  local kind ctx type mine
+  fm_jev_gate_enabled || return 0
+  [ "$FORCE" != --force ] || return 0
+  [ -f "$STATE/$ID.meta" ] || return 0
+  kind=$(fm_meta_get "$STATE/$ID.meta" kind)
+  [ "$kind" = scout ] || return 0
+  for type in report-has-captain-call scout-recommends-ship; do
+    if [ "$type" = scout-recommends-ship ]; then mine=$RECOMMENDS_SHIP; else mine=$REPORT_CALL; fi
+    case "$mine" in
+      yes|no) ;;
+      '') fm_jev_gate_refuse fm-teardown.sh "a scout teardown needs --$type <yes|no>, firstmate's own reading of the report; nothing was changed" ;;
+      *) fm_jev_gate_refuse fm-teardown.sh "--$type must be yes or no (got '$mine'); nothing was changed" ;;
+    esac
+  done
+  ctx=$(mktemp) || fm_jev_gate_refuse fm-teardown.sh "mktemp failed; nothing was changed"
+  fm_jev_gate_context "$ctx" "$DATA/$ID/report.md"
+  fm_jev_gate_ask fm-teardown.sh report-has-captain-call "$REPORT_CALL" \
+    "Does the report of scout $ID contain a call only the human operator can make" "$ctx"
+  [ "$FM_JEV_GATE_ACTING" != yes ] \
+    || echo "fm-teardown.sh: the report of $ID carries a call for the human operator; hold it through bin/fm-captain-hold.sh before cleanup" >&2
+  fm_jev_gate_ask fm-teardown.sh scout-recommends-ship "$RECOMMENDS_SHIP" \
+    "Does the report of scout $ID recommend shippable work" "$ctx"
+  [ "$FM_JEV_GATE_ACTING" != yes ] \
+    || echo "fm-teardown.sh: the report of $ID recommends shippable work; file or promote it before this cleanup removes the scout" >&2
+  rm -f "$ctx"
+}
+teardown_jev_gate
 
 META="$STATE/$ID.meta"
 TREEHOUSE_PROJECT_LOCK=

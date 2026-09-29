@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait] <jev decisions>
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait] <jev decisions>
+#   <jev decisions> = --concurrency <parallel|semantic-dependency|shared-external-state|migration-conflict>
+#   --decision project-match=<id|off> --decision deliverable-class=<id|off>
+#   [--decision secondmate-scope=<id|off>] [--decision surface-class=<id|off>],
+#   required on every fresh ship or scout spawn; spawn_jev_gate below owns
+#   which are required when and what refuses, bin/fm-jev-gate-lib.sh the asks.
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -901,6 +906,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-jev-gate-lib.sh
+. "$SCRIPT_DIR/fm-jev-gate-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -944,6 +951,8 @@ UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+CONCURRENCY=
+DECISIONS=()
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
 HERDR_RESUME_LOCK_WAIT=0
@@ -998,6 +1007,8 @@ for a in "$@"; do
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
       ;;
+    concurrency) CONCURRENCY=$a ;;
+    decision) DECISIONS+=("$a") ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
       exit 1
@@ -1067,6 +1078,10 @@ for a in "$@"; do
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
     ;;
+  --concurrency) want_value=concurrency ;;
+  --concurrency=*) CONCURRENCY=${a#--concurrency=} ;;
+  --decision) want_value=decision ;;
+  --decision=*) DECISIONS+=("${a#--decision=}") ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -1991,6 +2006,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
+  # One set of Jev decisions covers the batch, so a batch spanning projects is
+  # one invocation per project.
+  [ -z "$CONCURRENCY" ] || shared_args+=(--concurrency "$CONCURRENCY")
+  for d in "${DECISIONS[@]+"${DECISIONS[@]}"}"; do shared_args+=(--decision "$d"); done
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
   for pair in "${POS[@]}"; do
@@ -2091,6 +2110,91 @@ spawn_refuse_if_away_spend_cap() {
 # exists, so a refusal costs nothing to unwind; rechecked after the task-set
 # lock so two fresh spawns cannot both publish from a stale count.
 spawn_refuse_if_away_spend_cap
+spawn_decision_for() {  # <type>: the --decision value for <type>, empty when absent
+  local d
+  for d in "${DECISIONS[@]+"${DECISIONS[@]}"}"; do
+    [ "${d%%=*}" != "$1" ] || { printf '%s' "${d#*=}"; return 0; }
+  done
+}
+spawn_gate_refuse() {  # <ctx-file|''> <message> [<command>]
+  [ -z "$1" ] || rm -f "$1"
+  shift
+  fm_jev_gate_refuse fm-spawn.sh "$@"
+}
+# Jev decision gate (bin/fm-jev-gate-lib.sh owns the asks and refusals): a
+# fresh ship or scout spawn carries firstmate's choice for each intake
+# decision. Asked beforehand and passed as --decision <type>=<id|off>:
+# project-match and deliverable-class always, secondmate-scope while
+# data/secondmates.md registers any secondmate, and surface-class for a ship
+# on a no-mistakes-prod-only project. Asked here: concurrency from the required
+# --concurrency and effort-level from --effort (default when absent). The spawn
+# refuses when the acting answer contradicts it: another project, another
+# deliverable, a secondmate scope, a non-internal surface under direct-PR, or
+# concurrency other than parallel; an acting effort that differs from --effort
+# replaces it. Runs before any lock, endpoint, or worktree exists.
+spawn_jev_gate() {
+  local brief="$DATA/$ID/brief.md" proj_name type id ctx='' mine d seen='' required
+  [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] || return 0
+  fm_jev_gate_enabled || return 0
+  for d in "${DECISIONS[@]+"${DECISIONS[@]}"}"; do
+    type=${d%%=*}
+    case "$type" in
+    project-match | deliverable-class | secondmate-scope | surface-class) ;;
+    *) spawn_gate_refuse '' "--decision takes project-match, deliverable-class, secondmate-scope, or surface-class (got '$type')" ;;
+    esac
+    [ "$type" != "$d" ] && [ -n "${d#*=}" ] || spawn_gate_refuse '' "--decision needs <type>=<decision-id|off> (got '$d')"
+    case " $seen " in *" $type "*) spawn_gate_refuse '' "--decision $type is given twice" ;; esac
+    seen="$seen $type"
+  done
+  proj_name=$(basename "${POS[1]:-}")
+  required="project-match deliverable-class"
+  [ -z "$(fm_jev_gate_secondmates)" ] || required="$required secondmate-scope"
+  if [ "$KIND" = ship ] \
+    && [ "$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$proj_name" 2>/dev/null | cut -d' ' -f1)" = no-mistakes-prod-only ]; then
+    required="$required surface-class"
+  fi
+  for type in $required; do
+    id=$(spawn_decision_for "$type")
+    [ -n "$id" ] || spawn_gate_refuse '' "a fresh $KIND spawn needs --decision $type=<decision-id|off>; ask first, then pass the decision_id it printed, or off when it printed nothing" \
+      "$(fm_jev_gate_ask_command "$type")"
+    fm_jev_gate_recorded fm-spawn.sh "$type" "$id"
+    [ -n "$FM_JEV_GATE_ACTING" ] || continue
+    case "$type" in
+    project-match)
+      [ "$FM_JEV_GATE_ACTING" = "$proj_name" ] \
+        || spawn_gate_refuse '' "decision $id resolves the project to '$FM_JEV_GATE_ACTING', not $proj_name"
+      ;;
+    deliverable-class)
+      [ "$FM_JEV_GATE_ACTING" = "$KIND" ] \
+        || spawn_gate_refuse '' "decision $id classifies the deliverable as '$FM_JEV_GATE_ACTING', not a $KIND"
+      ;;
+    secondmate-scope)
+      [ "$FM_JEV_GATE_ACTING" = main ] \
+        || spawn_gate_refuse '' "decision $id routes this work to secondmate '$FM_JEV_GATE_ACTING'; hand it to that secondmate instead"
+      ;;
+    surface-class)
+      [ "$MODE" != direct-PR ] || [ "$FM_JEV_GATE_ACTING" = internal-only ] \
+        || spawn_gate_refuse '' "decision $id classifies the surface as '$FM_JEV_GATE_ACTING'; direct-PR is only for an internal-only surface"
+      ;;
+    esac
+  done
+  [ -n "$CONCURRENCY" ] || spawn_gate_refuse '' "a fresh $KIND spawn needs --concurrency <$(fm_jev_gate_choices concurrency)>, firstmate's own call on running beside the work under way"
+  fm_jev_gate_is_option concurrency "$CONCURRENCY" \
+    || spawn_gate_refuse '' "--concurrency must be one of $(fm_jev_gate_choices concurrency) (got '$CONCURRENCY')"
+  ctx=$(mktemp) || spawn_gate_refuse '' "mktemp failed"
+  fm_jev_gate_context "$ctx" "$brief"
+  fm_jev_gate_ask fm-spawn.sh concurrency "$CONCURRENCY" "Can task $ID run in parallel with the work under way" "$ctx"
+  [ "$FM_JEV_GATE_ACTING" = parallel ] \
+    || spawn_gate_refuse "$ctx" "concurrency for task $ID acts as '$FM_JEV_GATE_ACTING'; keep it queued until that clears"
+  mine=${EFFORT:-default}
+  fm_jev_gate_ask fm-spawn.sh effort-level "$mine" "Which reasoning effort fits task $ID" "$ctx"
+  rm -f "$ctx"
+  if [ "$FM_JEV_GATE_ACTING" != "$mine" ]; then
+    [ "$FM_JEV_GATE_ACTING" != default ] && EFFORT=$FM_JEV_GATE_ACTING || EFFORT=
+    echo "fm-spawn.sh: effort ${EFFORT:-default} replaces $mine (decided by $FM_JEV_GATE_DECIDER)" >&2
+  fi
+}
+spawn_jev_gate
 spawn_require_relocated_queued_work() {
   local actor
   [ "$RELAUNCH" -ne 1 ] || return 0
