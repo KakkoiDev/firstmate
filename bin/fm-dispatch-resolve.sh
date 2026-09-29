@@ -266,7 +266,7 @@ record_call() {  # <ok|error>
 }
 # shellcheck disable=SC2329 # Invoked through fm_jev_detach.
 send_decision_event() {
-  fm_jev_dd_send "$(fm_jev_decision_event "$(fm_jev_call_record "$DECISION_ID")" not-run)"
+  fm_jev_dd_send "$(fm_jev_decision_event "$(fm_jev_call_record "$DECISION_ID")" not-run '')"
 }
 
 never_send_off() {

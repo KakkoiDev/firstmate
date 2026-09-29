@@ -77,7 +77,8 @@ fm_jev_capture_dd() {
 
 # fm_jev_decision_event <joined-json> <claude-status when no duplicate ran>
 # <claude-model>: the combined event for one decision and one Claude model;
-# claude_* fields absent from the joined record are null, except claude_model.
+# claude_* fields absent from the joined record are null, except claude_model,
+# which is <claude-model> unless that is empty (no duplicate query ran).
 fm_jev_decision_event() {
   jq -c --arg cstatus "$2" --arg cmodel "$3" '
     (.claude_answer // null) as $ca |
@@ -87,7 +88,7 @@ fm_jev_decision_event() {
      jev_answer: .answer, jev_confidence: .confidence, jev_model: .model, jev_status: .status,
      jev_latency_ms: .latency_ms, jev_tokens_in: .tokens_in, jev_tokens_out: .tokens_out,
      jev_cost_usd: (.jev_cost_usd // null),
-     claude_answer: $ca, claude_model: (.claude_model // $cmodel), claude_status: (.claude_status // $cstatus),
+     claude_answer: $ca, claude_model: (.claude_model // (if $cmodel == "" then null else $cmodel end)), claude_status: (.claude_status // $cstatus),
      claude_latency_ms: (.claude_latency_ms // null), claude_wall_ms: (.claude_wall_ms // null),
      claude_tokens_in: (.claude_tokens_in // null), claude_tokens_out: (.claude_tokens_out // null),
      claude_cost_usd: (.claude_cost_usd // null),
