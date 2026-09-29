@@ -23,7 +23,7 @@ The first task for a project registers that repository with `orca repo add --pat
 No manual repository registration is required.
 
 Open the Orca app to watch a task's terminal.
-Routine supervision uses the recorded endpoint through `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'`.
+Routine supervision uses the recorded endpoint through `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> --not-a-decision '<text>'`.
 Enter and Ctrl-C are supported; Escape is not.
 
 `config/launch-env-allowlist` alone cannot scope worker credentials on Orca, because allowlisted values resolve from the Orca terminal's own environment.

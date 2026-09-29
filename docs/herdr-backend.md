@@ -110,7 +110,7 @@ A secondmate launched by the primary receives a narrowly scoped home override du
 ### Watching tasks
 
 Attach to the selected named Herdr session and switch to the relevant home workspace to watch its task tabs.
-Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without attaching.
+Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> --not-a-decision '<text>'` without attaching.
 
 ### Focus
 

@@ -53,7 +53,7 @@ Do not manually patch metadata to make an externally-created Orca terminal look 
 ## Supervision
 
 Use `bin/fm-peek.sh`, `bin/fm-send.sh`, `bin/fm-crew-state.sh`, and `bin/fm-teardown.sh` for routine operation.
-For steer messages, use `bin/fm-send.sh <id> '...'`; the stable `fm-<id>` alias also works, and ordinary local text steers may contain newlines because they ride the durable inbox.
+For steer messages, use `bin/fm-send.sh <id> --not-a-decision '...'` (or `--mid-task-ask <choice>` for a mid-task ask); the stable `fm-<id>` alias also works, and ordinary local text steers may contain newlines because they ride the durable inbox.
 Keep initial scope in the task brief; a temporary file remains useful when the instruction includes supporting material the worker should inspect separately.
 
 When supervising, treat `state/<id>.meta` as the routing record and Orca's own ids as backend implementation details.
