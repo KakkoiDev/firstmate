@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>]
+#                   (--mid-task-ask <invalidates|follow-up|downstream-correction> | --not-a-decision) <text...>
+#   Every text steer except --fire-and-forget declares one of the two Jev
+#   flags; fm_send_jev_gate below owns the ask and the refusal.
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -259,6 +262,8 @@ fi
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-jev-gate-lib.sh
+. "$SCRIPT_DIR/fm-jev-gate-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -481,6 +486,8 @@ fm_send_add_resolve_key() { # <key>
   esac
   RESOLVE_KEYS="${RESOLVE_KEYS}${RESOLVE_KEYS:+ }$k"
 }
+MID_TASK_ASK=
+NOT_A_DECISION=0
 while :; do
   case "${1:-}" in
   --resolve-key)
@@ -515,6 +522,22 @@ while :; do
     FIRE_AND_FORGET_ID=${1#--fire-and-forget=}
     shift
     ;;
+  --mid-task-ask)
+    [ $# -ge 2 ] || {
+      echo "error: --mid-task-ask requires a classification" >&2
+      exit 1
+    }
+    MID_TASK_ASK=$2
+    shift 2
+    ;;
+  --mid-task-ask=*)
+    MID_TASK_ASK=${1#--mid-task-ask=}
+    shift
+    ;;
+  --not-a-decision)
+    NOT_A_DECISION=1
+    shift
+    ;;
   *) break ;;
   esac
 done
@@ -522,6 +545,34 @@ done
 if [ "$TARGET_BACKEND" != remote ]; then
   fm_backend_validate "$TARGET_BACKEND" || exit 1
 fi
+
+# Jev decision gate (bin/fm-jev-gate-lib.sh owns the ask and the refusal):
+# every text steer declares either firstmate's mid-task-ask classification,
+# asked with the steer text and the task's brief as context, or
+# --not-a-decision. mid-task-ask is never handed to Jev, so firstmate's
+# classification always acts and the steer is sent either way. A
+# --fire-and-forget delivery and the --key path are exempt.
+fm_send_jev_gate() {
+  local ctx msg task=
+  [ -z "$FIRE_AND_FORGET_ID" ] || return 0
+  fm_jev_gate_enabled || return 0
+  if [ "$NOT_A_DECISION" = 1 ]; then
+    [ -z "$MID_TASK_ASK" ] || fm_jev_gate_refuse fm-send.sh "--mid-task-ask and --not-a-decision are exclusive"
+    return 0
+  fi
+  [ -n "$MID_TASK_ASK" ] || fm_jev_gate_refuse fm-send.sh \
+    "a text steer declares --mid-task-ask <$(fm_jev_gate_choices mid-task-ask)> when it relays a new or changed ask from the human, or --not-a-decision otherwise; nothing was sent"
+  fm_jev_gate_is_option mid-task-ask "$MID_TASK_ASK" || fm_jev_gate_refuse fm-send.sh \
+    "--mid-task-ask must be one of $(fm_jev_gate_choices mid-task-ask) (got '$MID_TASK_ASK'); nothing was sent"
+  [ -z "$TARGET_META" ] || task=$(fm_send_id_from_meta "$TARGET_META")
+  ctx=$(mktemp) || fm_jev_gate_refuse fm-send.sh "mktemp failed; nothing was sent"
+  msg=$(mktemp) || { rm -f "$ctx"; fm_jev_gate_refuse fm-send.sh "mktemp failed; nothing was sent"; }
+  printf '%s\n' "$MESSAGE" > "$msg"
+  fm_jev_gate_context "$ctx" "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$task/brief.md" "Mid-task ask" "$msg"
+  fm_jev_gate_ask fm-send.sh mid-task-ask "$MID_TASK_ASK" \
+    "Does this mid-task ask for ${task:-this worker} invalidate the work under way" "$ctx"
+  rm -f "$ctx" "$msg"
+}
 
 # Classify a from-firstmate -> secondmate request. Only a task selector resolved
 # through this home's meta whose authoritative kind is secondmate is marked: the
@@ -797,6 +848,7 @@ else
     echo "error: a text steer requires a nonempty message; nothing was sent (an empty marked request would deliver only marker and correlation bytes and leave the parent waiting on a reply to nothing)" >&2
     exit 1
   fi
+  fm_send_jev_gate
   if [ "$TARGET_BACKEND" = remote ]; then
     FM_SEND_REMOTE_BUDGET=${FM_SEND_REMOTE_BUDGET:-30}
     case "$FM_SEND_REMOTE_BUDGET" in

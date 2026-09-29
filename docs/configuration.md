@@ -1204,6 +1204,31 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
+## Jev authority (config/jev-authority)
+
+The action scripts `fm-spawn.sh`, `fm-send.sh`, `fm-teardown.sh`, `fm-pr-merge.sh`, `fm-merge-local.sh`, and `fm-control.sh` refuse a decision-bearing invocation until firstmate's own choice arrives as an explicit argument, and each asks Jev with that choice recorded blind before the answer is read.
+Jev off or failing never blocks: the explicit choice acts, and a choice made before the script runs is passed as `off` when its ask printed nothing.
+[`bin/fm-jev-gate-lib.sh`](../bin/fm-jev-gate-lib.sh) owns the question wording, options, and refusal text, and each script's usage header names its arguments.
+`FM_JEV_GATE=off` disables every gate; the test suite sets it.
+
+The optional local, gitignored `config/jev-authority` lists the question types whose answer Jev decides.
+It is written only by the human operator and has no default entries; absent or empty means Jev decides nothing and every answer is logged evidence.
+
+Each non-blank line is `<type> <floor>`, where the floor is a number from 0 through 1, and text after `#` is a comment.
+
+```text
+# Graduated after reviewing bin/fm-jev.sh report
+stuck-worker 0.9
+```
+
+For a listed type, Jev's answer acts when its confidence is at or above the floor; below the floor, or with Jev off, firstmate's blind choice acts.
+Firstmate's blind choice is recorded on listed types too, so agreement keeps being measured after a type graduates.
+Every decision records which party's answer acted, and a later human correction is graded against that party.
+
+`merge-risk`, `finding-authority`, `report-has-captain-call`, and `mid-task-ask` are never handed to Jev: a line naming one, or a malformed line, is refused with one warning and grants nothing.
+`bin/fm-jev.sh report` shows each type's decider split, overrules per decider, graduation readiness, and a flag when the Jev model changed while the type was listed; the flag never removes a type, and its header owns the thresholds.
+An ask whose text matches the never-send list above sends nothing and counts as Jev off.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

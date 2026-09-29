@@ -125,7 +125,11 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> --merge-risk <yes|no> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [-- <extra forge merge args>]
+#   --merge-risk is firstmate's own answer to whether this merge is
+#   destructive, irreversible, or security-sensitive, asked of Jev and recorded
+#   before any lock (fm_jev_gate_merge_risk in bin/fm-jev-gate-lib.sh). It
+#   never changes the merge authority below.
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -150,6 +154,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
+# shellcheck source=bin/fm-jev-gate-lib.sh
+. "$SCRIPT_DIR/fm-jev-gate-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -184,6 +190,7 @@ if [ "$PROVIDER" = gerrit ]; then
 fi
 shift 2
 ATTENDED_OVERRIDE=false
+MERGE_RISK=
 ALLOW_RED=()
 ALLOW_MISSING=()
 while [ "$#" -gt 0 ]; do
@@ -215,6 +222,11 @@ while [ "$#" -gt 0 ]; do
     --allow-missing=*)
       echo "error: --allow-missing requires a separate check name argument" >&2
       exit 2
+      ;;
+    --merge-risk)
+      [ -n "${2:-}" ] || { echo "error: --merge-risk requires yes or no" >&2; exit 2; }
+      MERGE_RISK=$2
+      shift 2
       ;;
     --) shift; break ;;
     *) break ;;
@@ -384,6 +396,7 @@ if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
   exit 1
 fi
 MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
+fm_jev_gate_merge_risk fm-pr-merge.sh "$ID" "$MERGE_RISK" "PR $URL"
 
 MERGE_CONTROL_LOCK=
 MERGE_META_LOCK=

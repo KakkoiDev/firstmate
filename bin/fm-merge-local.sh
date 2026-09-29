@@ -15,7 +15,11 @@
 # merge, so a captain approval must be recorded as an `answer --release` before
 # this entrypoint is invoked. The lock ends when the fast-forward returns;
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
-# Usage: fm-merge-local.sh <task-id>
+# Usage: fm-merge-local.sh <task-id> --merge-risk <yes|no>
+#   --merge-risk is firstmate's own answer to whether this landing is
+#   destructive, irreversible, or security-sensitive, asked of Jev and recorded
+#   before the lock (fm_jev_gate_merge_risk in bin/fm-jev-gate-lib.sh). It
+#   never changes the approval gate below.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,6 +30,13 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-jev-gate-lib.sh
+. "$SCRIPT_DIR/fm-jev-gate-lib.sh"
+MERGE_RISK=
+if [ "$#" -eq 3 ] && [ "$2" = --merge-risk ]; then
+  MERGE_RISK=$3
+  set -- "$1"
+fi
 if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
   echo "error: invalid local merge request" >&2
   exit 2
@@ -57,6 +68,8 @@ if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
   exit 1
 fi
 MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
+fm_jev_gate_merge_risk fm-merge-local.sh "$ID" "$MERGE_RISK" \
+  "Local fast-forward landing of task $ID into the default branch of $(basename "$(grep '^project=' "$META" | cut -d= -f2-)")"
 
 MERGE_CONTROL_LOCK=
 merge_control_cleanup() {
