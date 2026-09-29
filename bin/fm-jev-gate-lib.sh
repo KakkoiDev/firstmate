@@ -70,7 +70,7 @@ fm_jev_gate_options() {  # <type>
     effort-level) printf 'low\nmedium\nhigh\nxhigh\nmax\nultra\ndefault\n' ;;
     mid-task-ask) printf 'invalidates\nfollow-up\ndownstream-correction\n' ;;
     report-has-captain-call|scout-recommends-ship|merge-risk) printf 'yes-no\n' ;;
-    stuck-worker) printf 'working\nwaiting-on-answered-question\nlooping\nconfused\nunresponsive\n' ;;
+    stuck-worker) printf 'working\nidle-done\nwaiting-on-answered-question\nlooping\nconfused\nunresponsive\n' ;;
     *) return 1 ;;
   esac
 }

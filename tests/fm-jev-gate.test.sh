@@ -182,7 +182,7 @@ H=$(new_home control ship)
 for verb in interrupt relaunch; do
   run "$H" code out -- fm-control.sh t1 "$verb"
   expect_code 2 "$code" "$verb without --worker-state"
-  assert_contains "$out" "fm-control.sh: refused: $verb needs --worker-state <working|waiting-on-answered-question|looping|confused|unresponsive>" "$verb refusal"
+  assert_contains "$out" "fm-control.sh: refused: $verb needs --worker-state <working|idle-done|waiting-on-answered-question|looping|confused|unresponsive>" "$verb refusal"
   [ ! -s "$LOG/tmux" ] || fail "a refused $verb touched tmux: $(cat "$LOG/tmux")"
 done
 run "$H" code out -- fm-control.sh t1 interrupt --worker-state stuck
