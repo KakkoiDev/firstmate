@@ -556,7 +556,7 @@ A request arriving through the instruction inbox below follows the same marker a
 $INBOX_SECTION
 
 # Escalation to main firstmate
-Handle routine work yourself.
+Handle routine work in your own home, delegated to your own workers.
 Report only true captain-relevant outcomes or a declared external wait by appending one line:
    \`$STATUS_APPEND\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
