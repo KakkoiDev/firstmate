@@ -38,7 +38,7 @@ Options in angle brackets are filled from the live registry or fleet at the time
 | Type | Asked by | Question | Options |
 | --- | --- | --- | --- |
 | `project-match` | you, before `fm-spawn.sh --decision project-match=<id\|off>` | Which registered project is this request about? | `<each registered project>`, `none`, `several` |
-| `deliverable-class` | you, before `fm-spawn.sh --decision deliverable-class=<id\|off>` | Should this request ship a change, scout for knowledge, or be answered from existing evidence? | `ship`, `scout`, `answer-from-evidence` |
+| `deliverable-class` | you, before `fm-spawn.sh --decision deliverable-class=<id\|off>` | Should this request ship a change, scout for knowledge, or be answered from a finished worker report or text the captain supplied? | `ship`, `scout`, `answer-from-evidence` (only when the answer already sits in a finished worker report under `data/` or in text the captain supplied; a fresh read of a project, PR, ticket, or outside source is `scout` or `ship`) |
 | `secondmate-scope` | you, before `fm-spawn.sh --decision secondmate-scope=<id\|off>` when secondmates are registered | Which persistent secondmate scope fits this work? | `<each registered secondmate id>`, `main` |
 | `surface-class` | you, before `fm-spawn.sh --decision surface-class=<id\|off>` for a ship on a `no-mistakes-prod-only` project | Is this task's surface internal-only, product-facing, mixed, or uncertain? | `internal-only`, `product-facing`, `mixed`, `uncertain` |
 | `concurrency` | `fm-spawn.sh --concurrency <choice>` | Can this task run in parallel with work under way, or what blocks it? | `parallel`, `semantic-dependency`, `shared-external-state`, `migration-conflict` |

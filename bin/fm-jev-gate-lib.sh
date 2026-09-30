@@ -46,7 +46,7 @@ fm_jev_gate_enabled() {
 fm_jev_gate_question() {  # <type>
   case "$1" in
     project-match) printf 'Which registered project is this request about?' ;;
-    deliverable-class) printf 'Should this request ship a change, scout for knowledge, or be answered from existing evidence?' ;;
+    deliverable-class) printf 'Should this request ship a change, scout for knowledge, or be answered from a finished worker report or text the captain supplied?' ;;
     secondmate-scope) printf 'Which persistent secondmate scope fits this work?' ;;
     surface-class) printf "Is this task's surface internal-only, product-facing, mixed, or uncertain?" ;;
     concurrency) printf 'Can this task run in parallel with work under way, or what blocks it?' ;;
