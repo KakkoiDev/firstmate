@@ -20,8 +20,12 @@
 #   $FM_HOME/state/jev-usage.jsonl:
 #     {"v":1,"event":"call","ts","decision_id","question_type","summary",
 #      "options","answer","confidence","probabilities","model","latency_ms",
-#      "tokens_in","tokens_out","jev_cost_usd","context_sha256","status"}
+#      "tokens_in","tokens_out","jev_cost_usd","context_sha256",
+#      "constraints_sent","status"}
 #   jev_cost_usd is tokens_in at FM_JEV_USD_PER_BILLION_INPUT; output is free.
+#   constraints_sent is true when the standing rules block below went out with
+#   the context, false when the type had none; a record written before the
+#   field existed lacks it.
 #   status is ok (a validated answer) or error (anything else, answer null).
 #   bin/fm-jev.sh appends "mine", "decided", "request", "duplicate", and
 #   "outcome" lines that carry the same decision_id (its header owns their
@@ -58,6 +62,13 @@
 #   read as one space. Exit 0 prints the first matching line number, 1 means no
 #   match or no list, and 2 prints why the list could not be checked. Callers
 #   send nothing on 0 or 2 and never print the matched value.
+#
+# Standing rules: fm_jev_constraints <question-type> prints the block a caller
+#   appends to the context of an ask of that type, read from the optional
+#   ${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/jev-constraints, whose format
+#   docs/configuration.md "Jev constraints" owns. Exit 1 prints nothing: no
+#   file, an unreadable file, or no line for the type. A malformed line is
+#   skipped with one stderr warning and never fails the ask.
 #
 # Audit snapshot: fm_jev_write_audit writes $FM_HOME/state/jev-audit/<id>.json,
 #   local only, so a later audit can re-judge the decision from what the models
@@ -337,6 +348,24 @@ fm_jev_never_send_line() {  # <text-file>
   return 1
 }
 
+fm_jev_constraints() {  # <question-type>
+  local path="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/jev-constraints" line type text rules='' n=0
+  [ -f "$path" ] && [ -r "$path" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    [[ ! $line =~ ^[[:space:]]*(#|$) ]] || continue
+    type='' text=''
+    read -r type text <<<"$line"
+    if [[ ! $type =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || [ -z "$text" ]; then
+      echo "jev: constraints line $n refused (expected <type> <rule text>)" >&2
+      continue
+    fi
+    [ "$type" != "$1" ] || rules="$rules- $text"$'\n'
+  done < "$path"
+  [ -n "$rules" ] || return 1
+  printf 'Standing operator rules for this question:\n%s' "$rules"
+}
+
 fm_jev_audit_path() {  # <decision-id>
   printf '%s/state/jev-audit/%s.json' "$FM_HOME" "$1"
 }
@@ -459,15 +488,16 @@ fm_jev_ask_record() {
 
 # fm_jev_record_call <decision-id> <question-type> <summary> <options-json>
 #   <question-key> <status> <latency-ms> <response-file> [<context-sha256>]
+#   [<constraints-sent: true|false>]
 # Appends the call record and prints nothing.
 fm_jev_record_call() {
-  local id=$1 qtype=$2 summary=$3 options=$4 qkey=$5 status=$6 lat=$7 resp=$8 sha=${9:-} body='' line
+  local id=$1 qtype=$2 summary=$3 options=$4 qkey=$5 status=$6 lat=$7 resp=$8 sha=${9:-} sent=${10:-} body='' line
   if [ "$status" = ok ]; then
     body=$(cat "$resp" 2>/dev/null) || body=''
   fi
   line=$(jq -cn --arg id "$id" --arg qtype "$qtype" --arg summary "$summary" --argjson options "$options" \
     --arg qkey "$qkey" --arg status "$status" --arg lat "$lat" --arg ts "$(fm_jev_now_iso)" --arg sha "$sha" \
-    --arg body "$body" --argjson max "$FM_JEV_SUMMARY_MAX" --argjson price "$FM_JEV_USD_PER_BILLION_INPUT" '
+    --arg sent "$sent" --arg body "$body" --argjson max "$FM_JEV_SUMMARY_MAX" --argjson price "$FM_JEV_USD_PER_BILLION_INPUT" '
     (try ($body | fromjson) catch null) as $r |
     ($r.answers[$qkey] // null) as $a |
     {v: 1, event: "call", ts: $ts, decision_id: $id, question_type: $qtype,
@@ -478,6 +508,7 @@ fm_jev_record_call() {
      tokens_in: ($r.usage.input_tokens // null), tokens_out: ($r.usage.output_tokens // null),
      jev_cost_usd: (if ($r.usage.input_tokens | type) == "number" then $r.usage.input_tokens * $price / 1e9 else null end),
      context_sha256: (if $sha == "" then null else $sha end),
+     constraints_sent: (if $sent == "" then null else $sent == "true" end),
      status: $status}' 2>/dev/null) || return 0
   fm_jev_append "$line"
 }

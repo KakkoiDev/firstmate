@@ -296,6 +296,7 @@ assert_equals "$(jq -j .context "$audit" | shasum -a 256 | awk '{print $1}')" "$
 assert_equals "$(jq -cS . "$LOG/body")" "$(jq -cS .jev_request "$audit")" "the snapshot holds the exact request"
 grep -rqF -- "$KEY" "$HOME_DIR/state/jev-audit" && fail "the key is never in the audit snapshot"
 assert_absent "$LOG/dd-body" "no Datadog key sends nothing"
+assert_equals false "$(jq -r .constraints_sent <<<"$CALL")" "with no constraints file the record says no standing rules were sent"
 first_out=$out
 reset_curl_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
@@ -311,6 +312,17 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
 assert_present "$LOG/body" "an answer older than the reuse window is asked again"
 assert_equals 2 "$(jq -c 'select(.event == "call")' "$USAGE" | grep -c .)" "the fresh ask records its own call"
 pass "a repeated resolve reuses a recent identical answer as one decision, and asks again once it is old"
+printf '%s\n' '# operator rules' 'dispatch-rule Workers run Anthropic Claude models only.' 'effort-level EFFORT-ONLY-RULE' \
+  > "$HOME_DIR/config/jev-constraints"
+reset_curl_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager-rules
+rm -f "$HOME_DIR/config/jev-constraints"
+assert_contains "$out" '  status: clear' "standing rules leave the resolver outcome unchanged"
+assert_contains "$(jq -r .state.task.brief "$LOG/body")" $'off-by-one in the pager: root cause is the `<=` on line 40 of pager.sh, expected behavior is one page per call.\n\nStanding operator rules for this question:\n- Workers run Anthropic Claude models only.' \
+  "the dispatch-rule lines follow the brief text sent"
+assert_not_contains "$(cat "$LOG/body")" 'EFFORT-ONLY-RULE' "another type's lines are not sent"
+assert_equals true "$(jq -r 'select(.event == "call") | .constraints_sent' "$USAGE" | tail -n1)" "the record says standing rules were sent"
+pass "the dispatch-rule standing rules ride with the brief and the record marks them"
 # Another project makes this a different request, so it is asked, not reused.
 reset_curl_log
 TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF" --project pager-retry

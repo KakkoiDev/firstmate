@@ -1234,6 +1234,22 @@ On a Claude Code primary, [`bin/fm-jev-pretool-check.sh`](../bin/fm-jev-pretool-
 A `claim-check` answered `contradicted` or `not-addressed` at or above the claim-check floor keeps writes to its target refused until a fresh `claim-check` on new evidence is answered `supported` or the operator's confirmation is recorded with `bin/fm-jev.sh record-outcome`; below the floor the write proceeds with a warning.
 The optional local, gitignored `config/jev-claim-check-floor` holds that floor as one number from 0 through 1; absent means 0.5, and a malformed value warns and uses 0.5.
 
+## Jev constraints (config/jev-constraints)
+
+The optional local, gitignored `config/jev-constraints` holds the standing operator rules that bear on a Jev question type, so Jev judges with the same rules firstmate follows.
+Every `bin/fm-jev.sh ask` of a type, script-embedded or manual, and every `bin/fm-dispatch-resolve.sh` call for `dispatch-rule`, appends that type's lines to the context it sends under the heading `Standing operator rules for this question:`.
+Each call record carries `constraints_sent`, so asks made with rules can be told apart from asks made without them; `bin/fm-jev-lib.sh` owns the record.
+
+Each non-blank line is `<type> <rule text>`, a type may have several lines, and a line whose first non-blank character is `#` is a comment.
+
+```text
+# Seeded from data/captain.md
+effort-level xhigh and max are banned for workers; ship work is medium, ambiguous investigation is high.
+```
+
+Absent, unreadable, or without a line for the type, the ask sends exactly what it sent before; a malformed line is skipped with one warning and never blocks an ask.
+Every ask of the type pays for its lines in tokens, so keep each one short and list only rules that change the answer.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
