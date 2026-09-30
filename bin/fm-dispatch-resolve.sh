@@ -14,7 +14,8 @@
 #
 # What it does when on with at least one rule: one POST with the project name and the brief's
 #   `## Captain's intent` and `## Firstmate spec` sections, tagged when it is a
-#   scout brief (the whole brief when it has neither section), as state and
+#   scout brief (the whole brief when it has neither section), followed by the
+#   dispatch-rule standing rules (fm_jev_constraints in bin/fm-jev-lib.sh), as state and
 #   ONE Choice question whose options are every rule's `when` from
 #   config/crew-dispatch.json plus one fixed generic none option. The provider
 #   returns the matched rule, a probability per option, and a confidence. Everything
@@ -324,7 +325,7 @@ record_call() {  # <ok|error>
   [ -z "$PROJECT" ] || summary="$summary for project $PROJECT"
   sha=$(fm_jev_sha256 "$TASK_TEXT")
   fm_jev_record_call "$DECISION_ID" dispatch-rule "$summary" \
-    "$(jq -c '.questions.rule.criteria | keys_unsorted' <<<"$REQUEST")" rule "$1" "$LAT_MS" "$RESP_FILE" "$sha"
+    "$(jq -c '.questions.rule.criteria | keys_unsorted' <<<"$REQUEST")" rule "$1" "$LAT_MS" "$RESP_FILE" "$sha" "$CONSTRAINTS_SENT"
   fm_jev_write_audit "$DECISION_ID" dispatch-rule "$(jq -r '.questions.rule.instructions' <<<"$REQUEST")" \
     "$(jq -c '.questions.rule.criteria' <<<"$REQUEST")" "$TASK_TEXT" "$sha" "$REQUEST" "$RESP_FILE"
   fm_jev_detach send_decision_event
@@ -379,6 +380,10 @@ if [ -n "$SECTIONS" ]; then
   { brief_kind; printf '%s\n' "$SECTIONS"; } > "$TASK_TEXT" || die "could not read brief: $BRIEF"
 else
   cp "$BRIEF" "$TASK_TEXT" || die "could not read brief: $BRIEF"
+fi
+CONSTRAINTS_SENT=false
+if STANDING_RULES=$(FM_CONFIG_OVERRIDE="$CONFIG" fm_jev_constraints dispatch-rule); then
+  printf '\n%s\n' "$STANDING_RULES" >> "$TASK_TEXT" && CONSTRAINTS_SENT=true
 fi
 LAT_MS=null
 command -v curl >/dev/null 2>&1 || emit_error "curl not installed"

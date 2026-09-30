@@ -218,8 +218,9 @@ assert_equals 'curl:clean' "$(cat "$LOG/child-env")" "the key is absent from the
 wait_for "the duplicate query settles" settled 1
 assert_equals 1 "$(calls | wc -l | tr -d ' ')" "one call record per call"
 record=$(calls)
-assert_equals '["answer","asker","confidence","context_sha256","decision_id","event","jev_cost_usd","latency_ms","model","options","probabilities","question_type","status","summary","tokens_in","tokens_out","ts","v"]' \
+assert_equals '["answer","asker","confidence","constraints_sent","context_sha256","decision_id","event","jev_cost_usd","latency_ms","model","options","probabilities","question_type","status","summary","tokens_in","tokens_out","ts","v"]' \
   "$(jq -c 'keys' <<<"$record")" "record carries exactly the documented fields"
+assert_equals false "$(jq -r .constraints_sent <<<"$record")" "with no constraints file the record says no standing rules were sent"
 assert_equals true "$(jq '(.jev_cost_usd - 0.00001764 | fabs) < 1e-15' <<<"$record")" "Jev cost is 420 input tokens at \$42 per billion"
 assert_equals "$(shasum -a 256 "$CONTEXT" | awk '{print $1}')" "$(jq -r .context_sha256 <<<"$record")" "record points at the context by its sha256"
 assert_equals "call|$id|stuck-worker|What is the stuck worker doing|looping|0.9|jev-1.13.0|420|55|ok" \
@@ -286,6 +287,56 @@ expect_code 0 "$code" "show exits 0"
 assert_equals "$(jq -cS . "$audit")" "$(jq -cS .audit <<<"$out")" "show prints the audit snapshot"
 assert_equals "looping|looping|ok" "$(jq -r '.record | [.answer, .claude_answer, .claude_status] | join("|")' <<<"$out")" "show joins the duplicate beside the call"
 pass "audit snapshot: exact context and prompts, matching sha256, no key, printed by show"
+
+# --- standing rules: the type's lines ride after the context ------------------------
+reset
+mkdir -p "$HOME_DIR/config"
+printf '%s\n' '# operator rules' 'stuck-worker A worker that repeats one failed step is looping.' '' \
+  '  stuck-worker   Relaunch only after one steer.  ' 'effort-level OTHER-TYPE-RULE' 'Bad_Type text' 'stuck-worker' \
+  > "$HOME_DIR/config/jev-constraints"
+TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}"
+expect_code 0 "$code" "an ask with standing rules exits 0"
+assert_contains "$out" '  answer: looping   confidence: 0.9' "standing rules leave the answer path unchanged"
+rules=$'Standing operator rules for this question:\n- A worker that repeats one failed step is looping.\n- Relaunch only after one steer.'
+assert_equals "$(cat "$CONTEXT")"$'\n\n'"$rules" "$(jq -r .state.context "$LOG/body")" \
+  "the type's lines follow the context after a blank line, trimmed, in file order"
+assert_not_contains "$(cat "$LOG/body")" 'OTHER-TYPE-RULE' "another type's lines are not sent"
+assert_contains "$err" 'jev: constraints line 6 refused (expected <type> <rule text>)' "a line with a bad type is refused with a warning"
+assert_contains "$err" 'jev: constraints line 7 refused (expected <type> <rule text>)' "a line with no rule text is refused with a warning"
+wait_for "the standing-rules duplicate settles" settled 1
+assert_contains "$(cat "$LOG/claude-stdin")" "$rules" "the duplicate query sees the same standing rules"
+record=$(calls)
+assert_equals true "$(jq -r .constraints_sent <<<"$record")" "the record says standing rules were sent"
+id=$(jq -r .decision_id <<<"$record")
+assert_contains "$(jq -r .context "$AUDIT_DIR/$id.json")" "$rules" "the audit snapshot holds the rules sent"
+reset
+printf '%s\n' 'stuck-worker Only a rule.' > "$HOME_DIR/config/jev-constraints"
+TYPESAFE_API_KEY=$KEY run code out err ask --type stuck-worker --summary 'No context' --question 'Which?' \
+  --option working --option looping --option confused
+assert_equals $'Standing operator rules for this question:\n- Only a rule.' "$(jq -r .state.context "$LOG/body")" \
+  "with no context file the rules are the whole context"
+wait_for "the duplicate settles before the next case" settled 1
+reset
+printf '%s\n' 'effort-level Only for effort.' > "$HOME_DIR/config/jev-constraints"
+TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}"
+assert_equals "$(cat "$CONTEXT")" "$(jq -r .state.context "$LOG/body")" "a file with no line for the type changes nothing"
+assert_equals false "$(jq -r 'select(.event == "call") | .constraints_sent' "$USAGE")" "no line for the type records false"
+wait_for "the duplicate settles before the next case" settled 1
+reset
+printf '%s\n' 'stuck-worker Unreadable rule.' > "$HOME_DIR/config/jev-constraints"
+chmod 000 "$HOME_DIR/config/jev-constraints"
+if [ -r "$HOME_DIR/config/jev-constraints" ]; then
+  echo "skip - unreadable constraints file (running as a user that reads mode 000)"
+else
+  TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}"
+  expect_code 0 "$code" "an unreadable constraints file never blocks"
+  assert_contains "$out" '  answer: looping' "an unreadable constraints file still asks"
+  assert_equals "$(cat "$CONTEXT")" "$(jq -r .state.context "$LOG/body")" "an unreadable constraints file changes nothing"
+fi
+chmod 644 "$HOME_DIR/config/jev-constraints"
+rm -rf "$HOME_DIR/config"
+wait_for "the last standing-rules duplicate settles" settled 1
+pass "standing rules: the type's lines follow the context, a missing or unmatched file changes nothing, the record marks it"
 
 reset
 TYPESAFE_API_KEY=$KEY run code out err ask --type deploy-check --summary 'Is the deploy safe' --question 'Is it safe?' --yes-no

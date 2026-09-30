@@ -102,6 +102,10 @@
 #   dash, or underscore, so a registered project name fits), --yes-no is the choice
 #   {yes, no}, and the --context file (English) is the state. The summary is
 #   one English line saying what is asked; it is recorded, never sent.
+#   The type's standing rules (fm_jev_constraints in bin/fm-jev-lib.sh) are
+#   appended to the state after any template and --context text, so the
+#   duplicate queries and the audit snapshot see them too, and the call
+#   record's constraints_sent says whether any went out.
 #   Output (stdout, TOON-style block):
 #     jev:
 #       decision_id: <id>
@@ -510,7 +514,7 @@ template_field_help() {
 cmd_ask() {
   local qtype='' summary='' question='' context='' yes_no=0 mine='' have_mine=0 template='' target=''
   local criteria='{}' request resp='' options id='' http lat answer_ok prompt ctx sha start never
-  local template_text='' default_summary='' evidence_sha='' f
+  local template_text='' default_summary='' evidence_sha='' f rules sep constraints_sent=false
   local tf_claim='' tf_source='' tf_evidence='' tf_ticket='' tf_current='' tf_proposed='' tf_words=''
   local -a candidates=()
   start=$(fm_timing_now_ms)
@@ -577,6 +581,14 @@ cmd_ask() {
   { [ -z "$template_text" ] || printf '%s\n' "$template_text"
     if [ -n "$template_text" ] && [ -n "$context" ]; then printf '\nAdditional context:\n'; fi
     cat "${context:-/dev/null}"; } > "$ctx" 2>/dev/null || die "context file not readable: $context"
+  if rules=$(fm_jev_constraints "$qtype"); then
+    sep=''
+    if [ -s "$ctx" ]; then
+      sep=$'\n'
+      [ -z "$(tail -c 1 "$ctx")" ] || sep=$'\n\n'
+    fi
+    printf '%s%s\n' "$sep" "$rules" >> "$ctx" && constraints_sent=true
+  fi
   sha=$(fm_jev_sha256 "$ctx")
   request=$(jq -n --rawfile context "$ctx" --arg model "$FM_JEV_MODEL" \
     --arg question "$question" --arg qkey "$QKEY" --argjson criteria "$criteria" '
@@ -667,7 +679,7 @@ warn_disagreement() {
 ACTING='' DECIDER=''
 settle() {
   local floor='' listed=false conf answer
-  fm_jev_record_call "$id" "$qtype" "$summary" "$options" "$QKEY" "$1" "$lat" "$resp" "$sha"
+  fm_jev_record_call "$id" "$qtype" "$summary" "$options" "$QKEY" "$1" "$lat" "$resp" "$sha" "$constraints_sent"
   fm_jev_write_audit "$id" "$qtype" "$question" "$criteria" "$ctx" "$sha" "$request" "$resp"
   audit_add "$id" claude_system_prompt <(printf '%s' "$CLAUDE_SYSTEM_PROMPT")
   audit_add "$id" claude_prompt <(printf '%s' "$prompt")
