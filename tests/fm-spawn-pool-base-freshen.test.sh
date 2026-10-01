@@ -747,6 +747,56 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+# Treehouse hands out a slot whose process lease lapsed - its pane's `treehouse
+# get` was killed or exited - even while an older task's record still names it.
+# A second spawn must refuse that slot rather than launch into the older copy.
+test_pool_slot_recorded_by_another_task_refuses() {
+  local rec id older out status
+  id='pool-slot-recorded-r1'
+  older='pool-slot-older-r1'
+  rec=$(make_case slot-recorded "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  fm_write_meta "$HOME_DIR/state/$older.meta" \
+    "window=firstmate:fm-$older" "endpoint_task_id=$older" \
+    "worktree=$POOL_DIR" "project=$PROJECT_DIR" "harness=codex" "kind=scout"
+  printf 'task=%s\nhome=%s\n' "$older" "$HOME_DIR" > "$SLOT_CLAIM"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched into a slot another task's record still names: $out"
+  assert_contains "$out" "task $older's record still names it" \
+    "spawn did not name the task whose record holds the slot"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for a slot another task holds"
+  grep -Fxq -- "task=$older" "$SLOT_CLAIM" \
+    || fail "spawn replaced the older task's slot claim: $(cat "$SLOT_CLAIM")"
+  pass "a spawn handed a slot another task's record still names refuses and leaves that task's claim"
+}
+
+# A worker's exit, or a killed pane, ends Treehouse's process lease on its slot,
+# so the spawn leases the slot durably under the task id; teardown's
+# `treehouse return --force` is what releases it.
+test_pool_slot_is_durably_leased_to_the_task() {
+  local rec id out status
+  id='pool-slot-leased-r1'
+  rec=$(make_case slot-leased "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  cat > "$FAKEBIN_DIR/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$CASE_DIR/treehouse.log"
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/treehouse"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn from a Treehouse slot should launch"$'\n'"$out"
+  grep -Fxq -- "lease 1 --lease-holder $id" "$CASE_DIR/treehouse.log" \
+    || fail "spawn did not durably lease its slot to the task: $(cat "$CASE_DIR/treehouse.log" 2>/dev/null)"
+  pass "a spawned task durably leases its Treehouse slot under its own id"
+}
+
 # A stateful terminal and pool stand-in for the refused-launch sequence. Each
 # window is a file recording its stable id and the path its shell sits in; a
 # `treehouse get` typed into a window moves it into the lowest slot no live
@@ -1176,6 +1226,8 @@ test_scout_base_branch_refused_on_gerrit_forge() {
 
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_pool_slot_recorded_by_another_task_refuses
+test_pool_slot_is_durably_leased_to_the_task
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
 test_refused_launch_spares_per_id_paths_under_a_contended_spawn_lock
 test_non_polytoken_refused_launch_keeps_its_window

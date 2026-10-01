@@ -210,6 +210,12 @@
 #   could later be released out from under its successor. A spawn that aborts
 #   while it still holds the allocation lock drops its own claim; an abort after
 #   metadata publication has released that lock leaves the claim in place, and
+#   the next spawn's claim replaces it.
+#   Before claiming, a spawn refuses a slot that another task record in this
+#   home still names, because Treehouse frees a slot once its pane's process
+#   lease ends even while that record lives. After the record commits, the spawn
+#   leases the slot in place under the task id (`treehouse lease`, Treehouse
+#   v3.0.0+) so a worker exiting cannot free it; teardown's return releases it.
 #   the next spawn's claim replaces it. A fresh polytoken spawn that fails and
 #   leaves no task record restores the pool as it found it: it retakes that lock
 #   once to drop its claim after metadata publication too, and before its launch
@@ -5727,6 +5733,23 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Written under the Treehouse project lock held from before slot allocation
   # through metadata publication, so no other spawn or return sees a half-claim.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    # Treehouse hands out a slot as soon as its process lease lapses, which
+    # happens when the pane's `treehouse get` exits or is killed, so it can hand
+    # this spawn a slot another task's record in this home still names. Refuse
+    # that slot rather than launch a second worker into the other task's copy.
+    spawn_slot_real=$(real_path_or_raw "$WT")
+    for spawn_other_meta in "$STATE"/*.meta; do
+      [ -f "$spawn_other_meta" ] && [ ! -L "$spawn_other_meta" ] || continue
+      spawn_other_id=$(basename "$spawn_other_meta" .meta)
+      [ "$spawn_other_id" != "$ID" ] || continue
+      for spawn_other_field in worktree home; do
+        spawn_other_path=$(fm_meta_get "$spawn_other_meta" "$spawn_other_field")
+        [ -n "$spawn_other_path" ] && [ -d "$spawn_other_path" ] || continue
+        [ "$(real_path_or_raw "$spawn_other_path")" = "$spawn_slot_real" ] || continue
+        echo "error: Treehouse handed task $ID pool slot $WT, but task $spawn_other_id's record still names it as its $spawn_other_field; refusing to launch a second worker into that task's copy. Reconcile $spawn_other_id (bin/fm-crew-state.sh $spawn_other_id) before re-running; $(spawn_endpoint_hint)" >&2
+        exit 1
+      done
+    done
     if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; $(spawn_endpoint_hint)" >&2
       exit 1
@@ -7575,6 +7598,17 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   trap - HUP INT TERM
   echo "error: spawn of $ID was interrupted after launch delivery began; $SPAWN_PRESERVED_CLAIM" >&2
   exit "$SPAWN_DEFERRED_SIGNAL_STATUS"
+fi
+# The slot's only Treehouse hold so far is the pane's process lease, which ends
+# when that `treehouse get` exits or is killed and frees the slot while this
+# task's record still names it. Lease it durably under the task id now that the
+# record is committed; teardown's `treehouse return --force` releases it. This
+# runs under the task's meta lock, so teardown cannot return the slot first.
+if [ "$SPAWN_SLOT_CLAIMED" = 1 ]; then
+  spawn_slot_name=$(basename "$(dirname "$(real_path_or_raw "$WT")")")
+  if ! ( cd "$WT" && treehouse lease "$spawn_slot_name" --lease-holder "$ID" ) >/dev/null 2>&1; then
+    echo "warning: could not durably lease Treehouse pool slot $WT for task $ID (treehouse lease needs Treehouse v3.0.0 or newer); the slot is held only while its pane's treehouse get runs, so a later spawn may be refused that slot until $ID is torn down" >&2
+  fi
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
