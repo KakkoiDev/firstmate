@@ -27,15 +27,14 @@
 # FM_JEV_GATE=off disables every gate, so no argument is required and nothing
 #   is asked. The test suite exports it; internal callers that cross an action
 #   boundary pass explicit values instead.
-# FM_JEV_GATE_CONTEXT_BYTES caps the context sent with an ask (default 6000):
-#   the extra texts come first, then the brief's task sections.
+# The context sent with an ask is whole: the extra texts come first, then the
+#   brief's task sections.
 
 # shellcheck source=bin/fm-brief-heading-lib.sh
 declare -F fm_brief_task_heading_body >/dev/null || . "$SCRIPT_DIR/fm-brief-heading-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 declare -F secondmate_registry_parse_line >/dev/null || . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
-FM_JEV_GATE_CONTEXT_BYTES=${FM_JEV_GATE_CONTEXT_BYTES:-6000}
 FM_JEV_GATE_ID='' FM_JEV_GATE_ACTING='' FM_JEV_GATE_DECIDER=''
 
 fm_jev_gate_enabled() {
@@ -121,7 +120,7 @@ fm_jev_gate_choices() {  # <type>: the option ids as one "a|b|c" string
 
 # fm_jev_gate_context <out-file> <brief-or-report> [<label> <file>]...
 # Writes each labelled extra text, then the brief's `# Task` sections (the
-# whole file when it has none), truncated to FM_JEV_GATE_CONTEXT_BYTES.
+# whole file when it has none).
 fm_jev_gate_context() {
   local out=$1 brief=$2 heading sections=''
   shift 2
@@ -139,7 +138,7 @@ fm_jev_gate_context() {
       done
       if [ -n "$sections" ]; then printf '%s' "$sections"; else cat "$brief"; fi
     fi
-  } | head -c "$FM_JEV_GATE_CONTEXT_BYTES" > "$out"
+  } > "$out"
 }
 
 # The exact command firstmate runs for a choice asked before the script.

@@ -232,3 +232,16 @@ assert_present "$LOG/usage-at-post" "the fake Jev saw the usage log at request t
 [ "$(jq -src 'map(select(.event == "call")) | last | .question_type' "$H/state/jev-usage.jsonl")" = merge-risk ] \
   || fail "the answered call was not recorded as merge-risk"
 pass "a gated script records firstmate's blind choice before Jev is asked, and a never-type stays firstmate's"
+
+BIGBRIEF="$TMP_ROOT/big-brief.md"
+{
+  printf '# Task\n## Captain'"'"'s intent\n'
+  head -c 9000 /dev/zero | tr '\0' 'x'
+  printf '\nTAIL-MARKER-AFTER-6000\n## Firstmate spec\nspec body\n'
+} > "$BIGBRIEF"
+head -c 7000 /dev/zero | tr '\0' 'y' > "$TMP_ROOT/big-extra"
+bash -c 'SCRIPT_DIR=$1/bin; FM_HOME=$2; . "$1/bin/fm-jev-gate-lib.sh"; fm_jev_gate_context "$3" "$4" extra "$5"' _ \
+  "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" "$TMP_ROOT" "$TMP_ROOT/big-context" "$BIGBRIEF" "$TMP_ROOT/big-extra"
+[ "$(wc -c < "$TMP_ROOT/big-context")" -gt 16000 ] || fail "context was cut: $(wc -c < "$TMP_ROOT/big-context") bytes"
+grep -q 'TAIL-MARKER-AFTER-6000' "$TMP_ROOT/big-context" || fail "marker past byte 6000 missing from context"
+pass "a context larger than 6000 bytes reaches the ask whole"
