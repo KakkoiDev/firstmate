@@ -765,9 +765,9 @@ assert_equals "jev: recorded outcome for $id final=confused jev=looping overridd
 printf '%s\n' 'stuck-worker 0.95' > "$HOME_DIR/config/jev-authority"
 TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}" --mine confused
 assert_contains "$out" '  acting: confused   decider: firstmate' "below the listed floor firstmate's choice acts"
-printf '%s\n' 'merge-risk 0.5' 'stuck-worker high' 'stuck-worker 0.5' > "$HOME_DIR/config/jev-authority"
+printf '%s\n' 'report-has-captain-call 0.5' 'stuck-worker high' 'stuck-worker 0.5' > "$HOME_DIR/config/jev-authority"
 TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}" --mine confused
-assert_contains "$err" 'jev: authority line 1 refused (merge-risk is never handed to Jev)' "a never-type is refused even when listed"
+assert_contains "$err" 'jev: authority line 1 refused (report-has-captain-call is never handed to Jev)' "a never-type is refused even when listed"
 assert_contains "$err" 'jev: authority line 2 refused (expected <type> <floor from 0 through 1>)' "a malformed line is refused"
 assert_contains "$out" '  acting: looping   decider: jev' "a valid line still grants authority beside refused ones"
 wait_for "every duplicate settles" settled 3
