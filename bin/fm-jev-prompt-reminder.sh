@@ -18,11 +18,24 @@
 #   - $FM_HOME/state/jev-turn-words.jsonl holds the operator's words for the
 #     current turn, one JSON object per prompt, oldest first:
 #       {"v":1,"ts":"<ISO-8601 UTC>","session_id":"<payload session_id>","prompt":"<prompt as submitted>"}
-#     A prompt opens a new turn, emptying the file first, when
-#     $FM_HOME/state/jev-turn-closed exists (bin/fm-jev-stop-check.sh writes
-#     it when a turn end is allowed; this hook removes it) or when the file's
-#     newest record names another session. Otherwise the prompt arrived
-#     mid-turn and is added to the same turn.
+#     A prompt opens a new turn, emptying the file first, when the file's
+#     newest record names another session, or when the previous turn ended.
+#     A turn ends only when its turn end goes through every Stop hook, so a
+#     block by any hook keeps the turn open whatever order the hooks run in.
+#     The payload's transcript_path tells: Claude Code appends one
+#     {"type":"system","subtype":"stop_hook_summary",...} line per Stop,
+#     after the whole hook chain ran, and its hookErrors array is empty
+#     exactly when no hook blocked. The previous turn ended when a summary
+#     appended since the previous prompt has an empty hookErrors; one with a
+#     non-empty hookErrors is a block, and no summary means no Stop yet.
+#     $FM_HOME/state/jev-turn-anchor holds "<session_id>\t<transcript path>\t<summary count>"
+#     as of the previous prompt. When the transcript is not readable, the
+#     anchor names another session or transcript or more summaries than the
+#     transcript holds, or a summary since it has no hookErrors array, the
+#     turn ended when $FM_HOME/state/jev-turn-closed exists
+#     (bin/fm-jev-stop-check.sh writes it when its own check allows the turn
+#     end). Every prompt removes the marker and rewrites the anchor.
+#     Otherwise the prompt arrived mid-turn and is added to the same turn.
 #     A prompt is the operator's words, and is appended, unless it is empty,
 #     carries FIRSTMATE_OP:, opens with <task-notification> (Claude's own
 #     rewake), or is an operational-input doorbell whose record exists
@@ -50,18 +63,45 @@ operator_words() {  # <prompt>
   return 0
 }
 
+SUMMARY='"type":"system","subtype":"stop_hook_summary"'
+
+# turn_ended: prints yes or no when the transcript's Stop summaries since the
+# anchor tell whether the previous turn ended, and nothing when they cannot.
+turn_ended() {  # <session> <transcript> <summary count now>
+  local a_session a_path a_count
+  IFS=$'\t' read -r a_session a_path a_count < "$state/jev-turn-anchor" 2>/dev/null || return 0
+  [ "$a_session" = "$1" ] && [ "$a_path" = "$2" ] || return 0
+  case "$a_count" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$a_count" -le "$3" ] || return 0
+  grep -F -- "$SUMMARY" "$2" | tail -n "+$((a_count + 1))" | jq -rs '
+    [.[] | .hookErrors | if type != "array" then "unknown" elif length == 0 then "end" else "block" end]
+    | if index("end") != null then "yes" elif index("unknown") != null then empty else "no" end'
+}
+
 record_words() {
-  local words="$state/jev-turn-words.jsonl" closed="$state/jev-turn-closed" prompt session last
+  local words="$state/jev-turn-words.jsonl" closed="$state/jev-turn-closed" anchor="$state/jev-turn-anchor"
+  local prompt session last transcript count='' ended=''
   command -v jq >/dev/null 2>&1 || return 0
   prompt=$(jq -j 'if type == "object" and (.prompt | type) == "string" then .prompt else empty end' <<<"$payload" 2>/dev/null) || return 0
   session=$(jq -r 'if type == "object" then (.session_id // "") | tostring else "" end' <<<"$payload" 2>/dev/null) || session=''
+  transcript=$(jq -r 'if type == "object" then (.transcript_path // "") | tostring else "" end' <<<"$payload" 2>/dev/null) || transcript=''
   if [ -s "$words" ] && [ -n "$session" ]; then
     last=$(tail -n 1 "$words" | jq -r '.session_id // ""' 2>/dev/null) || last=''
     [ -z "$last" ] || [ "$last" = "$session" ] || : > "$words"
   fi
-  if [ -e "$closed" ]; then
+  if [ -n "$transcript" ] && [ -f "$transcript" ] && [ -r "$transcript" ]; then
+    count=$(grep -cF -- "$SUMMARY" "$transcript" 2>/dev/null)
+    case "$count" in ''|*[!0-9]*) count='' ;; esac
+  fi
+  [ -z "$count" ] || ended=$(turn_ended "$session" "$transcript" "$count" 2>/dev/null)
+  if [ "$ended" = yes ] || { [ -z "$ended" ] && [ -e "$closed" ]; }; then
     : > "$words"
-    rm -f "$closed"
+  fi
+  rm -f "$closed"
+  if [ -n "$count" ]; then
+    printf '%s\t%s\t%s\n' "$session" "$transcript" "$count" > "$anchor"
+  else
+    rm -f "$anchor"
   fi
   operator_words "$prompt" || return 0
   jq -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg s "$session" \

@@ -30,9 +30,10 @@
 #
 # Turn close: outside a task worker and with the gate on, every exit 0 (ALLOW
 # and FAIL OPEN, in or out of scope) writes $FM_HOME/state/jev-turn-closed
-# when that state directory exists, so the next prompt opens a new turn of
-# operator words; a BLOCK writes nothing, since the turn continues.
-# bin/fm-jev-prompt-reminder.sh owns the words record and reads the marker.
+# when that state directory exists; a BLOCK writes nothing, since the turn
+# continues. Another Stop hook can still block the same turn end, so the
+# marker only says this check let it through; bin/fm-jev-prompt-reminder.sh
+# owns the words record and when it trusts the marker.
 set -u
 
 [ "${1:-}" = --claude ] || [ $# -eq 0 ] || { echo "usage: fm-jev-stop-check.sh --claude < <Stop hook JSON>" >&2; exit 2; }

@@ -19,7 +19,8 @@
 # claim-check ask, the same Notion write (allowed and run), an ask-scope ask
 # that disagrees with Jev, then three final messages: a bare one (refused: no
 # section), one with the section (refused: the disagreement is unmentioned),
-# and one that also names the disagreement (the turn ends).
+# and one that also names the disagreement (the turn ends). The transcript then
+# holds one Stop summary per Stop, the two blocks with hook errors.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -264,3 +265,14 @@ assert_contains "$result" "firstmate claim-check: PR 42 is merged. - jev support
 assert_contains "$result" "firstmate ask-scope: fix the login flake - jev login (0.8), mine signup [DISAGREE]" \
   "claude $CLAUDE_VERSION: the ending message carries the disagreement line"
 pass "claude $CLAUDE_VERSION runs the tracked Stop check, which continues the turn until the section and the disagreement are in the final message"
+
+# bin/fm-jev-prompt-reminder.sh reads the turn boundary from these summaries.
+shopt -s nullglob
+transcripts=("$TMP_ROOT"/claude-config/projects/*/*.jsonl)
+shopt -u nullglob
+[ "${#transcripts[@]}" = 1 ] || fail "claude $CLAUDE_VERSION: expected one transcript, found ${#transcripts[@]}"
+summaries=$(grep -F '"type":"system","subtype":"stop_hook_summary"' "${transcripts[0]}" \
+  | jq -r 'if (.hookErrors | type) == "array" then (.hookErrors | length | tostring) else "none" end' | paste -sd' ' -)
+assert_equals '1 1 0' "$summaries" \
+  "claude $CLAUDE_VERSION: each Stop appends one stop_hook_summary line, its hookErrors non-empty for a block and empty for the turn end"
+pass "claude $CLAUDE_VERSION records a stop_hook_summary per Stop whose hookErrors tells a block from the turn end"

@@ -1160,3 +1160,41 @@ assert_contains "$(sent_context)" 'and t2, mid-turn' "the words reach Jev beside
 TYPESAFE_API_KEY=$KEY FM_TASK_ID=t9 run code out err "${DC[@]}" --context "$NOTE" --mine ship
 expect_code 2 "$code" "inside a task worker the primary's words do not count"
 pass "the operator's verbatim words for the turn, mid-turn messages included, lead every ask's context"
+
+# --- the operator's words survive a turn end another Stop hook blocks ---------
+STOP_CHECK="$ROOT/bin/fm-jev-stop-check.sh"
+TRANSCRIPT="$TMP_ROOT/transcript.jsonl"
+prompt_in() { jq -cn --arg p "$1" --arg t "$TRANSCRIPT" \
+  '{hook_event_name: "UserPromptSubmit", session_id: "s1", transcript_path: $t, prompt: $p}' \
+  | env -u FM_TASK_ID FM_JEV_GATE=on FM_HOME="$HOME_DIR" "$REMINDER" > /dev/null; }
+# stop_chain <hookErrors json>: the Jev stop check lets the turn end through,
+# then Claude Code records the whole chain's summary, as it does after every
+# Stop; a non-empty hookErrors is another hook blocking the same turn end.
+stop_chain() {
+  jq -cn --arg t "$TRANSCRIPT" '{hook_event_name: "Stop", session_id: "s1", transcript_path: $t, last_assistant_message: "Done."}' \
+    | env -u FM_TASK_ID FM_JEV_GATE=on FM_HOME="$HOME_DIR" "$STOP_CHECK" --claude > /dev/null 2>&1
+  printf '{"type":"system","subtype":"stop_hook_summary","hookCount":2,"hookErrors":%s,"preventedContinuation":false}\n' "$1" >> "$TRANSCRIPT"
+}
+
+reset
+mkdir -p "$HOME_DIR/state"
+printf '{"type":"user","message":{"role":"user","content":"x"}}\n' > "$TRANSCRIPT"
+prompt_in 'fix the login flake'
+stop_chain '["[turnend-guard] supervision is not running"]'
+assert_present "$HOME_DIR/state/jev-turn-closed" "the Jev stop check let the turn end through"
+prompt_in 'and the logout one, mid-turn'
+write_choice ship 0.9 ship scout zq-mine-marker
+TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --source "$RAW" --mine ship
+expect_code 0 "$code" "an ask after another hook blocked the turn end"
+ctx=$(sent_context)
+assert_contains "$ctx" 'fix the login flake' "the words from before the blocked turn end still reach Jev"
+assert_contains "$ctx" 'and the logout one, mid-turn' "the mid-turn message joins them"
+wait_for "the ask after the block settles" settled 1
+stop_chain '[]'
+prompt_in 'next request'
+TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --source "$RAW" --mine ship
+expect_code 0 "$code" "an ask after the turn end went through"
+ctx=$(sent_context)
+assert_contains "$ctx" 'next request' "the new turn's words reach Jev"
+assert_not_contains "$ctx" 'fix the login flake' "a turn end every hook allowed closes the earlier words"
+pass "a turn end another Stop hook blocks keeps the turn's words in the next ask's context"
