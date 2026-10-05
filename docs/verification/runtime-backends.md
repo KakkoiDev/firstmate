@@ -614,6 +614,32 @@ ok - claude 2.1.284 (Claude Code) runs the tracked Stop check, which continues t
 
 Not verified: whether Claude Code shows the PreToolUse warning's `additionalContext` to the model; the warning also goes out as `systemMessage`.
 
+### Stop summaries mark the turn end
+
+`bin/fm-jev-prompt-reminder.sh` decides whether the previous turn ended from the `stop_hook_summary` lines Claude Code appends to the session transcript, one per Stop after the whole hook chain ran.
+Across the 60 newest local transcripts, every summary with a non-empty `hookErrors` was followed by more assistant output in the same turn, and every summary with an empty `hookErrors` was followed by the `turn_duration` turn-end line or by the end of a headless session.
+Headless (`-p`) sessions write no `turn_duration` line at all, which is why the hook reads the summaries rather than that line.
+
+Verified 2026-10-05 on transcripts written by Claude Code 2.1.285 through 2.1.289.
+
+```sh
+for f in $(ls -t ~/.claude/projects/*/*.jsonl | head -60); do
+  jq -r 'if .subtype == "stop_hook_summary" then "S\(.hookErrors | length)"
+    elif .subtype == "turn_duration" then "T"
+    elif .type == "assistant" then "A" else empty end' "$f" | paste -sd' ' - | tr -s ' '
+done | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^S/) {
+    k = ($i == "S0" ? "allowed" : "blocked"); n = (i < NF ? $(i + 1) : "end"); c[k " then " n]++ }}
+  END {for (x in c) print c[x], x}' | sort -k2
+```
+
+```
+12 allowed then end
+629 allowed then T
+45 blocked then A
+```
+
+`tests/fm-jev-claude-hooks-live-e2e.test.sh` also asserts the summary sequence of its scripted turn (two blocks, then the turn end), but on Claude Code 2.1.289 that guard stops at its claim-check step before any Stop, on this branch and on the commit before it, so that assertion has not run.
+
 ## Worker account pin sign-in check
 
 `bin/fm-worker-account-lib.sh` decides whether a pinned account is signed in from vendor output: the exit status of `claude auth status`, the JSON of `pi auth check`, and the provider column of `pi --list-models`.

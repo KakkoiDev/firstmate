@@ -106,3 +106,23 @@ rm -f "$WORDS"
 run_payload "$(prompt_json 'worker prompt')" FM_TASK_ID=t1
 assert_absent "$WORDS" "a task worker records no words"
 pass "a closed turn or a new session starts the words afresh, and a task worker records none"
+
+TRANSCRIPT="$TMP_ROOT/transcript.jsonl"
+prompt_in() { jq -cn --arg p "$1" --arg t "$TRANSCRIPT" '{hook_event_name: "UserPromptSubmit", session_id: "s3", transcript_path: $t, prompt: $p}'; }
+summary() { printf '{"type":"system","subtype":"stop_hook_summary","hookCount":2%s,"preventedContinuation":false}\n' "$1" >> "$TRANSCRIPT"; }
+rm -f "$WORDS" "$CLOSED"
+: > "$TRANSCRIPT"
+run_payload "$(prompt_in 'first ask')"
+summary ',"hookErrors":[]'
+run_payload "$(prompt_in 'second ask')"
+assert_equals 'second ask' "$(words)" "a Stop summary without a hook error ends the turn even with no marker"
+: > "$CLOSED"
+summary ',"hookErrors":["blocked"]'
+run_payload "$(prompt_in 'third ask')"
+assert_equals $'second ask\nthird ask' "$(words)" "a Stop summary with a hook error keeps the turn open over the marker"
+assert_absent "$CLOSED" "the prompt removes the marker it did not need"
+: > "$CLOSED"
+summary ''
+run_payload "$(prompt_in 'fourth ask')"
+assert_equals 'fourth ask' "$(words)" "a Stop summary without a hookErrors array falls back to the marker"
+pass "the transcript's Stop summaries decide whether the turn ended, and the marker decides only when they cannot"
