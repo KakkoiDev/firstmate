@@ -27,11 +27,26 @@
 #   FAIL OPEN - empty or malformed stdin, missing jq, no turn start recorded, a
 #               payload without last_assistant_message, or a section that could
 #               not be printed.
+#
+# Turn close: outside a task worker and with the gate on, every exit 0 (ALLOW
+# and FAIL OPEN, in or out of scope) writes $FM_HOME/state/jev-turn-closed
+# when that state directory exists, so the next prompt opens a new turn of
+# operator words; a BLOCK writes nothing, since the turn continues.
+# bin/fm-jev-prompt-reminder.sh owns the words record and reads the marker.
 set -u
 
 [ "${1:-}" = --claude ] || [ $# -eq 0 ] || { echo "usage: fm-jev-stop-check.sh --claude < <Stop hook JSON>" >&2; exit 2; }
 [ -z "${FM_TASK_ID:-}" ] || exit 0
 [ "${FM_JEV_GATE:-on}" != off ] || exit 0
+TURN_STATE="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)}}/state"
+WORK=''
+# shellcheck disable=SC2329 # Registered by the EXIT trap below.
+on_exit() {
+  local code=$?
+  [ -z "$WORK" ] || rm -rf "$WORK"
+  [ "$code" != 0 ] || [ ! -d "$TURN_STATE" ] || : > "$TURN_STATE/jev-turn-closed" 2>/dev/null || true
+}
+trap on_exit EXIT
 PAYLOAD=$(cat 2>/dev/null) || exit 0
 [ -n "$PAYLOAD" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
@@ -50,7 +65,6 @@ SECTION=$(FM_HOME=$FM_HOME "$SCRIPT_DIR/fm-jev.sh" turn --since "$SINCE" 2>/dev/
 [ "$(printf '%s\n' "$SECTION" | sed -n 2p)" != none ] || exit 0
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-jev-stop.XXXXXX") || exit 0
-trap 'rm -rf "$WORK"' EXIT
 printf '%s\n' "$SECTION" > "$WORK/section"
 jq -r .last_assistant_message <<<"$PAYLOAD" \
   | sed -E 's/^[[:space:]]*([-*][[:space:]]+)?//; s/[[:space:]]+$//' > "$WORK/message"

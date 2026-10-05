@@ -21,8 +21,11 @@ The one exception to shadow-only answers is `claim-check`, below.
 
 1. Decide first, so Jev's answer cannot anchor your choice.
 2. Where the action script asks for you, pass your choice as the argument it names; the script refuses without it and prints the exact argument or `bin/fm-jev.sh ask` command.
-3. Where a decision is made before the script runs, write a short English context file with only the evidence the question needs, then ask with your choice as `--mine`; the ask appends the type's standing rules from `config/jev-constraints` (`docs/configuration.md` "Jev constraints"), so leave them out of the file:
-   `bin/fm-jev.sh ask --type <type> --summary "<one English line>" --question "<wording>" --option <id>... --context <file> --mine <your choice>` (or `--yes-no`).
+3. Where a decision is made before the script runs, give Jev the raw material, never your account of it: pass each file the decision rests on unedited as `--source` (status lines, the brief, the report excerpt, script output), and ask with your choice as `--mine`:
+   `bin/fm-jev.sh ask --type <type> --summary "<one English line>" --question "<wording>" --option <id>... --source <file> [--source <file>]... [--context <note>] --mine <your choice>` (or `--yes-no`).
+   The ask adds the operator's verbatim words for this turn, mid-turn messages included, ahead of the sources, and the type's standing rules from `config/jev-constraints` (`docs/configuration.md` "Jev constraints") after them, so copy neither into a file.
+   `--context` is an optional note labelled as yours; keep your conclusion and your choice out of it, since the choice is already recorded blind as `--mine`.
+   A manual-type ask with neither the operator's words nor a `--source` is refused and prints the command to run instead.
    Pass the printed decision id to the script, or `off` when `ask` printed nothing.
 4. Act on the acting answer: the `acting:` line `ask` prints, the line a script prints on stderr, or your own choice when nothing was recorded.
 5. When a human later corrects or overrides that decision, run `bin/fm-jev.sh record-outcome <decision-id> "<what the human said>"`, adding `--final <choice>` when the choice actually taken changed; the outcome is graded against whichever party decided.

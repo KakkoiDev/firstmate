@@ -222,7 +222,7 @@ assert_equals '["answer","asker","confidence","constraints_sent","context_sha256
   "$(jq -c 'keys' <<<"$record")" "record carries exactly the documented fields"
 assert_equals false "$(jq -r .constraints_sent <<<"$record")" "with no constraints file the record says no standing rules were sent"
 assert_equals true "$(jq '(.jev_cost_usd - 0.00001764 | fabs) < 1e-15' <<<"$record")" "Jev cost is 420 input tokens at \$42 per billion"
-assert_equals "$(shasum -a 256 "$CONTEXT" | awk '{print $1}')" "$(jq -r .context_sha256 <<<"$record")" "record points at the context by its sha256"
+assert_equals "$(jq -j .state.context <<<"$body" | shasum -a 256 | awk '{print $1}')" "$(jq -r .context_sha256 <<<"$record")" "record points at the context sent by its sha256"
 assert_equals "call|$id|stuck-worker|What is the stuck worker doing|looping|0.9|jev-1.13.0|420|55|ok" \
   "$(jq -r '[.event, .decision_id, .question_type, .summary, .answer, .confidence, .model, .tokens_in, .tokens_out, .status] | join("|")' <<<"$record")" \
   "record values"
@@ -270,7 +270,7 @@ has_claude_response() { jq -e 'has("claude_response")' "$audit" >/dev/null 2>&1;
 wait_for "claude's raw answer lands in the snapshot" has_claude_response
 assert_equals '["claude_prompt","claude_response","claude_system_prompt","context","context_sha256","decision_id","jev_request","jev_response","options","question","question_type","ts","v"]' \
   "$(jq -c 'keys' "$audit")" "the snapshot carries exactly the documented fields"
-assert_equals "$(cat "$CONTEXT")" "$(jq -r .context "$audit")" "the snapshot holds the exact context"
+assert_equals "$(jq -r .state.context "$LOG/body")" "$(jq -r .context "$audit")" "the snapshot holds the exact context sent"
 assert_equals "$(jq -j .context "$audit" | shasum -a 256 | awk '{print $1}')" "$(jq -r .context_sha256 "$audit")" "the snapshot sha256 matches its context bytes"
 assert_equals "$(jq -r .context_sha256 <<<"$record")" "$(jq -r .context_sha256 "$audit")" "record and snapshot share the sha256"
 assert_equals "$(jq -cS . "$LOG/body")" "$(jq -cS .jev_request "$audit")" "the snapshot holds the exact Jev request"
@@ -289,6 +289,7 @@ assert_equals "looping|looping|ok" "$(jq -r '.record | [.answer, .claude_answer,
 pass "audit snapshot: exact context and prompts, matching sha256, no key, printed by show"
 
 # --- standing rules: the type's lines ride after the context ------------------------
+NOTE_HEAD="Firstmate's note, its own account rather than a source:"$'\n'
 reset
 mkdir -p "$HOME_DIR/config"
 printf '%s\n' '# operator rules' 'stuck-worker A worker that repeats one failed step is looping.' '' \
@@ -298,7 +299,7 @@ TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}"
 expect_code 0 "$code" "an ask with standing rules exits 0"
 assert_contains "$out" '  answer: looping   confidence: 0.9' "standing rules leave the answer path unchanged"
 rules=$'Standing operator rules for this question:\n- A worker that repeats one failed step is looping.\n- Relaunch only after one steer.'
-assert_equals "$(cat "$CONTEXT")"$'\n\n'"$rules" "$(jq -r .state.context "$LOG/body")" \
+assert_equals "$NOTE_HEAD$(cat "$CONTEXT")"$'\n\n'"$rules" "$(jq -r .state.context "$LOG/body")" \
   "the type's lines follow the context after a blank line, trimmed, in file order"
 assert_not_contains "$(cat "$LOG/body")" 'OTHER-TYPE-RULE' "another type's lines are not sent"
 assert_contains "$err" 'jev: constraints line 6 refused (expected <type> <rule text>)' "a line with a bad type is refused with a warning"
@@ -319,7 +320,7 @@ wait_for "the duplicate settles before the next case" settled 1
 reset
 printf '%s\n' 'effort-level Only for effort.' > "$HOME_DIR/config/jev-constraints"
 TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}"
-assert_equals "$(cat "$CONTEXT")" "$(jq -r .state.context "$LOG/body")" "a file with no line for the type changes nothing"
+assert_equals "$NOTE_HEAD$(cat "$CONTEXT")" "$(jq -r .state.context "$LOG/body")" "a file with no line for the type changes nothing"
 assert_equals false "$(jq -r 'select(.event == "call") | .constraints_sent' "$USAGE")" "no line for the type records false"
 wait_for "the duplicate settles before the next case" settled 1
 reset
@@ -331,7 +332,7 @@ else
   TYPESAFE_API_KEY=$KEY run code out err "${ASK[@]}"
   expect_code 0 "$code" "an unreadable constraints file never blocks"
   assert_contains "$out" '  answer: looping' "an unreadable constraints file still asks"
-  assert_equals "$(cat "$CONTEXT")" "$(jq -r .state.context "$LOG/body")" "an unreadable constraints file changes nothing"
+  assert_equals "$NOTE_HEAD$(cat "$CONTEXT")" "$(jq -r .state.context "$LOG/body")" "an unreadable constraints file changes nothing"
 fi
 chmod 644 "$HOME_DIR/config/jev-constraints"
 rm -rf "$HOME_DIR/config"
@@ -951,8 +952,8 @@ Source: $SOURCE_FILE
 Evidence, quoted verbatim from the source:
 state: OPEN
 
-Additional context:
-The operator asked for the ticket to show the PR state." "$(jq -r .state.context <<<"$body")" "the fields are the English state, then the extra context"
+Firstmate's note, its own account rather than a source:
+The operator asked for the ticket to show the PR state." "$(jq -r .state.context <<<"$body")" "the fields are the English state, then firstmate's labelled note"
 assert_equals 'claim-check|PR 42 is merged.' "$(calls | jq -r '[.question_type, .summary] | join("|")')" "the summary defaults to the claim, since the type is its own field"
 assert_contains "$err" "jev: WARNING: firstmate disagrees with Jev on claim-check $cc_id: jev contradicted (0.8), firstmate supported" "a disagreeing claim-check warns"
 assert_equals "firstmate|claim-check|notion:26ab1f9f4c5f80b18d3bd10a6b1d2f4e|$cc_id|ok|supported|contradicted|0.8" \
@@ -1079,3 +1080,83 @@ assert_equals $'Jev asks this turn (0)\nnone' "$out" "no ask since the turn star
 run code out err turn --since '2026-09-29 06:00:00 UTC'
 expect_code 2 "$code" "a turn start that is not ISO-8601 UTC"
 pass "turn prints the Jev asks section: oldest first, asker, answers, [DISAGREE], collapsed dispatch-rule doubles, none when empty"
+
+# --- the context ask builds: operator's words, raw sources, labelled note ------------
+REMINDER="$ROOT/bin/fm-jev-prompt-reminder.sh"
+NOTE="$TMP_ROOT/note.md"
+RAW="$TMP_ROOT/t1.status"
+printf 'Looks like a ship to me, so ship it.\n' > "$NOTE"
+printf 'working [at=1]: setup done\n\tdone [at=2]: ready in branch fm/t1  \n\xe2\x80\x94 no trailing newline' > "$RAW"
+DC=(ask --type deliverable-class --summary 'Which deliverable fits the request'
+  --question 'Should this request ship a change, scout for knowledge, or be answered from evidence?'
+  --option ship --option scout --option zq-mine-marker)
+prompt() { jq -cn --arg p "$1" '{hook_event_name: "UserPromptSubmit", session_id: "s1", prompt: $p}' \
+  | env -u FM_TASK_ID FM_JEV_GATE=on FM_HOME="$HOME_DIR" "$REMINDER" > /dev/null; }
+sent_context() { jq -j .state.context "$LOG/body"; printf x; }
+
+reset
+mkdir -p "$HOME_DIR/state"
+TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --context "$NOTE" --mine zq-mine-marker
+expect_code 2 "$code" "a manual ask carrying only firstmate's note"
+assert_contains "$err" "error: deliverable-class is asked by hand, and this ask carries neither the operator's words for this turn nor a --source file" \
+  "the refusal says what is missing"
+assert_contains "$err" "nothing was asked" "the refusal says nothing was asked"
+assert_contains "$err" "  run: bin/fm-jev.sh ask --type deliverable-class" "the refusal prints the command to run"
+assert_contains "$err" "--mine zq-mine-marker --source <file holding the raw evidence: status lines, brief, report, or script output>" \
+  "the printed command keeps the caller's arguments and adds the --source placeholder"
+assert_absent "$LOG/argv" "a refused manual ask never calls Jev"
+assert_absent "$HOME_DIR/state/jev-asks.jsonl" "a refused manual ask writes no ledger line, so off cannot stand in for it"
+run code out err "${DC[@]}" --context "$NOTE" --mine ship
+expect_code 2 "$code" "the refusal holds with Jev off too"
+assert_absent "$HOME_DIR/state/jev-asks.jsonl" "an off manual ask with only a note is not ledgered"
+run code out err "${DC[@]}" --source /dev/null --mine ship
+expect_code 2 "$code" "a --source that is not a regular file"
+printf '' > "$TMP_ROOT/empty"
+run code out err "${DC[@]}" --source "$TMP_ROOT/empty" --mine ship
+expect_code 2 "$code" "an empty --source"
+assert_equals "error: --source file is empty: $TMP_ROOT/empty" "$err" "an empty source carries nothing and is refused"
+pass "a manual ask with only firstmate's note is refused and prints the command with --source"
+
+reset
+write_choice ship 0.9 ship scout zq-mine-marker
+TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --source "$RAW" --source "$NOTE" --mine zq-mine-marker
+expect_code 0 "$code" "a manual ask with sources"
+assert_contains "$out" '  answer: ship   confidence: 0.9' "the ask with --source reaches Jev"
+ctx=$(sent_context); ctx=${ctx%x}
+raw=$(cat "$RAW"; printf x); raw=${raw%x}
+[[ $ctx == "Source $RAW, verbatim:"$'\n'"$raw"$'\n\n'"Source $NOTE, verbatim:"$'\n'* ]] \
+  || fail "each --source is sent labelled and byte for byte, in order: $ctx"
+assert_not_contains "$ctx" "zq-mine-marker" "firstmate's --mine choice never enters the context"
+pass "each --source file reaches Jev byte for byte under its path, and --mine stays out of the context"
+
+reset
+mkdir -p "$HOME_DIR/state"
+prompt $'are workers stuck?\nlook at t1'
+prompt 'and t2, mid-turn'
+write_choice scout 0.7 ship scout zq-mine-marker
+TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --source "$RAW" --context "$NOTE" --mine zq-mine-marker
+expect_code 0 "$code" "a manual ask in a turn with recorded operator words"
+ctx=$(sent_context); ctx=${ctx%x}
+ts=$(jq -r .ts "$HOME_DIR/state/jev-turn-words.jsonl" | head -n 1)
+ts2=$(jq -r .ts "$HOME_DIR/state/jev-turn-words.jsonl" | tail -n 1)
+assert_equals "The operator's words this turn, verbatim, oldest first:
+Message at $ts:
+are workers stuck?
+look at t1
+Message at $ts2:
+and t2, mid-turn
+
+Source $RAW, verbatim:
+$raw
+
+Firstmate's note, its own account rather than a source:
+Looks like a ship to me, so ship it.
+" "$ctx" "the operator's words come first, mid-turn message included, then the sources, then the labelled note"
+assert_not_contains "$ctx" "zq-mine-marker" "firstmate's choice is absent from a context built with words and a note"
+wait_for "the manual asks settle" settled 1
+TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --context "$NOTE" --mine ship
+expect_code 0 "$code" "the operator's words alone lift the refusal"
+assert_contains "$(sent_context)" 'and t2, mid-turn' "the words reach Jev beside the note"
+TYPESAFE_API_KEY=$KEY FM_TASK_ID=t9 run code out err "${DC[@]}" --context "$NOTE" --mine ship
+expect_code 2 "$code" "inside a task worker the primary's words do not count"
+pass "the operator's verbatim words for the turn, mid-turn messages included, lead every ask's context"

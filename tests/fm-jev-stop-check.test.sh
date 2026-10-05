@@ -150,6 +150,25 @@ $sec"
   pass "a [DISAGREE] ask blocks the turn end until the final message names that disagreement outside the section"
 }
 
+test_turn_close_marker() {
+  local closed="$PRIMARY/state/jev-turn-closed"
+  rm -f "$PRIMARY/state/jev-usage.jsonl" "$closed"
+  turn_start
+  scope_ask 'fix the login flake' login login
+  stop 'Fixed the login flake.'
+  expect_block "a final message without the section" "lacks"
+  assert_absent "$closed" "a blocked turn end leaves the turn open"
+  stop "Fixed the login flake.
+
+$(section)"
+  expect_allow "the section in the final message"
+  assert_present "$closed" "an allowed turn end closes the turn of operator words"
+  rm -f "$closed"
+  stop 'Done.' FM_TASK_ID=t1
+  assert_absent "$closed" "a task worker closes no turn"
+  pass "an allowed turn end writes the turn-closed marker, a blocked one does not"
+}
+
 test_tracked_registration() {
   local entry
   entry=$(jq -c '[.hooks.Stop[].hooks[] | select(.command | contains("fm-jev-stop-check.sh"))]' "$ROOT/.claude/settings.json")
@@ -162,4 +181,5 @@ test_tracked_registration() {
 test_no_asks_allows
 test_section_required
 test_disagreement_must_be_mentioned
+test_turn_close_marker
 test_tracked_registration
