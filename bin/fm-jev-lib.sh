@@ -70,6 +70,14 @@
 #   file, an unreadable file, or no line for the type. A malformed line is
 #   skipped with one stderr warning and never fails the ask.
 #
+# Operator's words: fm_jev_turn_words prints the operator's prompts recorded
+#   this turn in $FM_HOME/state/jev-turn-words.jsonl
+#   (bin/fm-jev-prompt-reminder.sh owns the record), oldest first, as
+#   "The operator's words this turn, verbatim, oldest first:" and then
+#   "Message at <ts>:" and the prompt for each; nothing inside a task worker
+#   (FM_TASK_ID set) or when none is recorded. Every caller puts it in the
+#   state of each ask it builds.
+#
 # Audit snapshot: fm_jev_write_audit writes $FM_HOME/state/jev-audit/<id>.json,
 #   local only, so a later audit can re-judge the decision from what the models
 #   saw: {v, decision_id, ts, question_type, question, options, context,
@@ -346,6 +354,16 @@ fm_jev_never_send_line() {  # <text-file>
   done <<<"$list"
   rm -f "$norm"
   return 1
+}
+
+fm_jev_turn_words() {
+  [ -z "${FM_TASK_ID:-}" ] || return 0
+  [ -s "$FM_HOME/state/jev-turn-words.jsonl" ] || return 0
+  jq -Rrn '[inputs | fromjson? | select(type == "object" and (.prompt | type) == "string" and .prompt != "")]
+    | if length == 0 then empty else
+        "The operator'\''s words this turn, verbatim, oldest first:",
+        (.[] | "Message at \(.ts // "an unrecorded time"):", .prompt)
+      end' "$FM_HOME/state/jev-turn-words.jsonl" 2>/dev/null || true
 }
 
 fm_jev_constraints() {  # <question-type>

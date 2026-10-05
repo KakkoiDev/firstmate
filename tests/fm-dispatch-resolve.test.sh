@@ -24,7 +24,7 @@ RULES="$HOME_DIR/config/crew-dispatch.json"
 QUOTA="$TMP_ROOT/quota.json"
 BASE_PATH=$PATH
 mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
-for command_name in bash chmod cp dirname jq mktemp rm; do
+for command_name in bash cat chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
 done
 unset DD_API_KEY DD_SITE
@@ -680,6 +680,31 @@ reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_equals "$(cat "$BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a brief with neither heading is sent whole"
 pass "only the brief's task sections and scout tag reach the model, with a whole-brief fallback"
+
+# --- the operator's words for the turn lead the task text --------------------
+prompt() { jq -cn --arg p "$1" '{hook_event_name: "UserPromptSubmit", session_id: "s1", prompt: $p}' \
+  | FM_JEV_GATE=on FM_HOME="$HOME_DIR" "$ROOT/bin/fm-jev-prompt-reminder.sh" > /dev/null; }
+prompt 'add a flag to the pager'
+prompt 'and keep it cheap, mid-turn'
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$SCAFFOLD_BRIEF"
+expect_code 0 "$code" "a resolve in a turn with recorded operator words"
+sent=$(jq -r .state.task.brief "$LOG/body")
+ts=$(jq -r .ts "$HOME_DIR/state/jev-turn-words.jsonl" | head -n 1)
+ts2=$(jq -r .ts "$HOME_DIR/state/jev-turn-words.jsonl" | tail -n 1)
+[[ $sent == "The operator's words this turn, verbatim, oldest first:
+Message at $ts:
+add a flag to the pager
+Message at $ts2:
+and keep it cheap, mid-turn
+
+## Captain's intent
+Add a flag to the pager."* ]] || fail "the operator's words, mid-turn message included, come before the task sections: $sent"
+reset_log
+FM_TASK_ID=t9 TYPESAFE_API_KEY=$KEY run code out err "$SCAFFOLD_BRIEF"
+assert_not_contains "$(jq -r .state.task.brief "$LOG/body")" "The operator's words" "a resolve inside a task worker sends no primary words"
+rm -f "$HOME_DIR/state/jev-turn-words.jsonl"
+pass "the operator's verbatim words for the turn lead the task text a resolve sends"
 
 # --- escalate: captain approval ------------------------------------------------
 reset_log
