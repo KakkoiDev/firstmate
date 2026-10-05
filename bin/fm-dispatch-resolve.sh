@@ -14,7 +14,9 @@
 #
 # What it does when on with at least one rule: one POST with the project name and the brief's
 #   `## Captain's intent` and `## Firstmate spec` sections, tagged when it is a
-#   scout brief (the whole brief when it has neither section), followed by the
+#   scout brief (the whole brief when it has neither section), after the
+#   operator's words for the turn (fm_jev_turn_words in bin/fm-jev-lib.sh,
+#   then a blank line, both left out when it prints nothing), followed by the
 #   dispatch-rule standing rules (fm_jev_constraints in bin/fm-jev-lib.sh), as state and
 #   ONE Choice question whose options are every rule's `when` from
 #   config/crew-dispatch.json plus one fixed generic none option. The provider
@@ -376,10 +378,12 @@ task_sections() {
   done
 }
 SECTIONS=$(task_sections)
+fm_jev_turn_words > "$TASK_TEXT"
+[ ! -s "$TASK_TEXT" ] || printf '\n' >> "$TASK_TEXT"
 if [ -n "$SECTIONS" ]; then
-  { brief_kind; printf '%s\n' "$SECTIONS"; } > "$TASK_TEXT" || die "could not read brief: $BRIEF"
+  { brief_kind; printf '%s\n' "$SECTIONS"; } >> "$TASK_TEXT" || die "could not read brief: $BRIEF"
 else
-  cp "$BRIEF" "$TASK_TEXT" || die "could not read brief: $BRIEF"
+  cat "$BRIEF" >> "$TASK_TEXT" || die "could not read brief: $BRIEF"
 fi
 CONSTRAINTS_SENT=false
 if STANDING_RULES=$(FM_CONFIG_OVERRIDE="$CONFIG" fm_jev_constraints dispatch-rule); then

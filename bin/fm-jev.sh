@@ -104,11 +104,8 @@
 #   {yes, no}, and the state is the context ask builds itself, one section
 #   after another with a blank line between them:
 #     1. the template's rendered fields, when --template is given;
-#     2. "The operator's words this turn, verbatim, oldest first:", then
-#        "Message at <ts>:" and each prompt recorded in
-#        $FM_HOME/state/jev-turn-words.jsonl (bin/fm-jev-prompt-reminder.sh
-#        owns that record), mid-turn messages included; left out inside a task
-#        worker (FM_TASK_ID set) and when none is recorded;
+#     2. the operator's words for the turn, mid-turn messages included
+#        (fm_jev_turn_words in bin/fm-jev-lib.sh owns the section);
 #     3. per --source, in order, "Source <path>, verbatim:" and the file's
 #        bytes; each must be a readable, non-empty regular file;
 #     4. "Firstmate's note, its own account rather than a source:" and the
@@ -456,19 +453,6 @@ add_option() {
 
 squash() { tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'; }
 
-# turn_words: the operator's prompts recorded this turn
-# (bin/fm-jev-prompt-reminder.sh owns the record), oldest first, under one
-# heading; nothing inside a task worker or when none is recorded.
-turn_words() {
-  [ -z "${FM_TASK_ID:-}" ] || return 0
-  [ -s "$FM_HOME/state/jev-turn-words.jsonl" ] || return 0
-  jq -Rrn '[inputs | fromjson? | select(type == "object" and (.prompt | type) == "string" and .prompt != "")]
-    | if length == 0 then empty else
-        "The operator'\''s words this turn, verbatim, oldest first:",
-        (.[] | "Message at \(.ts // "an unrecorded time"):", .prompt)
-      end' "$FM_HOME/state/jev-turn-words.jsonl" 2>/dev/null || true
-}
-
 # ctx_gap: uses cmd_ask's ctx. Prints what ends the context so far with one
 # blank line, or nothing while it is empty.
 ctx_gap() {
@@ -615,7 +599,7 @@ cmd_ask() {
     [ "$(jq -r --arg m "$mine" 'has($m)' <<<"$criteria")" = true ] \
       || die "--mine $mine is not one of $(jq -r 'keys_unsorted | join(", ")' <<<"$criteria")"
   fi
-  [ -z "$(turn_words | head -c 1)" ] || have_words=1
+  [ -z "$(fm_jev_turn_words | head -c 1)" ] || have_words=1
   case " $MANUAL_TYPES " in
     *" $qtype "*)
       if [ "$have_words" = 0 ] && [ "${#sources[@]}" = 0 ]; then
@@ -647,7 +631,7 @@ cmd_ask() {
   trap 'rm -f "$resp" "$ctx"' EXIT
   { [ -z "$template_text" ] || printf '%s\n' "$template_text"; } > "$ctx"
   if [ "$have_words" = 1 ]; then
-    { ctx_gap; turn_words; } >> "$ctx"
+    { ctx_gap; fm_jev_turn_words; } >> "$ctx"
   fi
   for src in ${sources[@]+"${sources[@]}"}; do
     { ctx_gap; printf 'Source %s, verbatim:\n' "$src"; cat "$src"; } >> "$ctx" 2>/dev/null \
