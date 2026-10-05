@@ -112,10 +112,10 @@ assert_contains "$out" "fm-spawn.sh: refused: project-match=off needs a project-
 assert_contains "$out" "  run: bin/fm-jev.sh ask --type project-match " "the off refusal names the ask"
 printf 'Fix the flaky login test.\n' > "$TMP_ROOT/off-context"
 run "$H" code out -- fm-jev.sh ask --type project-match --summary "which project" --question q \
-  --option spawn-proj --option none --context "$TMP_ROOT/off-context" --mine spawn-proj
+  --option spawn-proj --option none --source "$TMP_ROOT/off-context" --mine spawn-proj
 assert_contains "$out" "jev: off (TYPESAFE_API_KEY absent" "the project-match ask finds Jev off"
 run "$H" code out -- fm-jev.sh ask --type deliverable-class --summary "which deliverable" --question q \
-  --option ship --option scout --context "$TMP_ROOT/off-context" --mine ship
+  --option ship --option scout --source "$TMP_ROOT/off-context" --mine ship
 pass "fm-spawn refuses an off decision until an ask that found Jev off is in the ask ledger"
 
 run "$H" code out -- "${SPAWN[@]}" --decision project-match=off --decision deliverable-class=off
@@ -139,7 +139,7 @@ write_response spawn-proj 0.9 other-proj
 printf 'mismatch\n' > "$TMP_ROOT/pm-context"
 run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-jev.sh ask --type project-match --summary "which project" \
   --question "Which registered project is this request about?" --option spawn-proj --option other-proj \
-  --context "$TMP_ROOT/pm-context" --mine other-proj
+  --source "$TMP_ROOT/pm-context" --mine other-proj
 expect_code 0 "$code" "project-match ask"
 PM_ID=$(sed -n 's/^  decision_id: //p' <<<"$out")
 [ -n "$PM_ID" ] || fail "project-match ask printed no decision_id: $out"
@@ -232,6 +232,23 @@ assert_present "$LOG/usage-at-post" "the fake Jev saw the usage log at request t
 [ "$(jq -src 'map(select(.event == "call")) | last | .question_type' "$H/state/jev-usage.jsonl")" = merge-risk ] \
   || fail "the answered call was not recorded as merge-risk"
 pass "a gated script records firstmate's blind choice before Jev is asked, and a never-type stays firstmate's"
+
+H=$(new_home words ship)
+jq -cn '{hook_event_name: "UserPromptSubmit", session_id: "s1", prompt: "land t1 now, it is only docs"}' \
+  | env -u FM_TASK_ID FM_HOME="$H" "$ROOT/bin/fm-jev-prompt-reminder.sh" > /dev/null
+jq -cn '{hook_event_name: "UserPromptSubmit", session_id: "s1", prompt: "wait, it also touches the merge script"}' \
+  | env -u FM_TASK_ID FM_HOME="$H" "$ROOT/bin/fm-jev-prompt-reminder.sh" > /dev/null
+write_response yes 0.8 no
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-merge-local.sh t1 --merge-risk no
+GATE_ID=$(sed -n 's/.*jev merge-risk decision \([^:]*\):.*/\1/p' <<<"$out" | head -n 1)
+[ -n "$GATE_ID" ] || fail "the gated merge recorded no decision: $out"
+GATE_CTX=$(jq -r .context "$H/state/jev-audit/$GATE_ID.json")
+assert_contains "$GATE_CTX" $'The operator\'s words this turn, verbatim, oldest first:\nMessage at' "a script-built ask opens with the operator's words"
+assert_contains "$GATE_CTX" 'land t1 now, it is only docs' "the turn's opening prompt reaches the script-built ask"
+assert_contains "$GATE_CTX" 'wait, it also touches the merge script' "the mid-turn message reaches the script-built ask"
+assert_contains "$GATE_CTX" $'Merge:\n' "the script's own context follows as a source"
+assert_contains "$GATE_CTX" 'Fix the flaky login test.' "the brief still reaches the script-built ask"
+pass "a script-built ask carries the operator's verbatim words for the turn ahead of the script's context"
 
 BIGBRIEF="$TMP_ROOT/big-brief.md"
 {

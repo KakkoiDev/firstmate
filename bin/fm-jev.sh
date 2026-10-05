@@ -4,16 +4,17 @@
 #
 # Usage:
 #   fm-jev.sh ask --type <slug> --summary <line> --question <text>
-#                 (--option <id>[=<meaning>] ... | --yes-no) [--context <file>]
-#                 [--mine <answer>] [--target <kind>:<value>]
+#                 (--option <id>[=<meaning>] ... | --yes-no) [--source <file>]...
+#                 [--context <file>] [--mine <answer>] [--target <kind>:<value>]
 #   fm-jev.sh ask --template claim-check --claim <one sentence>
 #                 --source <URL|file> --evidence <verbatim quote> [common]
 #   fm-jev.sh ask --template ticket-status --ticket <id> --current <value>
 #                 --proposed <value> --evidence <verbatim quote> [common]
 #   fm-jev.sh ask --template ask-scope --words <the operator's words>
 #                 --candidate <id>[=<meaning>] ... [common]
-#     [common]: [--summary <line>] [--context <file>] [--mine <answer>]
-#               [--target <kind>:<value>]
+#     [common]: [--summary <line>] [--source <file>]... [--context <file>]
+#               [--mine <answer>] [--target <kind>:<value>]
+#               (claim-check's one --source is its template field)
 #   fm-jev.sh asked --type <type>[,<type>...] [--status <status>[,...]]
 #   fm-jev.sh target-status --target <kind>:<value> --require <claim-check|template>
 #   fm-jev.sh turn --since <ISO-8601 UTC time>
@@ -50,7 +51,7 @@
 #   "jev: WARNING: firstmate disagrees with Jev on <type> <id>: jev <answer>
 #   (<confidence>), firstmate <choice>"; record-mine prints the same line.
 # --template: a question format whose fields are rendered, in English, into
-#   the state ahead of any --context text; it sets --type, --question, and
+#   the state ahead of every other section; it sets --type, --question, and
 #   the options, so those flags are refused beside it, and a missing field is
 #   refused with exit 2 naming it. The summary defaults to the type and the
 #   claim, ticket, or words.
@@ -100,12 +101,28 @@
 #   criteria}}}: the question text is the instructions, each --option is one
 #   criterion (its meaning defaults to the id; an id is letters, digits, dot,
 #   dash, or underscore, so a registered project name fits), --yes-no is the choice
-#   {yes, no}, and the --context file (English) is the state. The summary is
-#   one English line saying what is asked; it is recorded, never sent.
-#   The type's standing rules (fm_jev_constraints in bin/fm-jev-lib.sh) are
-#   appended to the state after any template and --context text, so the
-#   duplicate queries and the audit snapshot see them too, and the call
-#   record's constraints_sent says whether any went out.
+#   {yes, no}, and the state is the context ask builds itself, one section
+#   after another with a blank line between them:
+#     1. the template's rendered fields, when --template is given;
+#     2. "The operator's words this turn, verbatim, oldest first:", then
+#        "Message at <ts>:" and each prompt recorded in
+#        $FM_HOME/state/jev-turn-words.jsonl (bin/fm-jev-prompt-reminder.sh
+#        owns that record), mid-turn messages included; left out inside a task
+#        worker (FM_TASK_ID set) and when none is recorded;
+#     3. per --source, in order, "Source <path>, verbatim:" and the file's
+#        bytes; each must be a readable, non-empty regular file;
+#     4. "Firstmate's note, its own account rather than a source:" and the
+#        --context file, when given;
+#     5. the type's standing rules (fm_jev_constraints in bin/fm-jev-lib.sh);
+#        the call record's constraints_sent says whether any went out.
+#   --mine never enters the state. The duplicate queries and the audit
+#   snapshot see the same state. The summary is one English line saying what
+#   is asked; it is recorded, never sent.
+#   Manual types (MANUAL_TYPES below: the types firstmate asks by hand, with
+#   no action script building the context) are refused with exit 2, asking
+#   and recording nothing, when the state would carry neither the operator's
+#   words nor a --source file, so a --context note alone never reaches Jev;
+#   the refusal prints the same command with a --source placeholder added.
 #   Output (stdout, TOON-style block):
 #     jev:
 #       decision_id: <id>
@@ -207,8 +224,10 @@
 # Home: FM_JEV_HOME, which bin/fm-spawn.sh exports into every ship and scout
 #   pane, wins over FM_HOME, so a worker's asks land in the home that launched
 #   it whatever directory it runs from; unset, FM_HOME and then this checkout.
-# Exit 2 only for a usage error, an unreadable context file, a missing jq, or
-# an unknown decision id or answer; record subcommands never touch the network.
+# Exit 2 only for a usage error (a manual-type ask without the operator's words
+# or a --source included), an unreadable context or source file, a missing jq,
+# or an unknown decision id or answer; record subcommands never touch the
+# network.
 #
 # Authority: an answer is evidence unless the operator lists its type in the
 #   authority file; the caller acts on the acting answer ask --mine prints, or
@@ -239,6 +258,9 @@ CLAIM_FLOOR=0.5
 QKEY=q
 AUTHORITY_FILE="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/jev-authority"
 NEVER_TYPES='report-has-captain-call'
+# Types firstmate asks by hand, with no action script building the context.
+MANUAL_TYPES='deliverable-class project-match secondmate-scope surface-class brief-answers-question finding-authority heartbeat-suspicious'
+SOURCE_PLACEHOLDER='<file holding the raw evidence: status lines, brief, report, or script output>'
 GRAD_MIN_ANSWERED=20
 GRAD_MIN_AGREEMENT=0.95
 GRAD_MAX_OVERRULED=0
@@ -434,6 +456,26 @@ add_option() {
 
 squash() { tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'; }
 
+# turn_words: the operator's prompts recorded this turn
+# (bin/fm-jev-prompt-reminder.sh owns the record), oldest first, under one
+# heading; nothing inside a task worker or when none is recorded.
+turn_words() {
+  [ -z "${FM_TASK_ID:-}" ] || return 0
+  [ -s "$FM_HOME/state/jev-turn-words.jsonl" ] || return 0
+  jq -Rrn '[inputs | fromjson? | select(type == "object" and (.prompt | type) == "string" and .prompt != "")]
+    | if length == 0 then empty else
+        "The operator'\''s words this turn, verbatim, oldest first:",
+        (.[] | "Message at \(.ts // "an unrecorded time"):", .prompt)
+      end' "$FM_HOME/state/jev-turn-words.jsonl" 2>/dev/null || true
+}
+
+# ctx_gap: uses cmd_ask's ctx. Prints what ends the context so far with one
+# blank line, or nothing while it is empty.
+ctx_gap() {
+  [ -s "$ctx" ] || return 0
+  if [ -z "$(tail -c 1 "$ctx")" ]; then printf '\n'; else printf '\n\n'; fi
+}
+
 # template_fill: uses cmd_ask's locals. Checks the template's fields and sets
 # qtype, question, criteria, the rendered English state, and a default summary.
 template_fill() {
@@ -514,9 +556,10 @@ template_field_help() {
 cmd_ask() {
   local qtype='' summary='' question='' context='' yes_no=0 mine='' have_mine=0 template='' target=''
   local criteria='{}' request resp='' options id='' http lat answer_ok prompt ctx sha start never
-  local template_text='' default_summary='' evidence_sha='' f rules sep constraints_sent=false
+  local template_text='' default_summary='' evidence_sha='' f rules constraints_sent=false
   local tf_claim='' tf_source='' tf_evidence='' tf_ticket='' tf_current='' tf_proposed='' tf_words=''
-  local -a candidates=()
+  local have_words=0 src
+  local -a candidates=() sources=() argv=("$@")
   start=$(fm_timing_now_ms)
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -525,9 +568,10 @@ cmd_ask() {
       --summary) [ $# -ge 2 ] || die "--summary needs a value"; summary=$2; shift 2 ;;
       --question) [ $# -ge 2 ] || die "--question needs a value"; question=$2; shift 2 ;;
       --context) [ $# -ge 2 ] || die "--context needs a value"; context=$2; shift 2 ;;
+      --source) [ $# -ge 2 ] || die "--source needs a value"; sources+=("$2"); shift 2 ;;
       --template) [ $# -ge 2 ] || die "--template needs a value"; template=$2; shift 2 ;;
       --target) [ $# -ge 2 ] || die "--target needs a value"; target=$2; shift 2 ;;
-      --claim|--source|--evidence|--ticket|--current|--proposed|--words)
+      --claim|--evidence|--ticket|--current|--proposed|--words)
         [ $# -ge 2 ] || die "$1 needs a value"; printf -v "tf_${1#--}" '%s' "$2"; shift 2 ;;
       --candidate) [ $# -ge 2 ] || die "--candidate needs a value"; candidates+=("$2"); shift 2 ;;
       --yes-no) yes_no=1; shift ;;
@@ -535,11 +579,22 @@ cmd_ask() {
       *) die "unknown ask argument: $1" ;;
     esac
   done
+  # claim-check's one --source is its template field; everywhere else each
+  # --source is a file sent verbatim.
+  if [ "$template" = claim-check ]; then
+    [ "${#sources[@]}" -le 1 ] || die "--template claim-check takes one --source"
+    tf_source=${sources[0]:-}
+    sources=()
+  fi
+  for src in ${sources[@]+"${sources[@]}"}; do
+    [ -f "$src" ] && [ -r "$src" ] || die "--source must be a readable file: $src"
+    [ -s "$src" ] || die "--source file is empty: $src"
+  done
   if [ -n "$template" ]; then
     template_fill
     [ -n "$summary" ] || summary=$default_summary
   else
-    [ -z "$tf_claim$tf_source$tf_evidence$tf_ticket$tf_current$tf_proposed$tf_words" ] \
+    [ -z "$tf_claim$tf_evidence$tf_ticket$tf_current$tf_proposed$tf_words" ] \
       && [ "${#candidates[@]}" = 0 ] || die "template fields need --template"
   fi
   if [ -n "$target" ]; then
@@ -560,6 +615,18 @@ cmd_ask() {
     [ "$(jq -r --arg m "$mine" 'has($m)' <<<"$criteria")" = true ] \
       || die "--mine $mine is not one of $(jq -r 'keys_unsorted | join(", ")' <<<"$criteria")"
   fi
+  [ -z "$(turn_words | head -c 1)" ] || have_words=1
+  case " $MANUAL_TYPES " in
+    *" $qtype "*)
+      if [ "$have_words" = 0 ] && [ "${#sources[@]}" = 0 ]; then
+        printf 'error: %s is asked by hand, and this ask carries neither the operator'\''s words for this turn nor a --source file, so Jev would see only firstmate'\''s own account; nothing was asked\n' "$qtype" >&2
+        printf '  run: bin/fm-jev.sh ask' >&2
+        printf ' %q' "${argv[@]}" >&2
+        printf ' --source %s\n' "$SOURCE_PLACEHOLDER" >&2
+        exit 2
+      fi
+      ;;
+  esac
 
   if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
     TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
@@ -578,16 +645,20 @@ cmd_ask() {
   ctx=$(mktemp) || die "mktemp failed"
   resp=$(mktemp) || { rm -f "$ctx"; die "mktemp failed"; }
   trap 'rm -f "$resp" "$ctx"' EXIT
-  { [ -z "$template_text" ] || printf '%s\n' "$template_text"
-    if [ -n "$template_text" ] && [ -n "$context" ]; then printf '\nAdditional context:\n'; fi
-    cat "${context:-/dev/null}"; } > "$ctx" 2>/dev/null || die "context file not readable: $context"
+  { [ -z "$template_text" ] || printf '%s\n' "$template_text"; } > "$ctx"
+  if [ "$have_words" = 1 ]; then
+    { ctx_gap; turn_words; } >> "$ctx"
+  fi
+  for src in ${sources[@]+"${sources[@]}"}; do
+    { ctx_gap; printf 'Source %s, verbatim:\n' "$src"; cat "$src"; } >> "$ctx" 2>/dev/null \
+      || die "--source file not readable: $src"
+  done
+  if [ -n "$context" ]; then
+    { ctx_gap; printf "Firstmate's note, its own account rather than a source:\n"; cat "$context"; } >> "$ctx" 2>/dev/null \
+      || die "context file not readable: $context"
+  fi
   if rules=$(fm_jev_constraints "$qtype"); then
-    sep=''
-    if [ -s "$ctx" ]; then
-      sep=$'\n'
-      [ -z "$(tail -c 1 "$ctx")" ] || sep=$'\n\n'
-    fi
-    printf '%s%s\n' "$sep" "$rules" >> "$ctx" && constraints_sent=true
+    { ctx_gap; printf '%s\n' "$rules"; } >> "$ctx" && constraints_sent=true
   fi
   sha=$(fm_jev_sha256 "$ctx")
   request=$(jq -n --rawfile context "$ctx" --arg model "$FM_JEV_MODEL" \

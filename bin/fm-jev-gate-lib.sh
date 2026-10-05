@@ -27,8 +27,9 @@
 # FM_JEV_GATE=off disables every gate, so no argument is required and nothing
 #   is asked. The test suite exports it; internal callers that cross an action
 #   boundary pass explicit values instead.
-# The context sent with an ask is whole: the extra texts come first, then the
-#   brief's task sections.
+# The context a script builds is whole: the extra texts come first, then the
+#   brief's task sections. It reaches bin/fm-jev.sh as a --source file, after
+#   the operator's words for the turn that bin/fm-jev.sh adds itself.
 
 # shellcheck source=bin/fm-brief-heading-lib.sh
 declare -F fm_brief_task_heading_body >/dev/null || . "$SCRIPT_DIR/fm-brief-heading-lib.sh"
@@ -149,7 +150,7 @@ fm_jev_gate_ask_command() {  # <type>
     [ -n "$opt" ] || continue
     if [ "$opt" = yes-no ]; then cmd="$cmd --yes-no"; else cmd="$cmd --option $opt"; fi
   done < <(fm_jev_gate_options "$1")
-  printf '%s --context <file with the request text> --mine <your choice>' "$cmd"
+  printf '%s --source <file holding the raw evidence: status lines, brief, report, or script output> --mine <your choice>' "$cmd"
 }
 
 fm_jev_gate_refuse() {  # <issuer> <message> [<command>]
@@ -165,8 +166,9 @@ fm_jev_gate_ask() {
   local issuer=$1 qtype=$2 mine=$3 summary=$4 ctx=$5 out opt opts=()
   FM_JEV_GATE_ID='' FM_JEV_GATE_ACTING=$mine FM_JEV_GATE_DECIDER=firstmate
   while IFS= read -r opt; do opts+=("$opt"); done < <(fm_jev_gate_option_args "$qtype")
+  [ ! -s "$ctx" ] || opts+=(--source "$ctx")
   out=$(FM_HOME=$FM_HOME FM_JEV_ISSUER=$issuer "$SCRIPT_DIR/fm-jev.sh" ask --type "$qtype" --summary "$summary" \
-    --question "$(fm_jev_gate_question "$qtype")" "${opts[@]}" --context "$ctx" --mine "$mine") || out=''
+    --question "$(fm_jev_gate_question "$qtype")" "${opts[@]}" --mine "$mine") || out=''
   FM_JEV_GATE_ID=$(sed -n 's/^  decision_id: //p' <<<"$out")
   if [ -n "$FM_JEV_GATE_ID" ]; then
     FM_JEV_GATE_ACTING=$(sed -n 's/^  acting: \([^ ]*\) .*/\1/p' <<<"$out")
