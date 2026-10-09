@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>disk-lens</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
+  --accent: #2f6fdd; --danger: #c2372b; --warn: #a86a00; --ok: #2c7a3f; --chip: #eeeeea;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615; --panel: #1f1f1d; --text: #ecece8; --muted: #9a9a93; --line: #33332f;
+    --accent: #6d9bff; --danger: #ff6b5e; --warn: #e0a440; --ok: #5cc27a; --chip: #2a2a27;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+header { display: flex; gap: 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; flex-wrap: wrap; }
+header h1 { font-size: 16px; margin: 0 8px 0 0; }
+nav button { border: 0; background: none; color: var(--muted); padding: 6px 10px; border-radius: 6px; font: inherit; cursor: pointer; }
+nav button.on { background: var(--chip); color: var(--text); font-weight: 600; }
+.spacer { flex: 1; }
+button.b { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 4px 10px; border-radius: 6px; font: inherit; cursor: pointer; }
+button.b:hover { border-color: var(--accent); }
+button.b.danger { color: var(--danger); }
+button.b.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.b.dangerfill { background: var(--danger); color: #fff; border-color: var(--danger); }
+button.b:disabled { opacity: .45; cursor: not-allowed; }
+main { padding: 12px 16px 60px; max-width: 1400px; margin: 0 auto; }
+.bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.chip { border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 3px 10px; cursor: pointer; font: inherit; color: var(--text); }
+.chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+input[type=search], select, textarea { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; }
+.status { color: var(--muted); font-size: 13px; }
+table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.name { word-break: break-all; }
+td.acts { white-space: nowrap; text-align: right; }
+.sub { color: var(--muted); font-size: 12px; }
+.tag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--chip); color: var(--muted); margin-right: 4px; }
+.tag.warn { color: var(--warn); }
+.tag.bad { color: var(--danger); }
+.tag.good { color: var(--ok); }
+.bar-fill { height: 4px; background: var(--accent); border-radius: 2px; margin-top: 3px; opacity: .6; }
+.answer { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin-top: 6px; }
+dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); max-width: 720px; width: calc(100% - 32px); }
+dialog::backdrop { background: rgba(0,0,0,.4); }
+dialog h2 { margin: 0 0 8px; font-size: 16px; }
+dialog ul { padding-left: 18px; }
+.refusal { color: var(--danger); }
+.mem { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 10px; }
+.mem div { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; }
+.mem b { display: block; font-size: 16px; }
+tr.child td { background: var(--bg); }
+@media (max-width: 700px) { td.det, th.det { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>disk-lens</h1>
+  <nav id="tabs">
+    <button data-tab="disk" class="on">Disk</button>
+    <button data-tab="firstmate">Firstmate</button>
+    <button data-tab="cpu">CPU</button>
+    <button data-tab="ram">RAM</button>
+  </nav>
+  <span class="spacer"></span>
+  <span class="status" id="scanstatus"></span>
+  <button class="b" id="rescan">Rescan</button>
+  <button class="b danger" id="quit">Quit</button>
+</header>
+<main id="main"></main>
+
+<dialog id="dlg"><div id="dlgbody"></div></dialog>
+
+<script>
+"use strict";
+const params = new URLSearchParams(location.search);
+const TOKEN = params.get("token") || "";
+
+const state = { tab: "disk", group: "all", minMB: 100, q: "", sort: "size", dir: -1, items: [], scanning: false,
+  procs: [], memory: {}, open: {}, answers: {}, procSort: null, timer: null, quit: false };
+
+async function api(path, body) {
+  const opt = { headers: { "X-Disk-Lens-Token": TOKEN } };
+  if (body !== undefined) { opt.method = "POST"; opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  const r = await fetch(path, opt);
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  data._status = r.status;
+  return data;
+}
+
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function fmt(b) {
+  if (b == null) return "…";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; let v = b;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1)) + " " + u[i];
+}
+
+document.getElementById("tabs").addEventListener("click", e => {
+  const t = e.target.closest("button"); if (!t) return;
+  state.tab = t.dataset.tab; state.group = "all";
+  for (const b of document.querySelectorAll("#tabs button")) b.classList.toggle("on", b === t);
+  refresh(true);
+});
+document.getElementById("rescan").onclick = async () => { await api("/api/rescan", {}); refresh(true); };
+document.getElementById("quit").onclick = async () => {
+  if (!confirm("Stop disk-lens? The page stops working until the skill starts it again.")) return;
+  state.quit = true; await api("/api/quit", {});
+  document.getElementById("main").innerHTML = "<p>disk-lens stopped. You can close this tab.</p>";
+};
+
+async function refresh(force) {
+  if (state.quit) return;
+  if (document.getElementById("dlg").open && !force) return;
+  if (state.tab === "disk" || state.tab === "firstmate") {
+    const d = await api("/api/items?tab=" + state.tab);
+    if (d._status === 403) { fatal("Token rejected. Start the page again from the skill."); return; }
+    state.items = d.items || []; state.scanning = d.scanning;
+    const pending = state.items.filter(i => i.size == null && i.needs_du).length;
+    document.getElementById("scanstatus").textContent = d.scanning ? `scanning… ${pending} sizes pending` : "scan complete" + ((d.errors || []).length ? " (with errors: " + d.errors.join("; ") + ")" : "");
+    renderItems();
+  } else {
+    const d = await api("/api/procs");
+    if (d._status === 403) { fatal("Token rejected."); return; }
+    state.procs = d.procs || []; state.memory = d.memory || {};
+    document.getElementById("scanstatus").textContent = "processes refreshed " + new Date().toLocaleTimeString();
+    renderProcs();
+  }
+}
+function fatal(msg) { state.quit = true; document.getElementById("main").innerHTML = "<p class='refusal'>" + esc(msg) + "</p>"; }
+
+function schedule() {
+  clearTimeout(state.timer);
+  const ms = (state.tab === "cpu" || state.tab === "ram") ? 5000 : (state.scanning ? 3000 : 30000);
+  state.timer = setTimeout(async () => { await refresh(false); schedule(); }, ms);
+}
+
+function groupsOf(items) { return [...new Set(items.map(i => i.group))].sort(); }
+
+function renderItems() {
+  const main = document.getElementById("main");
+  const keep = document.activeElement && document.activeElement.id === "q";
+  let items = state.items.slice();
+  const groups = groupsOf(items);
+  if (state.group !== "all") items = items.filter(i => i.group === state.group);
+  if (state.tab === "disk" && state.minMB > 0) items = items.filter(i => i.size == null || i.size >= state.minMB * 1048576 || i.kind === "info");
+  if (state.q) { const q = state.q.toLowerCase(); items = items.filter(i => (i.label + " " + (i.note || "") + " " + JSON.stringify(i.details || {})).toLowerCase().includes(q)); }
+  const key = state.sort, dir = state.dir;
+  items.sort((a, b) => {
+    const va = key === "size" ? (a.size == null ? -1 : a.size) : String(a[key] || "").toLowerCase();
+    const vb = key === "size" ? (b.size == null ? -1 : b.size) : String(b[key] || "").toLowerCase();
+    return va < vb ? -dir : va > vb ? dir : 0;
+  });
+  const total = items.reduce((s, i) => s + (i.size || 0), 0);
+  const max = Math.max(1, ...items.map(i => i.size || 0));
+  let h = `<div class="bar">` +
+    `<button class="chip ${state.group === "all" ? "on" : ""}" data-group="all">all</button>` +
+    groups.map(g => `<button class="chip ${state.group === g ? "on" : ""}" data-group="${esc(g)}">${esc(g)}</button>`).join("") +
+    `<input type="search" id="q" placeholder="filter" value="${esc(state.q)}">` +
+    (state.tab === "disk" ? `<select id="min"><option value="0">all sizes</option><option value="100">≥ 100 MB</option><option value="1024">≥ 1 GB</option></select>` : "") +
+    `<span class="status">${items.length} items · ${fmt(total)}</span></div>`;
+  h += `<table><thead><tr>` +
+    `<th data-sort="label">Name</th><th data-sort="group">Group</th><th class="num" data-sort="size">Size</th><th class="det">Details</th><th></th></tr></thead><tbody>`;
+  for (const i of items) {
+    h += `<tr><td class="name">${esc(i.label)}${i.size ? `<div class="bar-fill" style="width:${Math.max(1, 100 * i.size / max).toFixed(1)}%"></div>` : ""}</td>` +
+      `<td><span class="tag">${esc(i.group)}</span></td>` +
+      `<td class="num">${i.kind === "info" && i.size == null ? "" : fmt(i.size)}${i.private != null ? `<div class="sub">private ${fmt(i.private)}</div>` : ""}</td>` +
+      `<td class="det">${details(i)}${state.answers[i.id] ? answerBlock(i.id) : ""}</td>` +
+      `<td class="acts">${actions(i)}</td></tr>`;
+  }
+  h += `</tbody></table>`;
+  main.innerHTML = h;
+  const min = document.getElementById("min"); if (min) { min.value = String(state.minMB); min.onchange = () => { state.minMB = +min.value; renderItems(); }; }
+  const q = document.getElementById("q"); q.oninput = () => { state.q = q.value; renderItems(); };
+  if (keep) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); }
+  for (const c of main.querySelectorAll("[data-group]")) c.onclick = () => { state.group = c.dataset.group; renderItems(); };
+  for (const th of main.querySelectorAll("th[data-sort]")) th.onclick = () => { const k = th.dataset.sort; state.dir = state.sort === k ? -state.dir : (k === "size" ? -1 : 1); state.sort = k; renderItems(); };
+  bindActions(main);
+}
+
+function details(i) {
+  const d = i.details || {}; const t = [];
+  if (d.branch) t.push(`<span class="tag">${esc(d.branch)}</span>`);
+  if (d.status) t.push(`<span class="tag ${d.status === "available" ? "good" : d.status === "leased" ? "warn" : "bad"}">${esc(d.status)}</span>`);
+  if (d.holder) t.push(`<span class="tag warn">held by ${esc(d.holder)}</span>`);
+  if (d.task) t.push(`<span class="tag warn">task ${esc(d.task)}</span>`);
+  if (d.dirty) t.push(`<span class="tag bad">${d.dirty} uncommitted</span>`);
+  else if (d.dirty === 0) t.push(`<span class="tag good">clean</span>`);
+  if (d.ahead) t.push(`<span class="tag">ahead ${d.ahead}</span>`);
+  if (d.behind) t.push(`<span class="tag">behind ${d.behind}</span>`);
+  if (d.processes) t.push(`<span class="tag bad">${d.processes} process(es)</span>`);
+  let s = t.join("");
+  if (d.last_commit) s += `<div class="sub">${esc(d.last_commit)}</div>`;
+  if (i.note) s += `<div class="sub">${esc(i.note)}</div>`;
+  if (i.kind === "task") s += `<div class="sub">${esc([d.branch, d.harness, d.model, d.worktree].filter(Boolean).join(" · "))}</div>`;
+  return s;
+}
+
+function actions(i) {
+  const a = [];
+  a.push(`<button class="b" data-act="ask" data-id="${i.id}">Ask AI</button>`);
+  if (i.path && i.kind !== "info" && i.kind !== "task" && i.kind !== "process") a.push(`<button class="b" data-act="private" data-id="${i.id}" title="APFS clone-aware: what deleting it frees at least">Private size</button>`);
+  if (i.action === "kill") a.push(`<button class="b danger" data-act="killitem" data-id="${i.id}">Kill…</button>`);
+  else if (i.action !== "none") a.push(`<button class="b danger" data-act="free" data-id="${i.id}">${i.action === "trash" ? "Trash…" : "Free…"}</button>`);
+  else if (i.kind === "task") a.push(`<button class="b" data-act="free" data-id="${i.id}" title="firstmate cleanup owns live tasks">Free…</button>`);
+  return a.join(" ");
+}
+
+function answerBlock(id) {
+  const a = state.answers[id];
+  if (a.state === "running") return `<div class="answer">Haiku is looking…</div>`;
+  return `<div class="answer">${esc(a.answer)}</div>` +
+    `<div style="margin-top:6px"><button class="b" data-act="handoff" data-id="${id}">Hand to firstmate…</button></div>`;
+}
+
+function bindActions(root) {
+  for (const b of root.querySelectorAll("[data-act]")) b.onclick = () => act(b.dataset.act, b.dataset.id, b.dataset);
+}
+
+function byId(id) { return state.items.find(i => i.id === id); }
+
+async function act(kind, id, ds) {
+  if (kind === "ask") return ask(id, { id }, "/api/ask");
+  if (kind === "private") { await api("/api/private-size", { id }); toast("Measuring private size in the background; it shows under the size when done."); return; }
+  if (kind === "free") return freeFlow(id, null);
+  if (kind === "handoff") return handoffFlow(id);
+  if (kind === "killitem") { const i = byId(id); return killFlow({ pid: i.pid, lstart: i.lstart, label: i.label, args: i.note }); }
+  if (kind === "kill") { const p = state.procs.find(p => String(p.pid) === ds.pid); if (p) return killFlow({ pid: p.pid, lstart: p.lstart, label: p.app + " pid " + p.pid, args: p.args, warnings: p.warnings }); }
+  if (kind === "askproc") return ask("proc-" + ds.pid, { pid: +ds.pid }, "/api/ask-process");
+  if (kind === "toggle") { state.open[ds.app] = !state.open[ds.app]; renderProcs(); }
+}
+
+async function ask(key, body, path) {
+  const r = await api(path, body);
+  if (!r.job) { toast(r.error || "Ask failed"); return; }
+  state.answers[key] = { state: "running" }; rerender();
+  for (let n = 0; n < 120; n++) {
+    await new Promise(res => setTimeout(res, 2000));
+    const j = await api("/api/ask/" + r.job);
+    if (j.state && j.state !== "running") { state.answers[key] = j; break; }
+  }
+  rerender();
+}
+function rerender() { if (state.tab === "cpu" || state.tab === "ram") renderProcs(); else renderItems(); }
+
+const dlg = document.getElementById("dlg");
+function openDialog(html) { document.getElementById("dlgbody").innerHTML = html; if (!dlg.open) dlg.showModal(); }
+function closeDialog() { dlg.close(); refresh(true); }
+function toast(msg) { openDialog(`<p>${esc(msg)}</p><button class="b" id="ok">OK</button>`); document.getElementById("ok").onclick = () => dlg.close(); }
+
+function planHtml(p) {
+  let h = "";
+  if (p.refusals && p.refusals.length) h += `<p><b class="refusal">Refused:</b></p><ul>${p.refusals.map(r => `<li class="refusal">${esc(r)}</li>`).join("")}</ul>`;
+  if (p.steps && p.steps.length) h += `<p><b>${p.refusals && p.refusals.length ? "Would do" : "Will do"}:</b></p><ul>${p.steps.map(s => `<li>${esc(s)}</li>`).join("")}</ul>`;
+  const f = p.facts || {};
+  if (f.ignored_deleted) h += `<p class="sub">Ignored files deleted with it (not backed up): ${esc(f.ignored_deleted.join(", "))}</p>`;
+  if (f.note) h += `<p class="sub">${esc(f.note)}</p>`;
+  return h;
+}
+
+async function freeFlow(id, mode) {
+  const i = byId(id); if (!i) return;
+  openDialog(`<h2>${esc(i.label)}</h2><p class="status">checking…</p>`);
+  const p = await api("/api/preview", { id, mode });
+  const canTrash = !mode && i.path && ["path", "worktree", "repo"].includes(i.kind) && i.action !== "trash" && !(p.refusals || []).some(r => /live firstmate task|protected path|leased by/.test(r));
+  let h = `<h2>${esc(i.label)}</h2><p class="sub">${esc(i.path || i.ref || "")} · ${fmt(i.size)}</p>` + planHtml(p);
+  h += `<div class="bar" style="margin-top:12px"><button class="b" id="cancel">Cancel</button>`;
+  if (p.ok) h += `<button class="b dangerfill" id="go">${mode === "trash" || i.action === "trash" ? "Move to Trash" : "Confirm"}</button>`;
+  if (!p.ok && canTrash) h += `<button class="b danger" id="trash">Move to Trash instead…</button>`;
+  h += `</div><div id="result"></div>`;
+  openDialog(h);
+  document.getElementById("cancel").onclick = closeDialog;
+  const t = document.getElementById("trash"); if (t) t.onclick = () => freeFlow(id, "trash");
+  const go = document.getElementById("go");
+  if (go) go.onclick = async () => {
+    go.disabled = true; go.textContent = "working…";
+    const r = await api("/api/free", { id, mode, confirm: true });
+    const res = document.getElementById("result");
+    if (r.ok) {
+      res.innerHTML = `<p style="color:var(--ok)">Done.</p>` +
+        (r.pushed && r.pushed.length ? `<p>Pushed: ${r.pushed.map(u => `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u)}</a>`).join(", ")}</p>` : "") +
+        (r.log ? `<p class="sub">Logged in ${esc(r.log)}</p>` : "");
+    } else {
+      res.innerHTML = `<p class="refusal">${esc(r.error || "failed")}</p>` + (r.plan ? planHtml(r.plan) : "");
+    }
+    go.remove(); document.getElementById("cancel").textContent = "Close";
+  };
+}
+
+function handoffFlow(id) {
+  const a = state.answers[id] || {};
+  const label = (byId(id) || {}).label || id;
+  openDialog(`<h2>Hand to firstmate</h2><p class="sub">Writes a note to firstmate's inbox asking it to investigate ${esc(label)}. Nothing is deleted or started from here.</p>` +
+    `<textarea id="note" rows="4" style="width:100%" placeholder="What do you want to know?"></textarea>` +
+    `<div class="bar" style="margin-top:10px"><button class="b" id="cancel">Cancel</button><button class="b primary" id="send">Send note</button></div><div id="result"></div>`);
+  document.getElementById("cancel").onclick = closeDialog;
+  document.getElementById("send").onclick = async () => {
+    const body = { id, answer: a.answer || "", note: document.getElementById("note").value };
+    if (id.startsWith("proc-")) { body.pid = id.slice(5); body.id = ""; }
+    const r = await api("/api/handoff", body);
+    document.getElementById("result").innerHTML = r.ok ? `<p style="color:var(--ok)">Sent. ${esc(r.output || "")}</p>` : `<p class="refusal">${esc(r.error || "failed")}</p>`;
+  };
+}
+
+async function killFlow(p) {
+  const warn = p.warnings && p.warnings.length ? `<p class="refusal"><b>Warning:</b></p><ul>${p.warnings.map(w => `<li class="refusal">${esc(w)}</li>`).join("")}</ul><label><input type="checkbox" id="ack"> I understand, kill it anyway</label>` : "";
+  openDialog(`<h2>Kill ${esc(p.label)}?</h2><p class="sub">${esc(p.args || "")}</p>${warn}` +
+    `<p>Sends SIGTERM (asks the process to quit). If it survives, a second confirmation offers SIGKILL.</p>` +
+    `<div class="bar"><button class="b" id="cancel">Cancel</button><button class="b dangerfill" id="term">Send SIGTERM</button></div><div id="result"></div>`);
+  document.getElementById("cancel").onclick = closeDialog;
+  const ack = () => { const a = document.getElementById("ack"); return a ? a.checked : false; };
+  document.getElementById("term").onclick = async () => {
+    let r = await api("/api/kill", { pid: p.pid, lstart: p.lstart, signal: "TERM", ack_warning: ack() });
+    if (r.warnings) { r = { error: "Tick the warning box first." }; }
+    const res = document.getElementById("result");
+    if (!r.ok) { res.innerHTML = `<p class="refusal">${esc(r.error)}</p>`; return; }
+    document.getElementById("term").remove();
+    if (!r.alive) { res.innerHTML = `<p style="color:var(--ok)">Process exited.</p>`; document.getElementById("cancel").textContent = "Close"; return; }
+    res.innerHTML = `<p class="refusal">Still running after SIGTERM.</p><button class="b dangerfill" id="kill">Force kill (SIGKILL)…</button>`;
+    document.getElementById("kill").onclick = async () => {
+      if (!confirm("SIGKILL cannot be caught: the process loses unsaved work. Kill it?")) return;
+      const k = await api("/api/kill", { pid: p.pid, lstart: p.lstart, signal: "KILL", ack_warning: ack() });
+      res.innerHTML = k.ok ? `<p style="color:var(--ok)">${k.alive ? "Signal sent; still visible, refresh shortly." : "Process killed."}</p>` : `<p class="refusal">${esc(k.error)}</p>`;
+      document.getElementById("cancel").textContent = "Close";
+    };
+  };
+}
+
+function renderProcs() {
+  const main = document.getElementById("main");
+  const metric = state.tab === "cpu" ? "cpu" : "rss";
+  const groups = {};
+  for (const p of state.procs) { (groups[p.app] = groups[p.app] || { app: p.app, cpu: 0, rss: 0, procs: [] }); const g = groups[p.app]; g.cpu += p.cpu; g.rss += p.rss; g.procs.push(p); }
+  const list = Object.values(groups).sort((a, b) => b[metric] - a[metric]).slice(0, 60);
+  const m = state.memory;
+  let h = "";
+  if (state.tab === "ram") {
+    h += `<div class="mem"><div>Total<b>${fmt(m.total)}</b></div><div>Free<b>${fmt(m.free)}</b></div><div>Wired<b>${fmt(m.wired)}</b></div><div>Compressed<b>${fmt(m.compressed)}</b></div><div>Swap<b style="font-size:13px">${esc(m.swap || "")}</b></div></div>`;
+  } else {
+    const tot = state.procs.reduce((s, p) => s + p.cpu, 0);
+    h += `<div class="mem"><div>Total CPU (all cores)<b>${tot.toFixed(0)}%</b></div></div>`;
+  }
+  const max = Math.max(1, ...list.map(g => g[metric]));
+  h += `<table><thead><tr><th>App</th><th class="num">Procs</th><th class="num">CPU %</th><th class="num">Memory</th><th></th></tr></thead><tbody>`;
+  for (const g of list) {
+    const w = g.procs.some(p => p.warnings && p.warnings.length);
+    h += `<tr><td class="name"><a href="#" data-act="toggle" data-app="${esc(g.app)}">${state.open[g.app] ? "▾" : "▸"} ${esc(g.app)}</a>${w ? ` <span class="tag warn">firstmate / tmux / agent</span>` : ""}` +
+      `<div class="bar-fill" style="width:${(100 * g[metric] / max).toFixed(1)}%"></div></td>` +
+      `<td class="num">${g.procs.length}</td><td class="num">${g.cpu.toFixed(1)}</td><td class="num">${fmt(g.rss)}</td><td></td></tr>`;
+    if (state.open[g.app]) {
+      for (const p of g.procs.sort((a, b) => b[metric] - a[metric])) {
+        const key = "proc-" + p.pid;
+        h += `<tr class="child"><td class="name"><span class="sub">pid ${p.pid}</span> ${esc(p.args.slice(0, 200))}` +
+          (p.warnings.length ? `<div>${p.warnings.map(x => `<span class="tag warn">${esc(x)}</span>`).join("")}</div>` : "") +
+          (state.answers[key] ? answerBlock(key) : "") + `</td>` +
+          `<td></td><td class="num">${p.cpu.toFixed(1)}</td><td class="num">${fmt(p.rss)}</td><td class="acts">` +
+          `<button class="b" data-act="askproc" data-pid="${p.pid}">Ask AI</button> ` +
+          (p.killable ? `<button class="b danger" data-act="kill" data-pid="${p.pid}">Kill…</button>` : `<span class="sub">not yours</span>`) + `</td></tr>`;
+      }
+    }
+  }
+  h += `</tbody></table>`;
+  main.innerHTML = h;
+  for (const a of main.querySelectorAll("a[data-act]")) a.onclick = e => { e.preventDefault(); act("toggle", null, a.dataset); };
+  for (const b of main.querySelectorAll("button[data-act]")) b.onclick = () => act(b.dataset.act, b.dataset.id, b.dataset);
+}
+
+refresh(true).then(schedule);
+</script>
+</body>
+</html>
