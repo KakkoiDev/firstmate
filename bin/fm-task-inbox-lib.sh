@@ -100,6 +100,15 @@ fm_task_inbox_dir() {  # <state-dir> <task-id>
   printf '%s/%s.inbox' "$1" "$2"
 }
 
+# Count of records still unhandled in the task's inbox root (handled/ excluded).
+fm_task_inbox_unhandled_count() {  # <state-dir> <task-id>
+  local f n=0
+  for f in "$(fm_task_inbox_dir "$1" "$2")"/*.msg; do
+    [ -e "$f" ] && n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+
 fm_task_inbox_handled_dir() {  # <state-dir> <task-id>
   printf '%s/%s.inbox/handled' "$1" "$2"
 }

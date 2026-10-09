@@ -7,7 +7,7 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>] [--worker-state <state>]
 #                                         (--note <text> | --note-file <path>)
-#   --worker-state <working|idle-done|waiting-on-answered-question|looping|confused|unresponsive>
+#   --worker-state <one of the ids in fm_jev_gate_option_lines stuck-worker>
 #   is required for an interrupt or relaunch of a crewmate or scout;
 #   control_jev_gate below owns the ask.
 #
@@ -322,11 +322,12 @@ fm_lease_guard "$ID" "lifecycle control (fm-control)"
 
 # Jev decision gate (bin/fm-jev-gate-lib.sh owns the ask and the refusal): an
 # interrupt or relaunch of a crewmate or scout carries firstmate's stuck-worker
-# reading as --worker-state, asked with the task's brief, recent status lines,
-# and any relaunch note as context before the control lock is taken. The
+# reading as --worker-state, asked with the task's brief, its current state
+# (crew-state line, unread inbox count, endpoint screen tail), recent status
+# lines, and any relaunch note as context before the control lock is taken. The
 # action runs whatever the answer; an acting "working" prints a notice.
 control_jev_gate() {
-  local ctx lines note_file kind
+  local ctx lines note_file live kind
   fm_jev_gate_enabled || return 0
   case "$VERB" in interrupt|relaunch) ;; *) return 0 ;; esac
   [ -f "$STATE/$ID.meta" ] || return 0
@@ -339,12 +340,14 @@ control_jev_gate() {
   ctx=$(mktemp) || fm_jev_gate_refuse fm-control.sh "mktemp failed; nothing was changed"
   lines=$(mktemp) || { rm -f "$ctx"; fm_jev_gate_refuse fm-control.sh "mktemp failed; nothing was changed"; }
   note_file=$(mktemp) || { rm -f "$ctx" "$lines"; fm_jev_gate_refuse fm-control.sh "mktemp failed; nothing was changed"; }
+  live=$(mktemp) || { rm -f "$ctx" "$lines" "$note_file"; fm_jev_gate_refuse fm-control.sh "mktemp failed; nothing was changed"; }
   tail -n 20 "$STATE/$ID.status" > "$lines" 2>/dev/null || true
   printf '%s\n' "$NOTE" > "$note_file"
-  fm_jev_gate_context "$ctx" "$DATA/$ID/brief.md" "Recent status lines" "$lines" "Relaunch note" "$note_file"
+  fm_jev_gate_live_state "$live" "$ID" "$STATE"
+  fm_jev_gate_context "$ctx" "$DATA/$ID/brief.md" "Current state" "$live" "Recent status lines, an event log" "$lines" "Relaunch note" "$note_file"
   fm_jev_gate_ask fm-control.sh stuck-worker "$WORKER_STATE" \
     "Which state best describes the worker of task $ID before this $VERB" "$ctx"
-  rm -f "$ctx" "$lines" "$note_file"
+  rm -f "$ctx" "$lines" "$note_file" "$live"
   [ "$FM_JEV_GATE_ACTING" != working ] \
     || echo "fm-control.sh: the worker of $ID reads as working; this $VERB goes ahead as asked" >&2
 }

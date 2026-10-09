@@ -48,7 +48,7 @@ Options in angle brackets are filled from the live registry or fleet at the time
 | `effort-level` | `fm-spawn.sh`, from `--effort` or `default` | Which reasoning effort fits this task? | `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, `default` |
 | `dispatch-rule` | `bin/fm-dispatch-resolve.sh` itself | the rule match | record with `record-mine latest:dispatch-rule <rule_N or default>` |
 | `mid-task-ask` | `fm-send.sh --mid-task-ask <choice>`, or `--not-a-decision` for a steer that answers nothing | Does this mid-task ask invalidate the work under way, or is it a follow-up or downstream correction? | `invalidates`, `follow-up`, `downstream-correction` |
-| `stuck-worker` | `fm-control.sh <id> interrupt\|relaunch --worker-state <choice>` | Which state best describes this worker? | `working`, `idle-done`, `waiting-on-answered-question`, `looping`, `confused`, `unresponsive` |
+| `stuck-worker` | `fm-control.sh <id> interrupt\|relaunch --worker-state <choice>` | Which state best describes this worker? | `working`, `idle-done`, `waiting-on-answered-question`, `looping`, `confused`, `unresponsive`, `parked-at-decision`, `blocked`, `paused-declared-wait`, `failed`, `waiting-on-prompt`, `unread-instructions`, `held-for-captain`, `endpoint-gone`, `state-unknown` (`bin/fm-jev-gate-lib.sh` owns each id's meaning and source; the ask carries the live crew-state line, unread inbox count, and screen tail) |
 | `merge-risk` | `fm-pr-merge.sh` and `fm-merge-local.sh --merge-risk <yes\|no>` | Is this merge destructive, irreversible, or security-sensitive? | yes/no |
 | `report-has-captain-call` | `fm-teardown.sh` for a scout, `--report-has-captain-call <yes\|no>` | Does this report contain a call only the human operator can make? | yes/no |
 | `scout-recommends-ship` | `fm-teardown.sh` for a scout, `--scout-recommends-ship <yes\|no>` | Does this scout report recommend shippable work? | yes/no |
@@ -56,6 +56,7 @@ Options in angle brackets are filled from the live registry or fleet at the time
 | `finding-authority` | you, manually, in `ask-user-authority` | How should this review finding be handled? | `decide-in-scope`, `escalate-expansion`, `escalate-product-call`, `escalate-same-theme`, `escalate-destructive` |
 | `heartbeat-suspicious` | you, manually, per task on a heartbeat | Does this task look suspicious enough to inspect now? | yes/no |
 
+Every script-embedded ask sends a one-line meaning with each option; pass `--option <id>=<meaning>` on a manual ask the same way.
 The three manual types have no script boundary to enforce them; ask them with `--mine` as in step 3.
 `merge-risk`, `finding-authority`, `report-has-captain-call`, and `mid-task-ask` are never handed to Jev, so firstmate's own choice always acts on them.
 For `report-has-captain-call`, a Jev answer can only add candidates to your inventory; it never closes or skips the inventory `captain-hold-lifecycle` requires.
