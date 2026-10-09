@@ -149,6 +149,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/disk-lens/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-codexapp/SKILL.md",
       "audience": "agent-runtime"
     },

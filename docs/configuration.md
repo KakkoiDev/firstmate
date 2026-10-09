@@ -3003,6 +3003,14 @@ The two read files use different parsing rules:
 
 `FM_VOICE_RELAY` and `FM_VOICE_PYTHON` belong to the laptop rather than to a home, so they have no config file: `bin/fm-voice-client.py` requires the relay path as a flag or that variable and carries no default path.
 
+## Disk-lens backup-log mirror (config/disk-lens-log-repo)
+
+The optional local, gitignored `config/disk-lens-log-repo` file makes disk-lens also keep its worktree and repo backup log in a git repository of the captain's choice, in addition to `data/disk-lens/backup-log.md`.
+It holds `key=value` lines: `repo=<local checkout>` is required, and `remote` (default `origin`), `branch` (default `master`), and `file` (default `firstmate/disk-lens-backup-log.md`) are optional.
+Each removal through disk-lens commits only that file on top of the remote branch and pushes it without force, without touching the checkout's working tree, index, or current branch; a failed push leaves the worktree or repo in place.
+With the file absent, the local log is the only copy.
+`bin/fm-disk-lens.py`'s header owns the exact mechanics, and the `disk-lens` skill owns when firstmate opens disk-lens.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
