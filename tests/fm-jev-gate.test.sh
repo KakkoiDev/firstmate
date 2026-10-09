@@ -32,7 +32,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
-cat > /dev/null
+cat > "${FAKE_CURL_LOG:?}/body"
 [ -z "${FAKE_CURL_USAGE:-}" ] || cp "$FAKE_CURL_USAGE" "$FAKE_CURL_LOG/usage-at-post" 2>/dev/null || true
 cp "${FAKE_CURL_RESPONSE:?}" "$out"
 printf '200'
@@ -42,7 +42,7 @@ cat > "$FAKEBIN/tmux" <<'SH'
 printf '%s\n' "$*" >> "${FAKE_CURL_LOG:?}/tmux"
 case "${1:-}" in
   display-message) printf 'fakepane\n' ;;
-  capture-pane) printf '\n' ;;
+  capture-pane) printf '%s\n' "${FAKE_TMUX_SCREEN:-}" ;;
   list-windows) printf 'fm-t1\n' ;;
 esac
 exit 0
@@ -191,16 +191,93 @@ pass "fm-teardown refuses a scout cleanup until both report calls are declared"
 
 # --- fm-control -------------------------------------------------------------
 
+STUCK_IDS='working idle-done waiting-on-answered-question looping confused unresponsive parked-at-decision blocked paused-declared-wait failed waiting-on-prompt unread-instructions held-for-captain endpoint-gone state-unknown'
+STUCK_IDS_PIPED=${STUCK_IDS// /|}
+
 H=$(new_home control ship)
 for verb in interrupt relaunch; do
   run "$H" code out -- fm-control.sh t1 "$verb"
   expect_code 2 "$code" "$verb without --worker-state"
-  assert_contains "$out" "fm-control.sh: refused: $verb needs --worker-state <working|idle-done|waiting-on-answered-question|looping|confused|unresponsive>" "$verb refusal"
+  assert_contains "$out" "fm-control.sh: refused: $verb needs --worker-state <$STUCK_IDS_PIPED>" "$verb refusal"
   [ ! -s "$LOG/tmux" ] || fail "a refused $verb touched tmux: $(cat "$LOG/tmux")"
 done
 run "$H" code out -- fm-control.sh t1 interrupt --worker-state stuck
 expect_code 2 "$code" "invalid --worker-state"
 pass "fm-control refuses interrupt and relaunch without a valid worker state, touching nothing"
+
+# write_response_all <choice> <id>...: an answer whose probabilities cover every option.
+write_response_all() {
+  local choice=$1
+  shift
+  printf '%s\n' "$@" | jq -Rn --arg c "$choice" '
+    [inputs] as $ids |
+    {model: "jev-1.13.0",
+     answers: {q: {type: "choice", choice: $c, confidence: 0.9,
+       probabilities: ([$ids[] | {key: ., value: (if . == $c then 0.9 else (0.1 / (($ids | length) - 1)) end)}] | from_entries)}},
+     usage: {input_tokens: 420, output_tokens: 55}}' > "$RESPONSE"
+}
+# meanings_ok <body-file>: every option id carries a meaning that is not the id or a bare Yes/No.
+meanings_ok() {
+  jq -e '.questions.q.criteria | all(to_entries[]; .value != .key and (.value | length) > 12)' "$1" >/dev/null
+}
+
+H=$(new_home live ship)
+fm_write_meta "$H/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude" "worktree=$H/wt" "project=$H/proj"
+mkdir -p "$H/wt"
+mkdir -p "$H/state/t1.inbox/handled"
+printf 'a\n' > "$H/state/t1.inbox/001.msg"
+printf 'b\n' > "$H/state/t1.inbox/002.msg"
+printf 'c\n' > "$H/state/t1.inbox/handled/000.msg"
+printf '%s\n' 'done [at=1]: ready in branch fm/t1' > "$H/state/t1.status"
+# shellcheck disable=SC2086
+write_response_all unread-instructions $STUCK_IDS
+run "$H" code out TYPESAFE_API_KEY="$KEY" FAKE_TMUX_SCREEN='Allow this bash command? (y/n)' -- fm-control.sh t1 interrupt --worker-state unread-instructions
+assert_not_contains "$out" "refused:" "a state firstmate distinguishes is a valid --worker-state"
+assert_contains "$out" "jev stuck-worker decision " "the stuck-worker ask went out with the new state"
+# shellcheck disable=SC2086
+[ "$(jq -c '.questions.q.criteria | keys_unsorted' "$LOG/body")" = "$(printf '%s\n' $STUCK_IDS | jq -Rn -c '[inputs]')" ] \
+  || fail "the stuck-worker choice list is not the full state set: $(jq -c '.questions.q.criteria | keys_unsorted' "$LOG/body")"
+pass "fm-control accepts every state firstmate distinguishes and sends them all as options"
+
+meanings_ok "$LOG/body" || fail "a stuck-worker option goes out without a meaning: $(jq -c '.questions.q.criteria' "$LOG/body")"
+assert_contains "$(jq -r '.questions.q.criteria["waiting-on-prompt"]' "$LOG/body")" "permission" "the prompt option names a permission dialog"
+pass "every stuck-worker option carries a one-line meaning"
+
+LIVE_CTX=$(jq -r '.state.context' "$LOG/body")
+assert_contains "$LIVE_CTX" $'Current state:\nRead just now; it outranks every status line' "the context labels the live state"
+assert_contains "$LIVE_CTX" "state: unknown · source: pane" "the context carries the crew-state line"
+assert_contains "$LIVE_CTX" "Unread steering-inbox messages for this worker, read just now: 2" "the context counts the unread inbox records, not handled ones"
+assert_contains "$LIVE_CTX" "Allow this bash command? (y/n)" "the context carries the endpoint screen tail"
+assert_contains "$LIVE_CTX" "done [at=1]: ready in branch fm/t1" "the old status line is still sent, as an event log"
+case "$LIVE_CTX" in
+  *"Current state:"*"Recent status lines, an event log"*) ;;
+  *) fail "the live state must come before the status lines: $LIVE_CTX" ;;
+esac
+pass "the stuck-worker context carries crew-state, the unread inbox count, and the screen tail ahead of the status lines"
+
+H=$(new_home meanings ship)
+write_response_all follow-up invalidates follow-up downstream-correction
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-send.sh t1 --mid-task-ask follow-up "Also cover the logout path."
+assert_contains "$out" "jev mid-task-ask decision " "the mid-task ask went out"
+meanings_ok "$LOG/body" || fail "a mid-task-ask option goes out without a meaning: $(jq -c '.questions.q.criteria' "$LOG/body")"
+write_response_all no yes no
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-merge-local.sh t1 --merge-risk no
+assert_contains "$out" "jev merge-risk decision " "the merge-risk ask went out"
+meanings_ok "$LOG/body" || fail "a merge-risk option goes out without a meaning: $(jq -c '.questions.q.criteria' "$LOG/body")"
+printf -- '- spawn-proj [x]\n' > "$H/data/projects.md"
+printf -- '- mate-one [scope: x]\n' > "$H/data/secondmates.md"
+SELF_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+for qtype in project-match deliverable-class secondmate-scope surface-class concurrency effort-level mid-task-ask \
+  report-has-captain-call scout-recommends-ship merge-risk stuck-worker; do
+  lines=$(bash -c 'SCRIPT_DIR=$1/bin; FM_HOME=$2; . "$1/bin/fm-jev-gate-lib.sh"; fm_jev_gate_option_lines "$3"' _ "$SELF_ROOT" "$H" "$qtype") \
+    || fail "$qtype has no option lines"
+  [ -n "$lines" ] || fail "$qtype has no option lines"
+  while IFS= read -r line; do
+    meaning=${line#*=}
+    [ "$meaning" != "$line" ] && [ "${#meaning}" -gt 12 ] || fail "$qtype option line has no meaning: '$line'"
+  done <<<"$lines"
+done
+pass "every script-embedded ask sends a one-line meaning with each option"
 
 # --- merges -----------------------------------------------------------------
 

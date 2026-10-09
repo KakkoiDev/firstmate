@@ -27,6 +27,8 @@
 # FM_JEV_GATE=off disables every gate, so no argument is required and nothing
 #   is asked. The test suite exports it; internal callers that cross an action
 #   boundary pass explicit values instead.
+# Every option goes out as id=meaning, so Jev reads what each id stands for;
+#   the meanings live in fm_jev_gate_option_lines next to the choice lists.
 # The context a script builds is whole: the extra texts come first, then the
 #   brief's task sections. It reaches bin/fm-jev.sh as a --source file, after
 #   the operator's words for the turn that bin/fm-jev.sh adds itself.
@@ -35,6 +37,8 @@
 declare -F fm_brief_task_heading_body >/dev/null || . "$SCRIPT_DIR/fm-brief-heading-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 declare -F secondmate_registry_parse_line >/dev/null || . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+declare -F fm_task_inbox_unhandled_count >/dev/null || . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 FM_JEV_GATE_ID='' FM_JEV_GATE_ACTING='' FM_JEV_GATE_DECIDER=''
 
@@ -42,7 +46,7 @@ fm_jev_gate_enabled() {
   [ "${FM_JEV_GATE:-on}" != off ]
 }
 
-# Question wording per type; yes/no types print "yes-no" as their options.
+# Question wording per type.
 fm_jev_gate_question() {  # <type>
   case "$1" in
     project-match) printf 'Which registered project is this request about?' ;;
@@ -60,21 +64,108 @@ fm_jev_gate_question() {  # <type>
   esac
 }
 
-# Options per type, one id per line; project-match and secondmate-scope read
-# the live registries.
-fm_jev_gate_options() {  # <type>
+# Options per type as "id=meaning" lines, one per option; project-match and
+# secondmate-scope read the live registries. Each meaning is one line.
+# stuck-worker names every state firstmate itself distinguishes, from:
+#   working, parked, blocked, paused, done, failed, unknown - the states
+#     bin/fm-crew-state.sh reports; parked is its needs-decision or
+#     awaiting-approval gate, paused the declared-wait verb of
+#     bin/fm-classify-lib.sh;
+#   held-for-captain - bin/fm-classify-lib.sh's captain-held verb;
+#   waiting-on-prompt - the interactive launch prompt fm_busy_launch_prompt_parked
+#     in bin/fm-busy-lib.sh recognizes; that detector covers trust, sign-in, and
+#     import dialogs only, and no code detects a mid-run tool permission prompt,
+#     so the choice is read from the screen tail the ask carries;
+#   unread-instructions - an unhandled record in the task's steering inbox
+#     (bin/fm-task-inbox-lib.sh);
+#   endpoint-gone - the recorded endpoint or its agent is gone, the positive
+#     death evidence bin/fm-crew-state.sh reports.
+# The first six ids predate the rest and stay valid for recorded decisions.
+fm_jev_gate_option_lines() {  # <type>
+  local id
   case "$1" in
-    project-match) fm_jev_gate_projects; printf 'none\nseveral\n' ;;
-    deliverable-class) printf 'ship\nscout\nanswer-from-evidence\n' ;;
-    secondmate-scope) fm_jev_gate_secondmates; printf 'main\n' ;;
-    surface-class) printf 'internal-only\nproduct-facing\nmixed\nuncertain\n' ;;
-    concurrency) printf 'parallel\nsemantic-dependency\nshared-external-state\nmigration-conflict\n' ;;
-    effort-level) printf 'low\nmedium\nhigh\nxhigh\nmax\nultra\ndefault\n' ;;
-    mid-task-ask) printf 'invalidates\nfollow-up\ndownstream-correction\n' ;;
-    report-has-captain-call|scout-recommends-ship|merge-risk) printf 'yes-no\n' ;;
-    stuck-worker) printf 'working\nidle-done\nwaiting-on-answered-question\nlooping\nconfused\nunresponsive\n' ;;
+    project-match)
+      while IFS= read -r id; do
+        [ -z "$id" ] || printf '%s=The request is about the registered project %s.\n' "$id" "$id"
+      done < <(fm_jev_gate_projects)
+      printf 'none=No registered project fits the request.\nseveral=More than one registered project fits the request.\n'
+      ;;
+    deliverable-class)
+      printf '%s\n' \
+        'ship=A project change delivered through the selected delivery mode.' \
+        'scout=Knowledge delivered as a report, with no project change.' \
+        'answer-from-evidence=Answerable from a finished worker report or text the captain supplied, with no fresh read.'
+      ;;
+    secondmate-scope)
+      while IFS= read -r id; do
+        [ -z "$id" ] || printf '%s=Route the work to the persistent secondmate %s.\n' "$id" "$id"
+      done < <(fm_jev_gate_secondmates)
+      printf 'main=No secondmate scope fits, so the main home takes the work.\n'
+      ;;
+    surface-class)
+      printf '%s\n' \
+        'internal-only=Internal tooling, automation, contributor or operator process, or release work.' \
+        'product-facing=A change the product shows its users.' \
+        'mixed=Touches both internal and product-facing surface.' \
+        'uncertain=The evidence does not settle the surface.'
+      ;;
+    concurrency)
+      printf '%s\n' \
+        'parallel=Independent of work under way, so it can run now beside it.' \
+        'semantic-dependency=Needs the result of work under way before it can start.' \
+        'shared-external-state=Mutates external state that work under way also uses.' \
+        'migration-conflict=Conflicts with a migration running concurrently.'
+      ;;
+    effort-level)
+      printf '%s\n' \
+        'low=Well-understood explicit work.' \
+        'medium=Moderate work between low and high.' \
+        'high=Substantial work that needs careful reasoning.' \
+        'xhigh=Ambiguous investigation or design.' \
+        'max=Strongest reasoning, used only on an explicit captain preference.' \
+        'ultra=Native-only effort above max, on profiles that support it.' \
+        'default=No explicit effort; the harness default applies.'
+      ;;
+    mid-task-ask)
+      printf '%s\n' \
+        'invalidates=The ask makes the work under way wrong or moot, so it must restart or be rescoped.' \
+        'follow-up=The ask adds new work and leaves the work under way valid.' \
+        'downstream-correction=The ask corrects text or evidence to match behavior already accepted; the work under way stands.'
+      ;;
+    report-has-captain-call)
+      printf 'yes=The report holds a call only the human operator can make.\nno=The report holds no call reserved for the human operator.\n'
+      ;;
+    scout-recommends-ship)
+      printf 'yes=The scout report recommends shippable work.\nno=The scout report recommends no shippable work.\n'
+      ;;
+    merge-risk)
+      printf 'yes=The merge is destructive, irreversible, or security-sensitive.\nno=The merge is none of destructive, irreversible, or security-sensitive.\n'
+      ;;
+    stuck-worker)
+      printf '%s\n' \
+        'working=The worker is making progress: its harness is busy or a validation step is running.' \
+        'idle-done=The worker finished its task and sits idle.' \
+        'waiting-on-answered-question=The worker is idle on a question its instructions or a steer already answered.' \
+        'looping=The worker repeats one failed step.' \
+        'confused=The worker misreads its task or works on the wrong thing.' \
+        'unresponsive=The worker is alive but does not react to steers.' \
+        'parked-at-decision=The worker is stopped at an open needs-decision or a validation gate awaiting approval.' \
+        'blocked=The worker declared it is blocked and needs help.' \
+        'paused-declared-wait=The worker declared a wait expected to clear on its own.' \
+        'failed=The worker or its validation run ended in failure.' \
+        'waiting-on-prompt=The worker is stopped at an interactive prompt, such as a trust, sign-in, or permission dialog, that needs a human key press.' \
+        'unread-instructions=The worker has instructions waiting unread in its steering inbox.' \
+        'held-for-captain=The task is held for the captain, so an idle worker is expected.' \
+        'endpoint-gone=The worker endpoint or its agent process is gone.' \
+        'state-unknown=No current-state source answers, so the state cannot be told.'
+      ;;
     *) return 1 ;;
   esac
+}
+
+# Options per type, one id per line.
+fm_jev_gate_options() {  # <type>
+  fm_jev_gate_option_lines "$1" | sed 's/=.*//'
 }
 
 # Registered project names from data/projects.md: the text after "- " up to
@@ -99,24 +190,22 @@ fm_jev_gate_secondmates() {
 }
 
 fm_jev_gate_option_args() {  # <type>: prints the fm-jev.sh option arguments, one per line
-  local opt
-  while IFS= read -r opt; do
-    [ -n "$opt" ] || continue
-    if [ "$opt" = yes-no ]; then printf -- '--yes-no\n'; else printf -- '--option\n%s\n' "$opt"; fi
-  done < <(fm_jev_gate_options "$1")
+  local line
+  while IFS= read -r line; do
+    [ -z "$line" ] || printf -- '--option\n%s\n' "$line"
+  done < <(fm_jev_gate_option_lines "$1")
 }
 
 fm_jev_gate_is_option() {  # <type> <value>
   local opt
   while IFS= read -r opt; do
-    if [ "$opt" = yes-no ]; then case "$2" in yes|no) return 0 ;; esac; fi
     [ "$opt" != "$2" ] || return 0
   done < <(fm_jev_gate_options "$1")
   return 1
 }
 
 fm_jev_gate_choices() {  # <type>: the option ids as one "a|b|c" string
-  fm_jev_gate_options "$1" | sed 's/^yes-no$/yes|no/' | paste -sd'|' -
+  fm_jev_gate_options "$1" | paste -sd'|' -
 }
 
 # fm_jev_gate_context <out-file> <brief-or-report> [<label> <file>]...
@@ -142,14 +231,35 @@ fm_jev_gate_context() {
   } > "$out"
 }
 
+# fm_jev_gate_live_state <out-file> <task-id> <state-dir>
+# Writes the worker's state as read now: bin/fm-crew-state.sh's line, the
+# unread steering-inbox count, and the tail of the endpoint screen, each
+# labelled, so a stale status line cannot outweigh them. A part that cannot be
+# read says so instead of being left out.
+fm_jev_gate_live_state() {
+  local out=$1 id=$2 state=$3 line unread tail_lines=${FM_JEV_GATE_SCREEN_TAIL_LINES:-25} screen=''
+  line=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$state "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>&1 | head -n 3) || line=''
+  [ -n "$line" ] || line='state: unknown · source: none · fm-crew-state.sh printed nothing'
+  unread=$(fm_task_inbox_unhandled_count "$state" "$id")
+  if fm_backend_validate_task_endpoint "$state/$id.meta" "$id" >/dev/null 2>&1; then
+    screen=$(fm_backend_capture "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET" "$tail_lines" "fm-$id" 2>/dev/null) || screen=''
+  fi
+  {
+    printf 'Read just now; it outranks every status line below, which is an event log and can be stale:\n%s\n\n' "$line"
+    printf 'Unread steering-inbox messages for this worker, read just now: %s\n\n' "$unread"
+    printf 'Endpoint screen tail, last %s lines, read just now:\n' "$tail_lines"
+    if [ -n "$screen" ]; then printf '%s\n' "$screen"; else printf '(the endpoint screen could not be read)\n'; fi
+  } > "$out"
+}
+
 # The exact command firstmate runs for a choice asked before the script.
 fm_jev_gate_ask_command() {  # <type>
   local cmd opt
   cmd="bin/fm-jev.sh ask --type $1 --summary \"<one line naming the request>\" --question \"$(fm_jev_gate_question "$1")\""
   while IFS= read -r opt; do
     [ -n "$opt" ] || continue
-    if [ "$opt" = yes-no ]; then cmd="$cmd --yes-no"; else cmd="$cmd --option $opt"; fi
-  done < <(fm_jev_gate_options "$1")
+    cmd="$cmd --option $(printf '%q' "$opt")"
+  done < <(fm_jev_gate_option_lines "$1")
   printf '%s --source <file holding the raw evidence: status lines, brief, report, or script output> --mine <your choice>' "$cmd"
 }
 

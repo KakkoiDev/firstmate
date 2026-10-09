@@ -81,6 +81,7 @@ Escalate in order:
 2. If the crewmate is waiting on a question its brief already answers, follow the [T3 pending-request procedure](../../../docs/t3code-backend.md#push-events-and-polling-fallback) for a T3 runtime request.
    On pane backends, answer in one line via `FM_HOME=<this-firstmate-home> bin/fm-send.sh` from an active firstmate session unless `FM_HOME` is already set to the active firstmate home.
 3. If the crewmate is confused or looping, interrupt with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> interrupt --worker-state <confused|looping>`, then redirect with one corrective line through `fm-send`.
+   Pick `--worker-state` from the state you just read, not from the last status line: a worker at a permission or trust prompt is `waiting-on-prompt`, and one with unhandled inbox records is `unread-instructions`; `bin/fm-jev-gate-lib.sh` owns the full state list.
 4. If the crewmate is genuinely wedged after redirection and its backend supports a replacement, relaunch it with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> relaunch --worker-state <state> --note '<progress so far>'`, which stops the agent, carries the brief plus that note into a replacement in the same local copy, and restores the prior record if the replacement cannot start.
    On T3 Code, do not relaunch; preserve the task and report the stuck thread with its current server status for operator action.
    Pass `--harness`, `--model`, or `--effort` on that same command when the worker should come back on a different runtime.
