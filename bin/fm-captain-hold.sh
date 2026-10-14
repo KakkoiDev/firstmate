@@ -157,6 +157,14 @@
 # a single row still held for the captain; two such rows refuse rather than
 # attest, and `complete` names each prefix-resolved row beside its attested
 # legacy id so the guess stays auditable.
+# On the markdown backend a closed row is pruned out of the live backlog into
+# the configured archive (`[markdown] archive` in the backlog root's
+# .tasks.toml, else done-archive.md beside the backlog), where `show` cannot
+# read it. An entry that resolves to no live row is therefore still durable for
+# `verify` and `complete` when the newest archived row of its exact or legacy
+# id is closed and carries a resolution record. The note archive holds
+# superseded bodies, never a closure, so it is not read. An entry found in
+# neither place still fails, naming the entry.
 #
 # `open` is the read-only predicate a mechanical closer asks before it may
 # retire a task's row: is this task still an open captain call? Exit 0 means it
@@ -547,20 +555,20 @@ CAPTAIN_MIGRATION_SCAN_LOADED=0
 CAPTAIN_MIGRATION_SCAN_JSON=
 NL_SEP=$'\n'
 
-# Section-aware [beads] extraction from a .tasks.toml: only keys inside the
-# [beads] section, comments stripped. Prints "<key> <value>" lines.
-captain_beads_toml_entries() {  # <toml-file>
+# Section-aware extraction from a .tasks.toml: only keys inside the named
+# section, comments stripped. Prints "<key> <value>" lines.
+captain_toml_entries() {  # <toml-file> <section>
   [ -f "$1" ] || return 0
-  LC_ALL=C awk '
+  LC_ALL=C awk -v section="[$2]" '
     function trim(v) { sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v); return v }
-    BEGIN { inbeads = 0 }
+    BEGIN { insection = 0 }
     {
       line = $0
       sub(/[[:space:]]*#.*/, "", line)
       line = trim(line)
-      if (line ~ /^\[[^]]+\]$/) { inbeads = (line == "[beads]"); next }
-      if (!inbeads) next
-      if (line ~ /^(prefix|path|binary)[[:space:]]*=/) {
+      if (line ~ /^\[[^]]+\]$/) { insection = (line == section); next }
+      if (!insection) next
+      if (line ~ /^(prefix|path|binary|archive)[[:space:]]*=/) {
         key = line
         sub(/[[:space:]]*=.*/, "", key)
         sub(/^[^=]*=[[:space:]]*/, "", line)
@@ -571,7 +579,7 @@ captain_beads_toml_entries() {  # <toml-file>
   ' "$1"
 }
 
-captain_beads_setting() {  # <entries-output> <setting>
+captain_toml_setting() {  # <entries-output> <setting>
   printf '%s\n' "$1" | sed -n "s/^$2 //p" | head -1
 }
 
@@ -593,9 +601,9 @@ captain_migration_scan_load() {  # <resolved-data-dir>
     CAPTAIN_MIGRATION_SCAN_LOADED=1
     return 0
   fi
-  entries=$(captain_beads_toml_entries "$root/.tasks.toml")
-  bd_bin=$(captain_beads_setting "$entries" binary)
-  bd_path=$(captain_beads_setting "$entries" path)
+  entries=$(captain_toml_entries "$root/.tasks.toml" beads)
+  bd_bin=$(captain_toml_setting "$entries" binary)
+  bd_path=$(captain_toml_setting "$entries" path)
   bd_bin=${bd_bin:-bd}
   if [ -z "$bd_path" ]; then
     printf 'fm-captain-hold: the beads backend carries no graph path in %s, so a migrated hold cannot be found\n' "$root/.tasks.toml" >&2
@@ -691,8 +699,8 @@ resolve_migrated_entry() {  # <origin-or-empty> <entry>
   # No marker line anywhere: a mechanical migration keeps the legacy id under
   # the configured prefix, but that name alone is evidence of nothing, so only
   # a row still held for the captain - and only one of them - is accepted.
-  entries=$(captain_beads_toml_entries "$root/.tasks.toml")
-  prefix=$(captain_beads_setting "$entries" prefix)
+  entries=$(captain_toml_entries "$root/.tasks.toml" beads)
+  prefix=$(captain_toml_setting "$entries" prefix)
   [ -n "$prefix" ] || return 1
   prefixed_matches=
   for candidate in $CAPTAIN_MIGRATION_IDENTITIES; do
@@ -792,15 +800,94 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
   rm -f -- "$tmp"
 }
 
+# The markdown archive closed rows are pruned into: `[markdown] archive` from
+# the backlog root's .tasks.toml, relative to that root, else tasks-axi's own
+# default of done-archive.md beside the backlog file.
+captain_markdown_archive_path() {  # <resolved-data-dir>
+  local data=$1 root archive
+  root=$(fm_backlog_root "$data") || return 1
+  archive=$(captain_toml_setting "$(captain_toml_entries "$root/.tasks.toml" markdown)" archive)
+  case "$archive" in
+    '') printf '%s/done-archive.md\n' "${data%/}" ;;
+    /*) printf '%s\n' "$archive" ;;
+    *) printf '%s/%s\n' "${root%/}" "$archive" ;;
+  esac
+}
+
+# The newest archived row of <id>: its "- [ ]" or "- [x]" line and every
+# following line up to the next unindented one. Returns 1 when none exists.
+captain_archived_row() {  # <archive-file> <id>
+  [ -f "$1" ] || return 1
+  LC_ALL=C awk -v id="$2" '
+    /^- \[[ x]\] / {
+      rest = $0
+      sub(/^- \[[ x]\] /, "", rest)
+      split(rest, word, " ")
+      inrow = (word[1] == id)
+      if (inrow) { row = $0; found = 1 }
+      next
+    }
+    /^[^[:space:]]/ { inrow = 0; next }
+    inrow { row = row "\n" $0 }
+    END { if (!found) exit 1; print row }
+  ' "$1"
+}
+
+# A captain call whose closed row was pruned into the markdown archive (see the
+# header). Prints "<id> archived" and returns 0 when the newest archived row of
+# the exact or legacy id is closed with a resolution record. Returns 1 when no
+# archived row carries one, after naming on stderr any archived row that is
+# closed without one or still open, so the operator sees why it did not count.
+resolve_archived_entry() {  # <origin-or-empty> <entry>
+  local origin=$1 entry=$2 data root backend archive candidates candidate row
+  data=$(fm_backlog_data_absolute "$DATA") || return 1
+  root=$(fm_backlog_root "$data") || return 1
+  backend=$(fm_tasks_axi_backend "$root" 2>/dev/null) || return 1
+  [ "$backend" = markdown ] || return 1
+  archive=$(captain_markdown_archive_path "$data") || return 1
+  candidates=$entry
+  if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
+    candidates="$candidates $(legacy_hold_id "$origin" "$entry")"
+  fi
+  for candidate in $candidates; do
+    row=$(captain_archived_row "$archive" "$candidate") || continue
+    case "$row" in
+      "- [x] "*)
+        if body_has_resolution_record "$row"; then
+          printf '%s archived' "$candidate"
+          return 0
+        fi
+        printf 'fm-captain-hold: archived task %s in %s is closed without a recorded captain answer\n' \
+          "$candidate" "$archive" >&2
+        ;;
+      *)
+        printf 'fm-captain-hold: archived task %s in %s was archived while still open\n' \
+          "$candidate" "$archive" >&2
+        ;;
+    esac
+  done
+  return 1
+}
+
 # Resolve one entry and verify the row it names is durably captain-held. A
 # resolution failure that is not the read bound keeps resolve_entry's own
 # status - its stderr already named the entry; 124 means the backend never
 # answered, which is not the same as an unknown entry and must not be spent
-# as absence. On success prints "<id> <how>" so the caller can keep the
+# as absence. An entry with no live row falls back to the markdown archive
+# before failing. On success prints "<id> <how>" so the caller can keep the
 # attestation evidence.
 verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how>"
-  local origin=$1 entry=$2 resolved resolve_status=0
-  resolved=$(resolve_entry "$origin" "$entry") || resolve_status=$?
+  local origin=$1 entry=$2 resolved resolve_status=0 err
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-captain-hold-resolve.XXXXXX") \
+    || fail "cannot stage the resolution diagnostics for $entry"
+  resolved=$(resolve_entry "$origin" "$entry" 2>"$err") || resolve_status=$?
+  if [ "$resolve_status" -eq 1 ] && resolved=$(resolve_archived_entry "$origin" "$entry" 2>>"$err"); then
+    rm -f -- "$err"
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+  cat -- "$err" >&2
+  rm -f -- "$err"
   if [ "$resolve_status" -ne 0 ]; then
     [ "$resolve_status" -ne 124 ] \
       || fail "the backlog backend exceeded its read bound resolving $entry"
