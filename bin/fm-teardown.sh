@@ -73,6 +73,8 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# A scout whose record names only a worktree_released= copy closes through the
+# same gates without touching that copy (see the endpoint check below).
 # Before destructive cleanup, teardown validates task check artifacts as
 # ordinary single-link files on the state device. It refuses and preserves
 # task state when that proof fails; otherwise it removes the task's check,
@@ -1139,12 +1141,36 @@ fi
 # A windowless record names no endpoint: the shared validator would refuse it
 # (and must keep refusing it for control/kill callers), so teardown skips the
 # validator rather than probing or closing an ambient current window.
+# A finished scout whose copy was already handed back to the pool records it as
+# exactly one worktree_released= line and no worktree= line. A scout's work
+# product is its report, and that copy now belongs to whichever task the pool
+# gave it to next, so the endpoint is validated against the released path and
+# every step that would read or touch a copy is skipped (teardown_owns_worktree).
+# A ship, an Orca record, or any other worktree shape keeps the validator's refusal.
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
+TEARDOWN_COPY_RELEASED=0
+TEARDOWN_RELEASED_COPY=
+if [ "$TEARDOWN_META_KIND" = scout ] && [ "$(fm_meta_get "$META" backend)" != orca ] \
+   && [ "$(LC_ALL=C grep -c '^worktree=' "$META" 2>/dev/null || true)" = 0 ]; then
+  TEARDOWN_RELEASED_COPY=$(fm_backend_meta_exact_value "$META" worktree_released) \
+    || TEARDOWN_RELEASED_COPY=
+fi
 if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
   BACKEND=tmux
   T=
+elif [ -n "$TEARDOWN_RELEASED_COPY" ]; then
+  TEARDOWN_SHAPE_META=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-teardown-shape.XXXXXX") || exit 1
+  { cat "$META"; printf 'worktree=%s\n' "$TEARDOWN_RELEASED_COPY"; } > "$TEARDOWN_SHAPE_META"
+  if ! fm_backend_validate_task_endpoint "$TEARDOWN_SHAPE_META" "$ID"; then
+    rm -f "$TEARDOWN_SHAPE_META"
+    exit 1
+  fi
+  rm -f "$TEARDOWN_SHAPE_META"
+  BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+  T=$FM_BACKEND_VALIDATED_TARGET
+  TEARDOWN_COPY_RELEASED=1
 else
   fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
@@ -2486,7 +2512,7 @@ require_owned_task_worktree_slot() {
 }
 
 teardown_owns_worktree() {
-  [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
+  [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ] && [ "$TEARDOWN_COPY_RELEASED" != 1 ]
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -3847,6 +3873,8 @@ if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT)"
+elif [ "$TEARDOWN_COPY_RELEASED" = 1 ]; then
+  echo "teardown $ID complete (window ${T:-none}; copy $TEARDOWN_RELEASED_COPY was already released to the pool and was left untouched)"
 else
   echo "teardown $ID complete (window ${T:-none}; pool slot $WT left to task $TEARDOWN_SLOT_REASSIGNED_TO${TEARDOWN_SLOT_REASSIGNED_HOME:+ (home $TEARDOWN_SLOT_REASSIGNED_HOME)}, which it was reassigned to)"
 fi
