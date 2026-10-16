@@ -1269,3 +1269,34 @@ ctx=$(sent_context)
 assert_contains "$ctx" 'next request' "the new turn's words reach Jev"
 assert_not_contains "$ctx" 'fix the login flake' "a turn end every hook allowed closes the earlier words"
 pass "a turn end another Stop hook blocks keeps the turn's words in the next ask's context"
+
+# --- a ! shell command the operator ran is in the next ask's context ---------
+shell_line() {  # <uuid> <parent> <time> <content>
+  jq -cn --arg id "$1" --arg p "$2" --arg ts "$3" --arg c "$4" \
+    '{parentUuid: $p, type: "user", uuid: $id, timestamp: $ts, sessionId: "s1", message: {role: "user", content: $c}}' >> "$TRANSCRIPT"
+}
+reset
+mkdir -p "$HOME_DIR/state"
+printf '{"type":"user","message":{"role":"user","content":"x"}}\n' > "$TRANSCRIPT"
+prompt_in 'place the gate before the preview, in this pr'
+stop_chain '[]'
+shell_line b1 a1 2026-10-16T09:31:26.385Z '<bash-input>git push origin 342ebe251e:refs/heads/feature/x</bash-input>'
+shell_line b2 b1 2026-10-16T09:31:33.423Z $'<bash-stdout>To github.com:org/repo.git\n   968944aa62..342ebe251e  342ebe251e -> feature/x</bash-stdout><bash-stderr></bash-stderr>'
+write_choice ship 0.9 ship scout zq-mine-marker
+FM_JEV_GATE=on FM_JEV_TRANSCRIPT=$TRANSCRIPT FM_JEV_TRANSCRIPT_WAIT=0 CLAUDE_CODE_SESSION_ID=s1 TYPESAFE_API_KEY=$KEY \
+  run code out err "${DC[@]}" --source "$RAW" --mine ship
+expect_code 0 "$code" "an ask after a ! shell command"
+ctx=$(sent_context); ctx=${ctx%x}
+[[ $ctx == "Decision about: Which deliverable fits the request
+
+The operator's words this turn, verbatim, oldest first:
+Shell command the operator ran at 2026-10-16T09:31:26Z (typed with the ! prefix):
+git push origin 342ebe251e:refs/heads/feature/x
+Its output:
+<bash-stdout>To github.com:org/repo.git
+   968944aa62..342ebe251e  342ebe251e -> feature/x</bash-stdout><bash-stderr></bash-stderr>
+
+Source $RAW, verbatim:"* ]] || fail "the shell command and its output lead the context, labelled and verbatim: $ctx"
+assert_not_contains "$ctx" 'place the gate before the preview' "the turn before the shell command is not this turn's words"
+wait_for "the ask after the shell command settles" settled 1
+pass "a ! shell command and its output, not the previous turn's words, reach Jev on the next ask"

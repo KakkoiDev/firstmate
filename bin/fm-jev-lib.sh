@@ -84,7 +84,12 @@
 #   this turn in $FM_HOME/state/jev-turn-words.jsonl
 #   (bin/fm-jev-prompt-reminder.sh owns the record), oldest first, as
 #   "The operator's words this turn, verbatim, oldest first:" and then
-#   "Message at <ts>:" and the prompt for each; nothing when none is recorded.
+#   "Message at <ts>:" and the prompt for each, or, for a shell command the
+#   operator ran with the ! prefix, "Shell command the operator ran at <ts>
+#   (typed with the ! prefix):", the command, then "Its output:" and the
+#   output, or "No output was recorded."; nothing when none is recorded. It
+#   first runs bin/fm-jev-prompt-reminder.sh --shell-turns on this session's
+#   transcript (fm_jev_transcript_path), so those commands are recorded.
 #   Inside a task worker (FM_TASK_ID set) it prints instead the
 #   `## Captain's intent` section of the worker's brief,
 #   ${FM_DATA_OVERRIDE:-$FM_HOME/data}/<task>/brief.md, under "The operator's
@@ -371,7 +376,7 @@ fm_jev_never_send_line() {  # <text-file>
 }
 
 fm_jev_turn_words() {
-  local brief intent
+  local brief intent path
   if [ -n "${FM_TASK_ID:-}" ]; then
     case "$FM_TASK_ID" in */*|.|..) return 0 ;; esac
     brief="${FM_DATA_OVERRIDE:-$FM_HOME/data}/$FM_TASK_ID/brief.md"
@@ -382,11 +387,20 @@ fm_jev_turn_words() {
     printf "The operator's request behind this task, verbatim from the worker's instructions:\n%s\n" "$intent"
     return 0
   fi
+  if path=$(fm_jev_transcript_path); then
+    jq -cn --arg s "${CLAUDE_CODE_SESSION_ID:-}" --arg t "$path" '{session_id: $s, transcript_path: $t}' \
+      | FM_HOME=$FM_HOME "${BASH_SOURCE[0]%/*}/fm-jev-prompt-reminder.sh" --shell-turns >/dev/null 2>&1 || true
+  fi
   [ -s "$FM_HOME/state/jev-turn-words.jsonl" ] || return 0
-  jq -Rrn '[inputs | fromjson? | select(type == "object" and (.prompt | type) == "string" and .prompt != "")]
+  jq -Rrn '[inputs | fromjson? | select(type == "object")
+      | select(((.prompt | type) == "string" and .prompt != "")
+        or (.kind == "shell" and (.command | type) == "string"))]
     | if length == 0 then empty else
         "The operator'\''s words this turn, verbatim, oldest first:",
-        (.[] | "Message at \(.ts // "an unrecorded time"):", .prompt)
+        (.[] | if .kind == "shell" then
+            "Shell command the operator ran at \(.ts // "an unrecorded time") (typed with the ! prefix):", .command,
+            (if (.output | type) == "string" then "Its output:", .output else "No output was recorded." end)
+          else "Message at \(.ts // "an unrecorded time"):", .prompt end)
       end' "$FM_HOME/state/jev-turn-words.jsonl" 2>/dev/null || true
 }
 

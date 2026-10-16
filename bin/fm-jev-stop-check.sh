@@ -10,7 +10,8 @@
 #   with FM_JEV_GATE not off. Anywhere else it is inert: exit 0, no output.
 #
 # The turn starts at the ISO-8601 time in $FM_HOME/state/jev-turn-start, which
-# bin/fm-jev-prompt-reminder.sh writes at every prompt. The section is the
+# bin/fm-jev-prompt-reminder.sh writes at every prompt and, through its
+# --shell-turns run here first, at every ! shell command. The section is the
 # output of bin/fm-jev.sh turn --since <that time>, whose header owns its
 # lines. When it lists at least one ask, the payload's last_assistant_message
 # must hold:
@@ -59,6 +60,7 @@ FM_HOME=${FM_HOME:-$FM_ROOT}
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 fm_primary_scope_matches "$FM_ROOT" "$FM_HOME/state" || exit 0
 
+printf '%s' "$PAYLOAD" | FM_HOME=$FM_HOME "$SCRIPT_DIR/fm-jev-prompt-reminder.sh" --shell-turns >/dev/null 2>&1 || true
 SINCE=$(tr -d '[:space:]' 2>/dev/null < "$FM_HOME/state/jev-turn-start") || exit 0
 [ -n "$SINCE" ] || exit 0
 jq -e 'type == "object" and (.last_assistant_message | type) == "string"' <<<"$PAYLOAD" >/dev/null 2>&1 || exit 0

@@ -176,3 +176,71 @@ kill "$(cat "$REACHED")" 2>/dev/null
 wait "$hook_pid" 2>/dev/null
 [ ! -s "$WORDS" ] || fail "a hook killed mid-read kept the previous turn's words: $(cat "$WORDS")"
 pass "a prompt hook cut short leaves no words rather than the previous turn's"
+
+SHELL_T="$TMP_ROOT/shell-transcript.jsonl"
+shell_in() { jq -cn --arg t "$SHELL_T" '{session_id: "s4", transcript_path: $t}'; }
+run_shell() {  # [env...]
+  code=0
+  out=$(shell_in | env -u FM_TASK_ID FM_JEV_GATE=on FM_HOME="$HOME_DIR" "$@" "$HOOK" --shell-turns 2>&1) || code=$?
+}
+prompt_shell() { jq -cn --arg p "$1" --arg t "$SHELL_T" '{hook_event_name: "UserPromptSubmit", session_id: "s4", transcript_path: $t, prompt: $p}'; }
+# shell_cmd <id> <time> <command> [<output>]: the transcript lines Claude Code
+# writes for a ! shell command, the output line only when given.
+shell_cmd() {
+  jq -cn --arg id "$1" --arg ts "$2" --arg c "$3" '{parentUuid: "p", type: "user", uuid: $id, timestamp: $ts, sessionId: "s4",
+    message: {role: "user", content: ("<bash-input>" + $c + "</bash-input>")}}' >> "$SHELL_T"
+  [ $# -lt 4 ] || shell_out "$1" "$2" "$4"
+}
+shell_out() { jq -cn --arg id "$1" --arg ts "$2" --arg o "$3" '{parentUuid: $id, type: "user", uuid: ($id + "-out"), timestamp: $ts, sessionId: "s4",
+  message: {role: "user", content: $o}}' >> "$SHELL_T"; }
+entries() { jq -r 'if .kind == "shell" then "shell: " + .command + " => " + (.output // "null") else .prompt end' "$WORDS"; }
+PUSH_OUT=$'<bash-stdout>To github.com:org/repo.git\n   968944aa62..342ebe251e  342ebe251e -> feature/x</bash-stdout><bash-stderr>remote: \n</bash-stderr>'
+
+rm -f "$WORDS" "$CLOSED"
+: > "$SHELL_T"
+run_payload "$(prompt_shell 'place the gate before the preview')"
+summary_shell() { printf '{"type":"system","subtype":"stop_hook_summary","hookCount":2,"hookErrors":%s}\n' "$1" >> "$SHELL_T"; }
+summary_shell '[]'
+shell_cmd b1 2026-10-16T09:31:26.385Z 'git push origin 342ebe251e:refs/heads/feature/x' "$PUSH_OUT"
+run_shell
+expect_code 0 "$code" "a shell-turns run"
+[ -z "$out" ] || fail "a shell-turns run printed: $out"
+assert_equals "shell: git push origin 342ebe251e:refs/heads/feature/x => $PUSH_OUT" "$(entries)" \
+  "a ! shell command after a turn end opens a new turn, its command and output verbatim"
+assert_equals shell "$(jq -r .kind "$WORDS")" "the entry is marked as a shell command"
+assert_equals 2026-10-16T09:31:26Z "$(cat "$START")" "the command's time, to the second, is the turn start"
+run_shell
+assert_equals 1 "$(grep -c . "$WORDS")" "a second run imports nothing twice"
+pass "a ! shell command and its output are the operator's words, opening the turn it starts"
+
+shell_cmd b2 2026-10-16T09:32:00.100Z 'git status'
+run_shell
+assert_equals 1 "$(grep -c . "$WORDS")" "a command whose output is not yet recorded waits"
+shell_out b2 2026-10-16T09:32:01.000Z '<bash-stdout>clean</bash-stdout><bash-stderr></bash-stderr>'
+run_shell
+assert_equals 'shell: git status => <bash-stdout>clean</bash-stdout><bash-stderr></bash-stderr>' "$(entries | tail -n 1)" \
+  "the command joins once its output is recorded"
+summary_shell '[]'
+shell_cmd b3 2026-10-16T09:33:00.000Z 'ls' '<bash-stdout>a</bash-stdout><bash-stderr></bash-stderr>'
+run_payload "$(prompt_shell 'now ship it')"
+assert_equals $'shell: ls => <bash-stdout>a</bash-stdout><bash-stderr></bash-stderr>\nnow ship it' "$(entries)" \
+  "a prompt imports the shell command before it first, and joins the turn that command opened"
+pass "shell commands wait for their output, and a prompt keeps them in order before its own words"
+
+rm -f "$WORDS"
+run_shell FM_TASK_ID=t1
+assert_absent "$WORDS" "a task worker imports no shell command"
+pass "a task worker imports no shell command"
+
+SHELL_T="$TMP_ROOT/shell-transcript-2.jsonl"
+rm -f "$WORDS" "$HOME_DIR/state/jev-turn-shell-mark"
+shell_cmd c1 2026-10-16T08:00:00.000Z 'echo before' '<bash-stdout>before</bash-stdout><bash-stderr></bash-stderr>'
+shell_cmd c2 2026-10-16T09:00:00.500Z 'echo lost'
+shell_cmd c3 2026-10-16T09:00:05.000Z 'echo after' '<bash-stdout>after</bash-stdout><bash-stderr></bash-stderr>'
+printf '2026-10-16T09:00:00Z\n' > "$START"
+run_shell
+assert_equals $'shell: echo lost => null\nshell: echo after => <bash-stdout>after</bash-stdout><bash-stderr></bash-stderr>' "$(entries)" \
+  "a first read of a transcript starts at the turn start, and a command with no output does not hold back a later one"
+assert_equals null "$(jq -c 'select(.command == "echo lost") | .output' "$WORDS")" \
+  "a command with no output is recorded with a null output"
+pass "a first read of a transcript starts at the turn start, and a command whose output never came stops nothing"

@@ -169,6 +169,28 @@ $(section)"
   pass "an allowed turn end writes the turn-closed marker, a blocked one does not"
 }
 
+test_shell_command_opens_a_turn() {
+  local transcript="$TMP_ROOT/shell-transcript.jsonl" ts
+  rm -f "$PRIMARY/state/jev-usage.jsonl" "$PRIMARY/state/jev-turn-closed"
+  : > "$transcript"
+  jq -cn --arg t "$transcript" '{hook_event_name: "UserPromptSubmit", session_id: "s9", transcript_path: $t, prompt: "fix the login flake"}' \
+    | env_run "$REMINDER" > /dev/null
+  scope_ask 'fix the login flake' login login
+  printf '{"type":"system","subtype":"stop_hook_summary","hookCount":1,"hookErrors":[],"preventedContinuation":false}\n' >> "$transcript"
+  ts=$(jq -rn 'now + 2 | strftime("%Y-%m-%dT%H:%M:%S")')
+  jq -cn --arg ts "$ts.385Z" '{parentUuid: "a1", type: "user", uuid: "b1", timestamp: $ts, sessionId: "s9",
+    message: {role: "user", content: "<bash-input>git push origin HEAD</bash-input>"}}' >> "$transcript"
+  jq -cn --arg ts "$ts.900Z" '{parentUuid: "b1", type: "user", uuid: "b2", timestamp: $ts, sessionId: "s9",
+    message: {role: "user", content: "<bash-stdout>Everything up-to-date</bash-stdout><bash-stderr></bash-stderr>"}}' >> "$transcript"
+  code=0
+  jq -cn --arg t "$transcript" '{hook_event_name: "Stop", session_id: "s9", transcript_path: $t, last_assistant_message: "Pushed."}' \
+    | env_run "$CHECK" --claude > "$TMP_ROOT/out" 2> "$TMP_ROOT/err" || code=$?
+  err=$(cat "$TMP_ROOT/err")
+  expect_allow "a ! shell command after the asking turn ended"
+  assert_equals "${ts}Z" "$(cat "$PRIMARY/state/jev-turn-start")" "the shell command's time is the turn start"
+  pass "a ! shell command opens its own turn, so the turn end does not demand the previous turn's asks"
+}
+
 test_tracked_registration() {
   local entry
   entry=$(jq -c '[.hooks.Stop[].hooks[] | select(.command | contains("fm-jev-stop-check.sh"))]' "$ROOT/.claude/settings.json")
@@ -182,4 +204,5 @@ test_no_asks_allows
 test_section_required
 test_disagreement_must_be_mentioned
 test_turn_close_marker
+test_shell_command_opens_a_turn
 test_tracked_registration
