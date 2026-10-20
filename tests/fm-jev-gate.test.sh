@@ -369,6 +369,42 @@ run "$H" code out -- fm-merge-local.sh t1 --merge-risk maybe
 expect_code 2 "$code" "local landing with an invalid --merge-risk"
 pass "fm-pr-merge and fm-merge-local refuse without a yes/no merge-risk call"
 
+H=$(new_home features ship)
+REPO="$TMP_ROOT/features-repo"
+git init -q -b main "$REPO"
+mkdir -p "$REPO/src/auth"
+printf 'a\n' > "$REPO/src/auth/login.py"
+printf 'c\n' > "$REPO/old-notes.txt"
+git -C "$REPO" add -A
+git -C "$REPO" -c user.email=t@t -c user.name=t commit -qm init
+git -C "$REPO" checkout -qb fm/t1
+mkdir -p "$REPO/db/migrations"
+printf '1\n2\n' > "$REPO/db/migrations/0042_drop_users.sql"
+printf 'z\n' >> "$REPO/src/auth/login.py"
+git -C "$REPO" rm -q old-notes.txt
+git -C "$REPO" add -A
+git -C "$REPO" -c user.email=t@t -c user.name=t commit -qm change
+fm_write_meta "$H/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude" "project=$REPO" "mode=local-only"
+write_response_all no yes no
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-merge-local.sh t1 --merge-risk no
+MR_ID=$(sed -n 's/.*jev merge-risk decision \([^:]*\):.*/\1/p' <<<"$out" | head -n 1)
+[ -n "$MR_ID" ] || fail "the merge-risk ask recorded no decision: $out"
+MR_CTX=$(jq -r .context "$H/state/jev-audit/$MR_ID.json")
+assert_contains "$MR_CTX" $'Files changed: 3\nFiles added: 1\nFiles deleted: 1\nFiles renamed: 0\nLines added: 3\nLines deleted: 1' "the merge-risk ask counts the change"
+assert_contains "$MR_CTX" "A path names a migration: yes" "a migration path is flagged"
+assert_contains "$MR_CTX" "A path names auth or security: yes" "an auth path is flagged"
+assert_contains "$MR_CTX" "A path names infra or deploy: no" "no infra path is flagged"
+assert_contains "$MR_CTX" "A path names CI configuration: no" "no CI path is flagged"
+for name in 0042_drop_users login.py old-notes db/migrations; do
+  assert_not_contains "$MR_CTX" "$name" "no path or file name reaches the merge-risk ask ($name)"
+done
+fm_write_meta "$H/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude" "project=$REPO" "branch=fm/gone"
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-merge-local.sh t1 --merge-risk no
+MR_ID=$(sed -n 's/.*jev merge-risk decision \([^:]*\):.*/\1/p' <<<"$out" | head -n 1)
+assert_contains "$(jq -r .context "$H/state/jev-audit/$MR_ID.json")" "Change features: could not be computed (no readable branch fm/gone" \
+  "an unreadable branch says the features could not be computed"
+pass "the merge-risk ask carries locally computed counts and path facts, never a path"
+
 # --- blind choice before the answer, through a gated script -------------------
 
 H=$(new_home blind ship)

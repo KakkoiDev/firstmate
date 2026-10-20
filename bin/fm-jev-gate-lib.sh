@@ -391,12 +391,62 @@ fm_jev_gate_recorded() {
     "$FM_JEV_GATE_ACTING" "$FM_JEV_GATE_DECIDER" >&2
 }
 
+# fm_jev_gate_merge_features <out-file> <task-id>
+# Writes counts and yes/no path facts for the task's change, computed locally
+# with git from the task record: the branch (branch=, else fm/<id>) in the
+# project clone (project=) against the merge base with the clone's default
+# branch (origin/HEAD, else main or master). Counts are files changed, added,
+# deleted, and renamed, and lines added and deleted; the facts say whether any
+# changed path names a migration, auth or security, infra or deploy, or CI
+# location. No path, file name, or diff line is written. When the branch,
+# clone, or base cannot be read, it says so instead.
+fm_jev_gate_merge_features() {
+  local out=$1 id=$2 meta proj branch base='' b names
+  meta="${FM_STATE_OVERRIDE:-$FM_HOME/state}/$id.meta"
+  proj=$(sed -n 's/^project=//p' "$meta" 2>/dev/null | head -n 1)
+  branch=$(sed -n 's/^branch=//p' "$meta" 2>/dev/null | head -n 1)
+  [ -n "$branch" ] || branch="fm/$id"
+  if [ -n "$proj" ] && git -C "$proj" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
+    base=$(git -C "$proj" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || base=''
+    for b in main master; do
+      [ -z "$base" ] || break
+      git -C "$proj" show-ref --verify --quiet "refs/heads/$b" && base=$b
+    done
+  fi
+  if [ -z "$base" ] || ! names=$(git -C "$proj" diff --name-status -M "$base...$branch" 2>/dev/null); then
+    printf 'Change features: could not be computed (no readable branch %s and default branch in the project clone)\n' "$branch" > "$out"
+    return 0
+  fi
+  git -C "$proj" diff --numstat -M "$base...$branch" 2>/dev/null | FM_JEV_GATE_NAMES=$names awk '
+    function has(re,   i, n, a) { n = split(paths, a, "\n"); for (i = 1; i <= n; i++) if (tolower(a[i]) ~ re) return "yes"; return "no" }
+    BEGIN {
+      n = split(ENVIRON["FM_JEV_GATE_NAMES"], l, "\n")
+      for (i = 1; i <= n; i++) {
+        if (l[i] == "") continue
+        files++; s = substr(l[i], 1, 1)
+        if (s == "A") added++; else if (s == "D") deleted++; else if (s == "R") renamed++
+        k = split(l[i], f, "\t"); for (j = 2; j <= k; j++) paths = paths f[j] "\n"
+      }
+    }
+    $1 ~ /^[0-9]+$/ { la += $1 } $2 ~ /^[0-9]+$/ { ld += $2 }
+    END {
+      printf "Change features, computed locally from the task branch against its merge base:\n"
+      printf "Files changed: %d\nFiles added: %d\nFiles deleted: %d\nFiles renamed: %d\n", files, added, deleted, renamed
+      printf "Lines added: %d\nLines deleted: %d\n", la, ld
+      printf "A path names a migration: %s\n", has("(^|/)(migrations?|migrate)(/|$)|migration[^/]*$")
+      printf "A path names auth or security: %s\n", has("(^|/)[^/]*(auth|login|oauth|session|permission|secret|credential|password|security|crypto|rbac|acl)[^/]*(/|$)")
+      printf "A path names infra or deploy: %s\n", has("(^|/)(terraform|helm|k8s|kubernetes|infra|deploy[^/]*|ansible|cloudformation)(/|$)|\\.tf$|(^|/)dockerfile[^/]*$|(^|/)docker-compose[^/]*$")
+      printf "A path names CI configuration: %s\n", has("^\\.github/workflows/|(^|/)\\.gitlab-ci[^/]*$|(^|/)jenkinsfile$|^\\.circleci/")
+    }' > "$out" 2>/dev/null
+}
+
 # fm_jev_gate_merge_risk <issuer> <task-id> <yes|no|''> <what is merged>
-# Requires firstmate's merge-risk answer, asks it with the merge line and the
-# task's brief as context, and prints a notice when the acting answer is yes.
-# merge-risk is never handed to Jev and never changes merge authority.
+# Requires firstmate's merge-risk answer, asks it with the merge line, the
+# change features from fm_jev_gate_merge_features, and the task's brief as
+# context, and prints a notice when the acting answer is yes. It never changes
+# merge authority.
 fm_jev_gate_merge_risk() {
-  local issuer=$1 id=$2 mine=$3 what=$4 ctx line
+  local issuer=$1 id=$2 mine=$3 what=$4 ctx line features
   fm_jev_gate_enabled || return 0
   case "$mine" in
     yes|no) ;;
@@ -405,11 +455,13 @@ fm_jev_gate_merge_risk() {
   esac
   ctx=$(mktemp) || fm_jev_gate_refuse "$issuer" "mktemp failed; nothing was merged"
   line=$(mktemp) || { rm -f "$ctx"; fm_jev_gate_refuse "$issuer" "mktemp failed; nothing was merged"; }
+  features=$(mktemp) || { rm -f "$ctx" "$line"; fm_jev_gate_refuse "$issuer" "mktemp failed; nothing was merged"; }
   printf '%s\n' "$what" > "$line"
-  fm_jev_gate_context "$ctx" "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$id/brief.md" "Merge" "$line"
+  fm_jev_gate_merge_features "$features" "$id"
+  fm_jev_gate_context "$ctx" "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$id/brief.md" "Merge" "$line" "Change" "$features"
   fm_jev_gate_ask "$issuer" merge-risk "$mine" \
     "Is the merge of task $id destructive, irreversible, or security-sensitive" "$ctx"
-  rm -f "$ctx" "$line"
+  rm -f "$ctx" "$line" "$features"
   [ "$FM_JEV_GATE_ACTING" != yes ] \
     || echo "$issuer: merge-risk is yes for $id; this merge needs the human's explicit word for this concrete merge" >&2
 }
