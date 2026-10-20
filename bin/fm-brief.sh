@@ -675,6 +675,13 @@ IFS= read -r -d '' SHARED_NO_CD_RULE <<'EOF' || true
 EOF
 SHARED_NO_CD_RULE=${SHARED_NO_CD_RULE%$'\n'}
 
+# Shared by the ship and scout scaffolds; the secondmate charter carries no worker rules list.
+IFS= read -r -d '' SHARED_RM_RULE <<'EOF' || true
+11. Never run `rm -r` or `rm -rf`: it triggers a confirmation prompt no human answers, so you would stall.
+   Write each attempt to a fresh timestamped directory and leave old ones in place.
+EOF
+SHARED_RM_RULE=${SHARED_RM_RULE%$'\n'}
+
 if [ -n "$BASE_BRANCH" ]; then
   SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
 Base branch: $BASE_BRANCH"
@@ -729,6 +736,7 @@ $SHARED_NO_CD_RULE
    genuinely cannot be done without fanning out, append \`blocked [at=<epoch>]: {why}\` and stop.
 10. Never raise your own reasoning effort above the level firstmate launched you with, and never
    use xhigh or max.
+$SHARED_RM_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 
@@ -816,6 +824,7 @@ $SHARED_NO_CD_RULE
    genuinely cannot be done without fanning out, append \`blocked [at=<epoch>]: {why}\` and stop.
 10. Never raise your own reasoning effort above the level firstmate launched you with, and never
    use xhigh or max.
+$SHARED_RM_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 

@@ -1667,6 +1667,27 @@ test_crewmate_scaffolds_forbid_pool_administration() {
   pass "fm-brief.sh: every crewmate scaffold forbids administering the shared worktree pool"
 }
 
+test_brief_forbids_rm_recursive() {
+  local home brief mode
+  home="$TMP_ROOT/rm-rule-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "brief-rm-$mode" alpha --mode "$mode" >/dev/null 2>&1 \
+      || fail "fm-brief.sh --mode $mode exited non-zero"
+    brief="$home/data/brief-rm-$mode/brief.md"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'Never run `rm -r` or `rm -rf`' "$brief" "$mode ship brief lost the never-rm-r rule"
+    assert_grep "fresh timestamped directory" "$brief" "$mode ship brief lost the fresh-directory instruction"
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-rm-scout alpha --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh --scout exited non-zero"
+  brief="$home/data/brief-rm-scout/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep 'Never run `rm -r` or `rm -rf`' "$brief" "scout brief lost the never-rm-r rule"
+  assert_grep "fresh timestamped directory" "$brief" "scout brief lost the fresh-directory instruction"
+  pass "fm-brief.sh: ship and scout scaffolds forbid rm -r"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -1708,3 +1729,4 @@ test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
+test_brief_forbids_rm_recursive
