@@ -4568,10 +4568,12 @@ if [ "$KIND" != secondmate ]; then
     # batch has resolved, so nothing in that batch is still at a prompt, and
     # unlike a per-tool event it cannot clear a sibling call's open dialog.
     # The turn-boundary hooks close it too, so no episode outlives its turn.
+    # PermissionDenied reports an auto-mode classifier denial, which no other
+    # event surfaces (bin/fm-prompt-wait.sh owns both status lines).
     # Every one of these is an observer: Notification hooks cannot block or
     # modify a notification, and a PermissionRequest hook that exits 0 with
     # empty stdout returns no decision and leaves the permission flow exactly
-    # as it was (verified live, docs/verification/supervision.md).
+    # as it was (verified live, docs/verification/worker-prompt-wait.md).
     mkdir -p "$WT/.claude"
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
     busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
@@ -4586,8 +4588,9 @@ if [ "$KIND" != secondmate ]; then
     j_permreq=$(json_escape "$wait_cmd_prefix record $wait_task $wait_suffix --event permission-request >/dev/null 2>&1 || true")
     j_notify=$(json_escape "$wait_cmd_prefix record $wait_task $wait_suffix --event notification-dialog >/dev/null 2>&1 || true")
     j_batch=$(json_escape "$wait_clear")
+    j_denied=$(json_escape "$wait_cmd_prefix denied $wait_task --gen $(shell_quote "$BUSY_GEN") >/dev/null 2>&1 || true")
     cat >"$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}],"PermissionRequest":[{"hooks":[{"type":"command","command":"$j_permreq"}]}],"Notification":[{"matcher":"permission_prompt|elicitation_dialog|elicitation_url_dialog","hooks":[{"type":"command","command":"$j_notify"}]}],"PostToolBatch":[{"hooks":[{"type":"command","command":"$j_batch"}]}]}}
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}],"PermissionRequest":[{"hooks":[{"type":"command","command":"$j_permreq"}]}],"Notification":[{"matcher":"permission_prompt|elicitation_dialog|elicitation_url_dialog","hooks":[{"type":"command","command":"$j_notify"}]}],"PostToolBatch":[{"hooks":[{"type":"command","command":"$j_batch"}]}],"PermissionDenied":[{"hooks":[{"type":"command","command":"$j_denied"}]}]}}
 EOF
     exclude_path '.claude/settings.local.json'
     ;;

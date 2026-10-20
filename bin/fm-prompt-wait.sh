@@ -6,7 +6,7 @@
 # dialog emits no turn-end and appends no status line, so before this record the
 # only thing that noticed was bin/fm-watch.sh's pane-staleness timer - tens of
 # minutes. The harness knows the moment it asks; this record is how it says so.
-# docs/worker-prompt-wait.md owns which harness events feed it and what each
+# docs/verification/worker-prompt-wait.md owns which harness events feed it and what each
 # supported adapter can and cannot report.
 #
 # Record file: state/<id>.prompt-wait - exactly one line, created only while no
@@ -26,6 +26,23 @@
 # failure this record exists to report, so it keeps re-surfacing on a bounded
 # cadence rather than going quiet after N tries.
 #
+# Status-log lines. The record wakes firstmate through the watcher; each harness
+# permission event also appends one line to state/<id>.status, the same channel
+# a worker's own `blocked:` line uses, so firstmate reads what was refused and
+# why the moment it happens (verified live, Claude Code 2.1.304):
+#
+#   blocked [at=E] [key=prompt-wait]: refused-pending: <tool> <command> (prompt waiting)
+#       when an episode opens. The dialog stays up: these hooks report and
+#       never return a permission decision.
+#   resolved [at=E] [key=prompt-wait]: <how>
+#       when an open episode closes (answered, turn over, agent replaced).
+#   blocked [at=E] [key=refused]: refused: <tool> <command> (classifier <reason>)
+#       when the auto-mode classifier denies a call (PermissionDenied).
+#
+# <command> is one line cut to FM_PROMPT_WAIT_COMMAND_MAX characters. A
+# permissions.deny rule or a PreToolUse hook deny fires no hook at all, so
+# neither is reported here.
+#
 # The record is a SIGNAL, not current-state truth. bin/fm-watch.sh surfaces its
 # appearance and each ladder-due re-touch through the ordinary signal wake, and
 # bin/fm-crew-state.sh remains the current-state owner.
@@ -42,8 +59,12 @@
 #       the live incarnation's record alone.
 #
 #   retire <state-dir> <id>
-#       Remove the record and ladder unconditionally, for spawn arm and
-#       teardown, where no gen is being honored.
+#       Remove the record and ladder with no gen check, for spawn arm, where
+#       no gen is being honored; an open record's blocker is resolved.
+#
+#   denied <state-dir> <id> --gen G
+#       Report an auto-mode classifier denial. Reads the PermissionDenied
+#       payload on stdin. A stale gen writes nothing.
 #
 #   due <state-dir> <id>
 #       Ladder policy. Prints `quiet`, or `resurface <count>` once the open
@@ -55,7 +76,7 @@
 #   summary <state-dir> <id>
 #       Print the open episode's summary text, or nothing when none is open.
 #
-# Every hook-facing subcommand exits 0 whatever happens, and the generated hook
+# Every hook-facing subcommand (record, clear, denied) exits 0 whatever happens, and the generated hook
 # command lines still append `|| true`: a refused or broken record must never
 # break the harness's own lifecycle. `due`, `resurfaced`, and `summary` are
 # watcher-facing and report failure normally.
@@ -71,6 +92,7 @@ usage:
   fm-prompt-wait.sh record <state-dir> <id> --gen G --source S --event E   (payload on stdin)
   fm-prompt-wait.sh clear <state-dir> <id> --gen G
   fm-prompt-wait.sh retire <state-dir> <id>
+  fm-prompt-wait.sh denied <state-dir> <id> --gen G   (payload on stdin)
   fm-prompt-wait.sh due <state-dir> <id>
   fm-prompt-wait.sh resurfaced <state-dir> <id>
   fm-prompt-wait.sh summary <state-dir> <id>
@@ -85,6 +107,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 FM_PROMPT_WAIT_RERING_SECS=${FM_PROMPT_WAIT_RERING_SECS:-300}
 FM_PROMPT_WAIT_SUMMARY_MAX=${FM_PROMPT_WAIT_SUMMARY_MAX:-200}
+FM_PROMPT_WAIT_COMMAND_MAX=200
+FM_PROMPT_WAIT_STATUS_KEY=prompt-wait
+FM_PROMPT_WAIT_DENIED_KEY=refused
 
 fm_prompt_wait_record_path() {  # <state-dir> <id>
   printf '%s/%s.prompt-wait' "$1" "$2"
@@ -113,7 +138,13 @@ fm_prompt_wait_field() {  # <state-dir> <id> <key>
 
 # A single tab-free, newline-free, length-capped line for a wake payload.
 fm_prompt_wait_clean() {
-  LC_ALL=C tr '\t\r\n' '   ' | cut -c "1-$FM_PROMPT_WAIT_SUMMARY_MAX"
+  fm_prompt_wait_one_line | cut -c "1-$FM_PROMPT_WAIT_SUMMARY_MAX"
+}
+
+# stdin as one printable line: tabs and line breaks become spaces, and every
+# other control byte (a terminal escape among them) is dropped.
+fm_prompt_wait_one_line() {
+  LC_ALL=C tr '\t\r\n' '   ' | LC_ALL=C tr -d '\000-\037\177'
 }
 
 # Derive the human-readable "what it asked" from the harness payload on stdin.
@@ -121,9 +152,8 @@ fm_prompt_wait_clean() {
 # and dispatch-profile validation), so a home without it still gets the wake and
 # loses only the detail line; firstmate reads the pane for the exact dialog
 # either way.
-fm_prompt_wait_summary_from_payload() {  # <event>
-  local event=$1 payload summary=''
-  payload=$(cat 2>/dev/null) || payload=''
+fm_prompt_wait_summary_from_payload() {  # <event> <payload>
+  local event=$1 payload=$2 summary=''
   if [ -n "$payload" ] && command -v jq >/dev/null 2>&1; then
     summary=$(printf '%s' "$payload" | jq -r '
       if .hook_event_name == "PermissionRequest" then
@@ -138,6 +168,35 @@ fm_prompt_wait_summary_from_payload() {  # <event>
   fi
   [ -n "$summary" ] && [ "$summary" != null ] || summary="$event"
   printf '%s' "$summary" | fm_prompt_wait_clean
+}
+
+# "<tool> <command>" for a status line, the command cut to
+# FM_PROMPT_WAIT_COMMAND_MAX characters. Without jq, or for a payload that names
+# no tool (a Notification dialog), it falls back to <fallback>.
+fm_prompt_wait_tool_command() {  # <payload> <fallback>
+  local payload=$1 tool='' command=''
+  if [ -n "$payload" ] && command -v jq >/dev/null 2>&1; then
+    tool=$(printf '%s' "$payload" | jq -r '.tool_name // empty' 2>/dev/null) || tool=''
+    command=$(printf '%s' "$payload" | jq -r '
+      if .tool_input == null then (.message // empty)
+      else ((.tool_input.command // .tool_input.file_path // .tool_input.path
+              // .tool_input.url // (.tool_input | tojson)) | tostring)
+      end' 2>/dev/null) || command=''
+  fi
+  [ -n "$command" ] || command=$2
+  command=$(printf '%s' "$command" | fm_prompt_wait_one_line | cut -c "1-$FM_PROMPT_WAIT_COMMAND_MAX")
+  tool=$(printf '%s' "$tool" | LC_ALL=C tr -c 'A-Za-z0-9_.:-' '_' | cut -c 1-64)
+  if [ -n "$tool" ]; then
+    printf '%s %s' "$tool" "$command"
+  else
+    printf '%s' "$command"
+  fi
+}
+
+# Append one worker status line to the task's status log. The append is what
+# wakes firstmate, exactly as a worker's own `blocked:` line does.
+fm_prompt_wait_status_append() {  # <state-dir> <id> <line>
+  printf '%s\n' "$3" >> "$1/$2.status" 2>/dev/null || return 0
 }
 
 # 0 when <gen> is the task's currently armed incarnation. An unarmed task has no
@@ -157,7 +216,7 @@ fm_prompt_wait_valid_id() {  # <id>
 }
 
 cmd_record() {  # <state-dir> <id> --gen G --source S --event E
-  local state=$1 id=$2 gen='' source='' event='' rec summary line open_gen
+  local state=$1 id=$2 gen='' source='' event='' rec summary line open_gen payload
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -183,7 +242,8 @@ cmd_record() {  # <state-dir> <id> --gen G --source S --event E
     rm -f -- "$rec" 2>/dev/null || return 0
   fi
 
-  summary=$(fm_prompt_wait_summary_from_payload "$event")
+  payload=$(cat 2>/dev/null) || payload=''
+  summary=$(fm_prompt_wait_summary_from_payload "$event" "$payload")
   source=$(printf '%s' "$source" | fm_prompt_wait_clean)
   event=$(printf '%s' "$event" | fm_prompt_wait_clean)
   line=$(printf 'gen=%s\tat=%s\tsource=%s\tevent=%s\tsummary=%s' \
@@ -191,6 +251,8 @@ cmd_record() {  # <state-dir> <id> --gen G --source S --event E
   # noclobber makes the create itself the episode lock: two harness events
   # describing the same blocked prompt race here and exactly one wins.
   ( set -C; printf '%s\n' "$line" > "$rec" ) 2>/dev/null || return 0
+  fm_prompt_wait_status_append "$state" "$id" \
+    "blocked [at=$(date +%s)] [key=$FM_PROMPT_WAIT_STATUS_KEY]: refused-pending: $(fm_prompt_wait_tool_command "$payload" "$event") (prompt waiting)"
   return 0
 }
 
@@ -205,16 +267,51 @@ cmd_clear() {  # <state-dir> <id> --gen G
   done
   fm_prompt_wait_valid_id "$id" || return 0
   fm_prompt_wait_gen_current "$state" "$id" "$gen" || return 0
-  rm -f -- "$(fm_prompt_wait_record_path "$state" "$id")" \
-    "$(fm_prompt_wait_ring_path "$state" "$id")" 2>/dev/null || return 0
+  fm_prompt_wait_close "$state" "$id" "prompt no longer waiting" || return 0
   return 0
+}
+
+# Remove the open record and ladder, closing the record's status-log blocker
+# when a record was actually open, so firstmate's open decisions do not keep
+# a prompt that is already over.
+fm_prompt_wait_close() {  # <state-dir> <id> <how>
+  local state=$1 id=$2 rec
+  rec=$(fm_prompt_wait_record_path "$state" "$id")
+  if [ -e "$rec" ] || [ -L "$rec" ]; then
+    rm -f -- "$rec" "$(fm_prompt_wait_ring_path "$state" "$id")" || return 1
+    fm_prompt_wait_status_append "$state" "$id" \
+      "resolved [at=$(date +%s)] [key=$FM_PROMPT_WAIT_STATUS_KEY]: $3"
+    return 0
+  fi
+  rm -f -- "$(fm_prompt_wait_ring_path "$state" "$id")"
 }
 
 cmd_retire() {  # <state-dir> <id>
   local state=$1 id=$2
   fm_prompt_wait_valid_id "$id" || return 1
-  rm -f -- "$(fm_prompt_wait_record_path "$state" "$id")" \
-    "$(fm_prompt_wait_ring_path "$state" "$id")"
+  fm_prompt_wait_close "$state" "$id" "prompt closed: the agent that asked was replaced"
+}
+
+cmd_denied() {  # <state-dir> <id> --gen G   (PermissionDenied payload on stdin)
+  local state=$1 id=$2 gen='' payload reason=''
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --gen) gen=${2-}; shift 2 || return 0 ;;
+      *) return 0 ;;
+    esac
+  done
+  fm_prompt_wait_valid_id "$id" || return 0
+  [ -d "$state" ] || return 0
+  fm_prompt_wait_gen_current "$state" "$id" "$gen" || return 0
+  payload=$(cat 2>/dev/null) || payload=''
+  if [ -n "$payload" ] && command -v jq >/dev/null 2>&1; then
+    reason=$(printf '%s' "$payload" | jq -r '.reason // empty' 2>/dev/null) || reason=''
+  fi
+  reason=$(printf '%s' "${reason:-no reason given}" | fm_prompt_wait_clean)
+  fm_prompt_wait_status_append "$state" "$id" \
+    "blocked [at=$(date +%s)] [key=$FM_PROMPT_WAIT_DENIED_KEY]: refused: $(fm_prompt_wait_tool_command "$payload" "a tool call") (classifier $reason)"
+  return 0
 }
 
 cmd_due() {  # <state-dir> <id>
@@ -270,7 +367,7 @@ cmd_summary() {  # <state-dir> <id>
 
 CMD=${1:-}
 case "$CMD" in
-  record|clear|retire|due|resurfaced|summary) ;;
+  record|clear|retire|denied|due|resurfaced|summary) ;;
   *) usage ;;
 esac
 shift
