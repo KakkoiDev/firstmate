@@ -550,12 +550,13 @@ fi
 
 # Jev decision gate (bin/fm-jev-gate-lib.sh owns the ask and the refusal):
 # every text steer declares either firstmate's mid-task-ask classification,
-# asked with the steer text and the task's brief as context, or
+# asked with the steer text, the task's last 20 status lines, and the task's
+# brief as context, or
 # --not-a-decision. Jev's classification acts only when config/jev-authority
 # lists mid-task-ask, and the steer is sent whichever answer acts. A
 # --fire-and-forget delivery and the --key path are exempt.
 fm_send_jev_gate() {
-  local ctx msg task=
+  local ctx msg events task=
   [ -z "$FIRE_AND_FORGET_ID" ] || return 0
   fm_jev_gate_enabled || return 0
   if [ "$NOT_A_DECISION" = 1 ]; then
@@ -569,11 +570,18 @@ fm_send_jev_gate() {
   [ -z "$TARGET_META" ] || task=$(fm_send_id_from_meta "$TARGET_META")
   ctx=$(mktemp) || fm_jev_gate_refuse fm-send.sh "mktemp failed; nothing was sent"
   msg=$(mktemp) || { rm -f "$ctx"; fm_jev_gate_refuse fm-send.sh "mktemp failed; nothing was sent"; }
+  events=$(mktemp) || { rm -f "$ctx" "$msg"; fm_jev_gate_refuse fm-send.sh "mktemp failed; nothing was sent"; }
   printf '%s\n' "$MESSAGE" > "$msg"
-  fm_jev_gate_context "$ctx" "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$task/brief.md" "Mid-task ask" "$msg"
+  if [ -n "$task" ] && [ -s "$STATE/$task.status" ]; then
+    tail -n 20 "$STATE/$task.status" > "$events" 2>/dev/null || : > "$events"
+  else
+    printf 'none recorded\n' > "$events"
+  fi
+  fm_jev_gate_context "$ctx" "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$task/brief.md" "Mid-task ask" "$msg" \
+    "The worker's last status lines, its own event log, oldest first" "$events"
   fm_jev_gate_ask fm-send.sh mid-task-ask "$MID_TASK_ASK" \
     "Does this mid-task ask for ${task:-this worker} invalidate the work under way" "$ctx"
-  rm -f "$ctx" "$msg"
+  rm -f "$ctx" "$msg" "$events"
 }
 
 # Classify a from-firstmate -> secondmate request. Only a task selector resolved
