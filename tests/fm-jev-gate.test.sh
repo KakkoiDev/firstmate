@@ -41,7 +41,7 @@ cat > "$FAKEBIN/tmux" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FAKE_CURL_LOG:?}/tmux"
 case "${1:-}" in
-  display-message) printf 'fakepane\n' ;;
+  display-message) printf '%s\n' "${FAKE_TMUX_PANE_CMD:-fakepane}" ;;
   capture-pane) printf '%s\n' "${FAKE_TMUX_SCREEN:-}" ;;
   list-windows) printf 'fm-t1\n' ;;
 esac
@@ -278,7 +278,8 @@ mkdir -p "$H/state/t1.inbox/handled"
 printf 'a\n' > "$H/state/t1.inbox/001.msg"
 printf 'b\n' > "$H/state/t1.inbox/002.msg"
 printf 'c\n' > "$H/state/t1.inbox/handled/000.msg"
-printf '%s\n' 'done [at=1]: ready in branch fm/t1' > "$H/state/t1.status"
+NOW=$(date +%s)
+printf '%s\n' "done [at=$NOW]: ready in branch fm/t1" > "$H/state/t1.status"
 # shellcheck disable=SC2086
 write_response_all unread-instructions $STUCK_IDS
 run "$H" code out TYPESAFE_API_KEY="$KEY" FAKE_TMUX_SCREEN='Allow this bash command? (y/n)' -- fm-control.sh t1 interrupt --worker-state unread-instructions
@@ -298,12 +299,31 @@ assert_contains "$LIVE_CTX" $'Current state:\nRead just now; it outranks every s
 assert_contains "$LIVE_CTX" "state: unknown · source: pane" "the context carries the crew-state line"
 assert_contains "$LIVE_CTX" "Unread steering-inbox messages for this worker, read just now: 2" "the context counts the unread inbox records, not handled ones"
 assert_contains "$LIVE_CTX" "Allow this bash command? (y/n)" "the context carries the endpoint screen tail"
-assert_contains "$LIVE_CTX" "done [at=1]: ready in branch fm/t1" "the old status line is still sent, as an event log"
+assert_contains "$LIVE_CTX" "done [at=$NOW]: ready in branch fm/t1" "the old status line is still sent, as an event log"
+assert_contains "$LIVE_CTX" "Agent process in the recorded endpoint: " "the context carries the agent-process state"
+assert_contains "$LIVE_CTX" "Pane foreground command: fakepane (other)" "the context carries the pane command and its class"
+grep -Eq 'Machine booted at: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z' <<<"$LIVE_CTX" || fail "the context carries no boot time: $LIVE_CTX"
+[ "$(sed -n 's/^Machine booted at: //p' <<<"$LIVE_CTX" | cut -c1-4)" -ge 2000 ] || fail "the boot time is not this machine's: $LIVE_CTX"
+assert_contains "$LIVE_CTX" "Last status line written at: $(date -u -r "$NOW" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$NOW" +%Y-%m-%dT%H:%M:%SZ)" "the context carries the last status time"
 case "$LIVE_CTX" in
   *"Current state:"*"Recent status lines, an event log"*) ;;
   *) fail "the live state must come before the status lines: $LIVE_CTX" ;;
 esac
 pass "the stuck-worker context carries crew-state, the unread inbox count, and the screen tail ahead of the status lines"
+
+# shellcheck disable=SC2086
+write_response_all endpoint-gone $STUCK_IDS
+run "$H" code out TYPESAFE_API_KEY="$KEY" FAKE_TMUX_PANE_CMD=zsh -- fm-control.sh t1 interrupt --worker-state endpoint-gone
+SHELL_CTX=$(jq -r '.state.context' "$LOG/body")
+assert_contains "$SHELL_CTX" "Pane foreground command: zsh (shell)" "a bare shell pane is classified"
+assert_contains "$SHELL_CTX" "the pane runs the bare shell zsh), so weigh those facts" "a bare shell pane names the contradiction"
+assert_not_contains "$SHELL_CTX" "it outranks every status line" "a contradicted crew-state line is not framed as outranking"
+printf '%s\n' 'done [at=1]: ready in branch fm/t1' > "$H/state/t1.status"
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-control.sh t1 interrupt --worker-state endpoint-gone
+OLD_CTX=$(jq -r '.state.context' "$LOG/body")
+assert_contains "$OLD_CTX" "contradict a live worker (the last status line predates the machine's boot)" "a status line from before the boot names the contradiction"
+assert_not_contains "$OLD_CTX" "it outranks every status line" "a pre-boot status line drops the outranks frame"
+pass "the stuck-worker context drops the outranks frame when a process fact contradicts a live worker"
 
 H=$(new_home meanings ship)
 write_response_all follow-up invalidates follow-up downstream-correction
