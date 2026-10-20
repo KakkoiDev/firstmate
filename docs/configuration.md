@@ -1775,6 +1775,10 @@ A match stops the request: the resolver behaves exactly as when it is off, print
 A list that is present but not a readable regular file also stops the request the same way rather than sending unchecked text.
 That one diagnostic names the list line number at most and never prints the listed value or the matching text.
 
+Separately from the list, and with no configuration, the resolver and `bin/fm-jev.sh ask` replace credential-shaped values with `[redacted]` before anything is sent, hashed, or recorded: private-key blocks, common token formats, Authorization and Bearer values, URL passwords, and the value of any `name=value` or `name: value` pair whose name says key, token, secret, password, or credential.
+`fm_jev_redact` in `bin/fm-jev-lib.sh` owns the patterns; it needs `perl`, and without it the request is not sent and Jev counts as off.
+The never-send list remains the way to withhold a value those patterns do not recognize.
+
 **Missing or invalid rules**
 
 An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.

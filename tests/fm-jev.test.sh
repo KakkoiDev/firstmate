@@ -893,6 +893,32 @@ assert_absent "$USAGE" "a never-send match records nothing"
 rm -rf "$HOME_DIR/config"
 pass "never-send list: a matching ask sends nothing and records nothing"
 
+# --- secret redaction: credential-shaped values never leave the machine ------------------
+reset
+# Fake credentials built at run time, so no token-shaped literal sits in the repository.
+fake_gh="ghp_$(printf 'a%.0s' {1..36})"
+fake_pw="pw-$(printf 'b%.0s' {1..12})"
+printf 'Worker env dump:\nGITHUB_TOKEN=%s\nlogin password: %s\nsame state as before\n' "$fake_gh" "$fake_pw" > "$CONTEXT"
+TYPESAFE_API_KEY=$KEY run code out err ask --type stuck-worker --summary "Worker printed $fake_gh" \
+  --question "Which state, given token=$fake_pw" --option "working=Making progress with $fake_gh." --option looping \
+  --option confused --context "$CONTEXT" --mine looping
+expect_code 0 "$code" "an ask carrying credentials still runs"
+id=$(sed -n 's/^  decision_id: //p' <<<"$out")
+[ -n "$id" ] || fail "an ask carrying credentials gets Jev's answer (stderr: $err)"
+audit="$AUDIT_DIR/$id.json"
+wait_for "claude's raw answer lands in the snapshot" has_claude_response
+for leaked in "$fake_gh" "$fake_pw"; do
+  assert_not_contains "$(cat "$LOG/body")" "$leaked" "the Jev request never carries a credential"
+  assert_not_contains "$(cat "$audit")" "$leaked" "the audit snapshot and duplicate prompt never carry a credential"
+  assert_not_contains "$(cat "$USAGE")" "$leaked" "the usage record never carries a credential"
+done
+assert_contains "$(jq -r .state.context "$LOG/body")" 'GITHUB_TOKEN=[redacted]' "the context keeps the name and drops the value"
+assert_contains "$(jq -r .state.context "$LOG/body")" 'same state as before' "the context keeps the rest"
+assert_equals 'Which state, given token=[redacted]' "$(jq -r .questions.q.instructions "$LOG/body")" "the question is redacted"
+assert_equals 'Making progress with [redacted].' "$(jq -r .questions.q.criteria.working "$LOG/body")" "option meanings are redacted"
+printf '%s\n' 'Worker pane shows the same test failing for the third time.' 'CONTEXT-ONLY-MARKER' > "$CONTEXT"
+pass "secret redaction: the request, snapshot, duplicate prompt, and record carry no credential"
+
 # --- question templates: required fields rendered into the English state ----------------
 # write_choice <choice> <confidence> <option>...: a Jev answer over those options.
 write_choice() {

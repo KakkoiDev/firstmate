@@ -117,7 +117,9 @@
 #        --context file, when given;
 #     6. the type's standing rules (fm_jev_constraints in bin/fm-jev-lib.sh);
 #        the call record's constraints_sent says whether any went out.
-#   --mine never enters the state. The duplicate queries and the audit
+#   --mine never enters the state. The summary, question, option meanings,
+#   and whole state pass through fm_jev_redact in bin/fm-jev-lib.sh before
+#   anything is hashed, recorded, or sent. The duplicate queries and the audit
 #   snapshot see the same state. The summary is one English line naming the
 #   request or action the decision is about.
 #   Manual types (MANUAL_TYPES below: the types firstmate asks by hand, with
@@ -637,6 +639,14 @@ cmd_ask() {
     echo "jev: error (curl not installed)" >&2
     ledger off
   fi
+  if ! command -v perl >/dev/null 2>&1; then
+    echo "jev: off (perl not installed, so secrets cannot be redacted; nothing sent)" >&2
+    ledger off
+  fi
+  summary=$(fm_jev_redact <<<"$summary") || die "could not redact secrets from the summary"
+  question=$(fm_jev_redact <<<"$question") || die "could not redact secrets from the question"
+  criteria=$(fm_jev_redact <<<"$criteria") || die "could not redact secrets from the options"
+  jq -e . >/dev/null 2>&1 <<<"$criteria" || die "redacting the options broke their JSON"
 
   # One private copy of the context, so the bytes sent, hashed, and snapshotted
   # are the same even if the caller rewrites or deletes its file.
@@ -658,6 +668,9 @@ cmd_ask() {
   fi
   if rules=$(fm_jev_constraints "$qtype"); then
     { ctx_gap; printf '%s\n' "$rules"; } >> "$ctx" && constraints_sent=true
+  fi
+  if ! { fm_jev_redact < "$ctx" > "$resp" && cat "$resp" > "$ctx"; }; then
+    die "could not redact secrets from the context"
   fi
   sha=$(fm_jev_sha256 "$ctx")
   request=$(jq -n --rawfile context "$ctx" --arg model "$FM_JEV_MODEL" \

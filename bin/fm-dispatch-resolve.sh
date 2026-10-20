@@ -44,6 +44,8 @@
 #   "dispatch-resolve: off (...; nothing sent)" line on stderr naming at most
 #   the list line number, never its value, prints nothing on stdout, and exits
 #   0 with no network or quota call, exactly like the absent-key off path.
+#   Before that check, the text sent passes through fm_jev_redact in
+#   bin/fm-jev-lib.sh, which replaces credential-shaped values.
 #
 # Output (stdout, TOON-style block):
 #   dispatch-resolve:
@@ -391,6 +393,10 @@ if STANDING_RULES=$(FM_CONFIG_OVERRIDE="$CONFIG" fm_jev_constraints dispatch-rul
 fi
 LAT_MS=null
 command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
+command -v perl >/dev/null 2>&1 || never_send_off "perl not installed, so secrets cannot be redacted"
+if ! { fm_jev_redact < "$TASK_TEXT" > "$RESP_FILE" && cat "$RESP_FILE" > "$TASK_TEXT" && : > "$RESP_FILE"; }; then
+  die "could not redact secrets from the brief text"
+fi
   REQUEST=$(jq -n --rawfile brief "$TASK_TEXT" --arg project "$PROJECT" --arg model "$DISPATCH_MODEL" \
     --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
     ($rules[0]) as $cfg |

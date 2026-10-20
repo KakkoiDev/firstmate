@@ -464,6 +464,23 @@ TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
 assert_contains "$out" '  status: clear' "a list with no match leaves resolution unchanged"
 assert_contains "$(jq -r .state.task.brief "$LOG/body")" 'Acme-Ledger' "a list with no match sends the task text"
 
+SECRET_BRIEF="$TMP_ROOT/secret-brief.md"
+# Fake credentials built at run time, so no token-shaped literal sits in the repository.
+fake_key="sk-$(printf 'c%.0s' {1..30})"
+fake_pw="hunter-$(printf 'd%.0s' {1..8})"
+printf '# Task\n## Captain'"'"'s intent\nRotate the key %s and set DB_PASSWORD=%s.\n' "$fake_key" "$fake_pw" > "$SECRET_BRIEF"
+rm -f "$NEVER_SEND"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$SECRET_BRIEF" --project pager
+assert_contains "$out" '  status: clear' "a brief carrying credentials still resolves"
+assert_contains "$(jq -r .state.task.brief "$LOG/body")" 'Rotate the key [redacted] and set DB_PASSWORD=[redacted]' \
+  "the brief text keeps its words and drops the credential values"
+for leaked in "$fake_key" "$fake_pw"; do
+  assert_not_contains "$(cat "$LOG/body")" "$leaked" "the resolver request never carries a credential"
+  assert_not_contains "$(grep -rF -- "$leaked" "$HOME_DIR" 2>/dev/null)" "$leaked" "no home record keeps a credential"
+done
+
 printf '%s\n' '# private values' '' '  acme-ledger  ' > "$NEVER_SEND"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager

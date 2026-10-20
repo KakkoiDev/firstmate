@@ -63,6 +63,16 @@
 #   match or no list, and 2 prints why the list could not be checked. Callers
 #   send nothing on 0 or 2 and never print the matched value.
 #
+# Secret redaction: fm_jev_redact reads text on stdin and prints it with
+#   credential-shaped values replaced by [redacted]: PEM private-key blocks,
+#   known token prefixes (GitHub, OpenAI and Anthropic sk-, Slack, AWS access
+#   key ids, Google API keys, Notion, GitLab, npm), JWTs, Authorization and
+#   Bearer values, URL passwords, and the value of a name=value or name: value
+#   pair whose name says key, token, secret, password, or credential. No
+#   pattern consumes a double quote or backslash, so it is safe on JSON text.
+#   Callers run every text about to leave the machine through it; the
+#   never-send list above still blocks named values the patterns miss.
+#
 # Standing rules: fm_jev_constraints <question-type> prints the block a caller
 #   appends to the context of an ask of that type, read from the optional
 #   ${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/jev-constraints, whose format
@@ -364,6 +374,19 @@ fm_jev_turn_words() {
         "The operator'\''s words this turn, verbatim, oldest first:",
         (.[] | "Message at \(.ts // "an unrecorded time"):", .prompt)
       end' "$FM_HOME/state/jev-turn-words.jsonl" 2>/dev/null || true
+}
+
+fm_jev_redact() {
+  perl -0777 -pe '
+    my $r = "[redacted]";
+    s/-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----[^"]*?(?:-----END \1PRIVATE KEY-----|(?=")|\z)/$r/g;
+    s/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[abprse]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|ntn_[A-Za-z0-9]{20,}|secret_[A-Za-z0-9]{32,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{30,})/$r/g;
+    s/\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/$r/g;
+    s/\b(Authorization[ \t]*:[ \t]*(?:(?:Bearer|Basic|Token)[ \t]+)?)[^\s"\\]+/$1$r/gi;
+    s/\b(Bearer[ \t]+)[A-Za-z0-9._~+\/=-]{16,}/$1$r/g;
+    s{(\b[a-z][a-z0-9+.-]*://[^\s/:@"\\]+:)[^\s/@"\\]+@}{$1$r\@}gi;
+    s/\b([A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|secret|token|passw(?:or)?d|credential|auth[_-]?token)[A-Za-z0-9_.-]*[ \t]*[:=][ \t]*)("[^"\n\\]{6,}"|\x27[^\x27\n\\]{6,}\x27|(?![\$<\[])[^\s"\x27,;\\]{6,})/$1$r/gi;
+  '
 }
 
 fm_jev_constraints() {  # <question-type>
