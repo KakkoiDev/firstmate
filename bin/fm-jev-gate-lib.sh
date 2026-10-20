@@ -235,21 +235,88 @@ fm_jev_gate_context() {
   } > "$out"
 }
 
+# fm_jev_gate_iso <epoch>: the epoch as ISO-8601 UTC, empty when it cannot be
+# formatted.
+fm_jev_gate_iso() {
+  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
+}
+
+# fm_jev_gate_boot_epoch: the machine's boot time in epoch seconds, from
+# sysctl kern.boottime (macOS) or /proc/stat btime (Linux); empty when neither
+# reads.
+fm_jev_gate_boot_epoch() {
+  local v
+  v=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9][0-9]*\).*/\1/p')
+  [ -n "$v" ] || v=$(awk '$1 == "btime" { print $2 }' /proc/stat 2>/dev/null)
+  printf '%s' "$v"
+}
+
+# fm_jev_gate_status_epoch <status-file>: when the last status line was
+# written, from its [at=<epoch>] stamp, else the file's mtime; empty when
+# there is no status file.
+fm_jev_gate_status_epoch() {
+  local v
+  [ -f "$1" ] || return 0
+  v=$(tail -n 1 "$1" 2>/dev/null | sed -n 's/^[^:]*\[at=\([0-9][0-9]*\)\].*/\1/p')
+  [ -n "$v" ] || v=$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null)
+  printf '%s' "$v"
+}
+
 # fm_jev_gate_live_state <out-file> <task-id> <state-dir>
 # Writes the worker's state as read now: bin/fm-crew-state.sh's line, the
-# unread steering-inbox count, and the tail of the endpoint screen, each
-# labelled, so a stale status line cannot outweigh them. A part that cannot be
-# read says so instead of being left out.
+# process facts (the agent-process state in the recorded endpoint from
+# fm_backend_agent_state, the tmux pane's foreground command and its
+# fm_agent_process_classify_name class, the machine's boot time, and when the
+# last status line was written), the unread steering-inbox count, and the tail
+# of the endpoint screen, each labelled. The crew-state line is framed as
+# outranking the status lines only while no process fact contradicts it; when
+# the agent process reads dead or missing, the pane runs a bare shell, or the
+# last status line predates the boot, the frame names that contradiction
+# instead. A part that cannot be read says so instead of being left out.
 fm_jev_gate_live_state() {
   local out=$1 id=$2 state=$3 line unread tail_lines=${FM_JEV_GATE_SCREEN_TAIL_LINES:-25} screen=''
+  local backend='' agent='' pane='' class='' boot status_at contra='' frame
   line=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$state "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>&1 | head -n 3) || line=''
   [ -n "$line" ] || line='state: unknown · source: none · fm-crew-state.sh printed nothing'
   unread=$(fm_task_inbox_unhandled_count "$state" "$id")
   if fm_backend_validate_task_endpoint "$state/$id.meta" "$id" >/dev/null 2>&1; then
-    screen=$(fm_backend_capture "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET" "$tail_lines" "fm-$id" 2>/dev/null) || screen=''
+    backend=$FM_BACKEND_VALIDATED_BACKEND
+    fm_backend_source "$backend" >/dev/null 2>&1 || true
+    screen=$(fm_backend_capture "$backend" "$FM_BACKEND_VALIDATED_TARGET" "$tail_lines" "fm-$id" 2>/dev/null) || screen=''
+    agent=$(fm_backend_agent_state "$backend" "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null) || agent=''
+    if [ "$backend" = tmux ] && declare -F fm_backend_tmux_current_command >/dev/null; then
+      pane=$(fm_backend_tmux_current_command "$FM_BACKEND_VALIDATED_TARGET")
+      [ -z "$pane" ] || ! declare -F fm_agent_process_classify_name >/dev/null \
+        || class=$(fm_agent_process_classify_name "$pane")
+    fi
+  fi
+  boot=$(fm_jev_gate_boot_epoch)
+  status_at=$(fm_jev_gate_status_epoch "$state/$id.status")
+  case "$agent" in
+    dead | missing) contra="the agent process reads $agent" ;;
+  esac
+  [ "$class" != shell ] || contra="${contra:+$contra, and }the pane runs the bare shell $pane"
+  if [ -n "$boot" ] && [ -n "$status_at" ] && [ "$status_at" -lt "$boot" ]; then
+    contra="${contra:+$contra, and }the last status line predates the machine's boot"
+  fi
+  if [ -n "$contra" ]; then
+    frame="Read just now, but the process facts below contradict a live worker ($contra), so weigh those facts over this line and over every status line"
+  else
+    frame='Read just now; it outranks every status line below, which is an event log and can be stale'
   fi
   {
-    printf 'Read just now; it outranks every status line below, which is an event log and can be stale:\n%s\n\n' "$line"
+    printf '%s:\n%s\n\n' "$frame" "$line"
+    printf 'Process facts, read just now:\n'
+    printf 'Agent process in the recorded endpoint: %s\n' "${agent:-(could not be read)}"
+    if [ "$backend" = tmux ]; then
+      printf 'Pane foreground command: %s\n' "${pane:-(could not be read)}${pane:+ (${class:-unclassified})}"
+    else
+      printf 'Pane foreground command: (not read for this endpoint)\n'
+    fi
+    [ -z "$boot" ] || boot=$(fm_jev_gate_iso "$boot")
+    [ -z "$status_at" ] || status_at=$(fm_jev_gate_iso "$status_at")
+    printf 'Machine booted at: %s\n' "${boot:-(could not be read)}"
+    printf 'Last status line written at: %s\n\n' "${status_at:-(no status line)}"
     printf 'Unread steering-inbox messages for this worker, read just now: %s\n\n' "$unread"
     printf 'Endpoint screen tail, last %s lines, read just now:\n' "$tail_lines"
     if [ -n "$screen" ]; then printf '%s\n' "$screen"; else printf '(the endpoint screen could not be read)\n'; fi
