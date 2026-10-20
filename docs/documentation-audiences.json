@@ -605,6 +605,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/worker-prompt-wait.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/voice-relay.md",
       "audience": "operator-current"
     },
