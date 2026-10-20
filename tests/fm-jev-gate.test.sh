@@ -423,6 +423,26 @@ run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-send.sh t1 --mid-task-ask follow
 assert_contains "$(jq -r '.state.context' "$LOG/body")" "oldest first:"$'\n'"none recorded" "a task with no status says none recorded"
 pass "a mid-task ask carries the worker's last twenty status lines as an event log"
 
+# --- scout report asks: the brief and the recorded captain calls ride along -----
+
+H=$(new_home holds scout)
+printf 'decisions_reviewed=1\ndecision_keys=t1-pick-db\n' >> "$H/state/t1.meta"
+printf 'needs-decision [key=auth]: pick the auth provider\n' > "$H/state/t1.status"
+write_response_all no yes no
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-teardown.sh t1 --report-has-captain-call no --scout-recommends-ship no
+assert_contains "$out" "jev scout-recommends-ship decision " "the report asks went out"
+HOLDS_CTX=$(jq -r '.state.context' "$LOG/body")
+assert_contains "$HOLDS_CTX" "The scout's instructions:"$'\n'"## Captain's intent" "the scout's brief sections go, labelled"
+assert_contains "$HOLDS_CTX" "Fix the flaky login test." "the brief's intent goes"
+assert_contains "$HOLDS_CTX" "Captain calls already recorded for this scout:" "the recorded captain calls are labelled"
+assert_contains "$HOLDS_CTX" "- inventory task t1-pick-db: " "the completion inventory entry goes with its state"
+assert_contains "$HOLDS_CTX" "- open decision auth in the status log: pick the auth provider" "an open keyed decision goes"
+assert_contains "$HOLDS_CTX" "The flake is a race in the fixture." "the report still goes"
+H=$(new_home noholds scout)
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-teardown.sh t1 --report-has-captain-call no --scout-recommends-ship no
+assert_contains "$(jq -r '.state.context' "$LOG/body")" "Captain calls already recorded for this scout:"$'\n'"none" "a scout with no recorded call says none"
+pass "the scout report asks carry the scout's brief and its recorded captain calls"
+
 # --- blind choice before the answer, through a gated script -------------------
 
 H=$(new_home blind ship)
