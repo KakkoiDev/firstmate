@@ -28,14 +28,19 @@
 #     exactly when no hook blocked. The previous turn ended when a summary
 #     appended since the previous prompt has an empty hookErrors; one with a
 #     non-empty hookErrors is a block, and no summary means no Stop yet.
-#     $FM_HOME/state/jev-turn-anchor holds "<session_id>\t<transcript path>\t<summary count>"
-#     as of the previous prompt. When the transcript is not readable, the
-#     anchor names another session or transcript or more summaries than the
-#     transcript holds, or a summary since it has no hookErrors array, the
-#     turn ended when $FM_HOME/state/jev-turn-closed exists
+#     $FM_HOME/state/jev-turn-anchor holds "<session_id>\t<transcript path>\tb<byte size>"
+#     as of the previous prompt, and only the transcript bytes after that
+#     size are read, so the cost follows what one turn appended rather than
+#     the whole transcript. When the transcript is not readable, the anchor
+#     names another session or transcript, is in another format, or holds a
+#     size past the transcript's end, or a summary since it has no hookErrors
+#     array, the turn ended when $FM_HOME/state/jev-turn-closed exists
 #     (bin/fm-jev-stop-check.sh writes it when its own check allows the turn
 #     end). Every prompt removes the marker and rewrites the anchor.
 #     Otherwise the prompt arrived mid-turn and is added to the same turn.
+#     The words are set aside before the transcript is read and put back only
+#     once the prompt is known to be mid-turn, so a run cut short, such as by
+#     the hook timeout, leaves no words rather than an earlier turn's.
 #     A prompt is the operator's words, and is appended, unless it is empty,
 #     carries FIRSTMATE_OP:, opens with <task-notification> (Claude's own
 #     rewake), or is an operational-input doorbell whose record exists
@@ -65,41 +70,46 @@ operator_words() {  # <prompt>
 
 SUMMARY='"type":"system","subtype":"stop_hook_summary"'
 
-# turn_ended: prints yes or no when the transcript's Stop summaries since the
-# anchor tell whether the previous turn ended, and nothing when they cannot.
-turn_ended() {  # <session> <transcript> <summary count now>
-  local a_session a_path a_count
-  IFS=$'\t' read -r a_session a_path a_count < "$state/jev-turn-anchor" 2>/dev/null || return 0
+# turn_ended: prints yes or no when the transcript's Stop summaries between
+# the anchor's size and <size now> tell whether the previous turn ended, and
+# nothing when they cannot. No byte before the anchor's size is read.
+turn_ended() {  # <session> <transcript> <size now>
+  local a_session a_path a_size
+  IFS=$'\t' read -r a_session a_path a_size < "$state/jev-turn-anchor" 2>/dev/null || return 0
   [ "$a_session" = "$1" ] && [ "$a_path" = "$2" ] || return 0
-  case "$a_count" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$a_count" -le "$3" ] || return 0
-  grep -F -- "$SUMMARY" "$2" | tail -n "+$((a_count + 1))" | jq -rs '
+  case "$a_size" in b[0-9]*) a_size=${a_size#b} ;; *) return 0 ;; esac
+  case "$a_size" in *[!0-9]*) return 0 ;; esac
+  [ "$a_size" -le "$3" ] || return 0
+  tail -c "+$((a_size + 1))" "$2" | head -c "$(($3 - a_size))" | grep -F -- "$SUMMARY" | jq -rs '
     [.[] | .hookErrors | if type != "array" then "unknown" elif length == 0 then "end" else "block" end]
     | if index("end") != null then "yes" elif index("unknown") != null then empty else "no" end'
 }
 
 record_words() {
   local words="$state/jev-turn-words.jsonl" closed="$state/jev-turn-closed" anchor="$state/jev-turn-anchor"
-  local prompt session last transcript count='' ended=''
+  local aside="$state/jev-turn-words.aside" prompt session last transcript size='' ended=''
   command -v jq >/dev/null 2>&1 || return 0
   prompt=$(jq -j 'if type == "object" and (.prompt | type) == "string" then .prompt else empty end' <<<"$payload" 2>/dev/null) || return 0
   session=$(jq -r 'if type == "object" then (.session_id // "") | tostring else "" end' <<<"$payload" 2>/dev/null) || session=''
   transcript=$(jq -r 'if type == "object" then (.transcript_path // "") | tostring else "" end' <<<"$payload" 2>/dev/null) || transcript=''
-  if [ -s "$words" ] && [ -n "$session" ]; then
-    last=$(tail -n 1 "$words" | jq -r '.session_id // ""' 2>/dev/null) || last=''
-    [ -z "$last" ] || [ "$last" = "$session" ] || : > "$words"
+  rm -f "$aside"
+  [ ! -e "$words" ] || mv -f "$words" "$aside" || return 0
+  if [ -s "$aside" ] && [ -n "$session" ]; then
+    last=$(tail -n 1 "$aside" | jq -r '.session_id // ""' 2>/dev/null) || last=''
+    [ -z "$last" ] || [ "$last" = "$session" ] || rm -f "$aside"
   fi
   if [ -n "$transcript" ] && [ -f "$transcript" ] && [ -r "$transcript" ]; then
-    count=$(grep -cF -- "$SUMMARY" "$transcript" 2>/dev/null)
-    case "$count" in ''|*[!0-9]*) count='' ;; esac
+    size=$(wc -c < "$transcript" 2>/dev/null | tr -d '[:space:]')
+    case "$size" in ''|*[!0-9]*) size='' ;; esac
   fi
-  [ -z "$count" ] || ended=$(turn_ended "$session" "$transcript" "$count" 2>/dev/null)
+  [ -z "$size" ] || ended=$(turn_ended "$session" "$transcript" "$size" 2>/dev/null)
   if [ "$ended" = yes ] || { [ -z "$ended" ] && [ -e "$closed" ]; }; then
-    : > "$words"
+    rm -f "$aside"
   fi
+  [ ! -e "$aside" ] || mv -f "$aside" "$words"
   rm -f "$closed"
-  if [ -n "$count" ]; then
-    printf '%s\t%s\t%s\n' "$session" "$transcript" "$count" > "$anchor"
+  if [ -n "$size" ]; then
+    printf '%s\t%s\tb%s\n' "$session" "$transcript" "$size" > "$anchor"
   else
     rm -f "$anchor"
   fi
