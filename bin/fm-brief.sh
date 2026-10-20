@@ -535,6 +535,13 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
+# Shared by the ship and scout scaffolds; the secondmate charter carries no worker rules list.
+IFS= read -r -d '' SHARED_RM_RULE <<'EOF' || true
+10. Never run `rm -r` or `rm -rf`: it triggers a confirmation prompt no human answers, so you would stall.
+   Write each attempt to a fresh timestamped directory and leave old ones in place.
+EOF
+SHARED_RM_RULE=${SHARED_RM_RULE%$'\n'}
+
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
   LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, use the lavish-axi rule: arm your board with bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>; never run lavish-axi poll yourself. Re-arm with the reply after each nonterminal round to acknowledge it, route the board feedback through your steering inbox, write needs-decision [key=board-review] with the live board URL when the captain owes a decision, and stop at session_ended or an empty End without re-arming - acknowledge that final round with bin/fm-procevent.sh handled <source-id> <sequence> to conclude and retire your board.'
@@ -581,6 +588,7 @@ $SHARED_INFRA_RULE
    genuinely cannot be done without fanning out, append \`blocked [at=<epoch>]: {why}\` and stop.
 9. Never raise your own reasoning effort above the level firstmate launched you with, and never
    use xhigh or max.
+$SHARED_RM_RULE
 
 $INBOX_SECTION
 
@@ -665,6 +673,7 @@ $SHARED_INFRA_RULE
    genuinely cannot be done without fanning out, append \`blocked [at=<epoch>]: {why}\` and stop.
 9. Never raise your own reasoning effort above the level firstmate launched you with, and never
    use xhigh or max.
+$SHARED_RM_RULE
 
 $INBOX_SECTION
 
