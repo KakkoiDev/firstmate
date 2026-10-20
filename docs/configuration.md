@@ -1872,7 +1872,7 @@ For a listed type, Jev's answer acts when its confidence is at or above the floo
 Firstmate's blind choice is recorded on listed types too, so agreement keeps being measured after a type graduates.
 Every decision records which party's answer acted, and a later human correction is graded against that party.
 
-`merge-risk`, `finding-authority`, `report-has-captain-call`, and `mid-task-ask` are never handed to Jev: a line naming one, or a malformed line, is refused with one warning and grants nothing.
+`report-has-captain-call` is never handed to Jev (`NEVER_TYPES` in `bin/fm-jev.sh`): a line naming it, or a malformed line, is refused with one warning and grants nothing.
 `bin/fm-jev.sh report` shows each type's decider split, overrules per decider, graduation readiness, and a flag when the Jev model changed while the type was listed; the flag never removes a type, and its header owns the thresholds.
 An ask whose text matches the never-send list above sends nothing and counts as Jev off.
 

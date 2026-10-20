@@ -551,8 +551,8 @@ fi
 # Jev decision gate (bin/fm-jev-gate-lib.sh owns the ask and the refusal):
 # every text steer declares either firstmate's mid-task-ask classification,
 # asked with the steer text and the task's brief as context, or
-# --not-a-decision. mid-task-ask is never handed to Jev, so firstmate's
-# classification always acts and the steer is sent either way. A
+# --not-a-decision. Jev's classification acts only when config/jev-authority
+# lists mid-task-ask, and the steer is sent whichever answer acts. A
 # --fire-and-forget delivery and the --key path are exempt.
 fm_send_jev_gate() {
   local ctx msg task=
