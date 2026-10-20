@@ -103,18 +103,19 @@
 #   dash, or underscore, so a registered project name fits), --yes-no is the choice
 #   {yes, no}, and the state is the context ask builds itself, one section
 #   after another with a blank line between them:
-#     1. the template's rendered fields, when --template is given;
-#     2. the operator's words for the turn, mid-turn messages included
+#     1. "Decision about: <summary>", the summary on one line;
+#     2. the template's rendered fields, when --template is given;
+#     3. the operator's words for the turn, mid-turn messages included
 #        (fm_jev_turn_words in bin/fm-jev-lib.sh owns the section);
-#     3. per --source, in order, "Source <path>, verbatim:" and the file's
+#     4. per --source, in order, "Source <path>, verbatim:" and the file's
 #        bytes; each must be a readable, non-empty regular file;
-#     4. "Firstmate's note, its own account rather than a source:" and the
+#     5. "Firstmate's note, its own account rather than a source:" and the
 #        --context file, when given;
-#     5. the type's standing rules (fm_jev_constraints in bin/fm-jev-lib.sh);
+#     6. the type's standing rules (fm_jev_constraints in bin/fm-jev-lib.sh);
 #        the call record's constraints_sent says whether any went out.
 #   --mine never enters the state. The duplicate queries and the audit
-#   snapshot see the same state. The summary is one English line saying what
-#   is asked; it is recorded, never sent.
+#   snapshot see the same state. The summary is one English line naming the
+#   request or action the decision is about.
 #   Manual types (MANUAL_TYPES below: the types firstmate asks by hand, with
 #   no action script building the context) are refused with exit 2, asking
 #   and recording nothing, when the state would carry neither the operator's
@@ -629,7 +630,8 @@ cmd_ask() {
   ctx=$(mktemp) || die "mktemp failed"
   resp=$(mktemp) || { rm -f "$ctx"; die "mktemp failed"; }
   trap 'rm -f "$resp" "$ctx"' EXIT
-  { [ -z "$template_text" ] || printf '%s\n' "$template_text"; } > "$ctx"
+  printf 'Decision about: %s\n' "$(squash <<<"$summary")" > "$ctx"
+  [ -z "$template_text" ] || { ctx_gap; printf '%s\n' "$template_text"; } >> "$ctx"
   if [ "$have_words" = 1 ]; then
     { ctx_gap; fm_jev_turn_words; } >> "$ctx"
   fi

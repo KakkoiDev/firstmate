@@ -207,7 +207,10 @@ assert_equals 'choice' "$(jq -r .questions.q.type <<<"$body")" "the question is 
 assert_equals '{"working":"Making progress.","looping":"Repeating the same failed step.","confused":"confused"}' \
   "$(jq -c .questions.q.criteria <<<"$body")" "options become criteria, meaning defaulting to the slug"
 assert_contains "$(jq -r .state.context <<<"$body")" 'CONTEXT-ONLY-MARKER' "the context file is the state"
-assert_not_contains "$body" 'What is the stuck worker doing' "the summary is never sent"
+case "$(jq -r .state.context <<<"$body")" in
+  $'Decision about: What is the stuck worker doing\n\n'*) ;;
+  *) fail "the summary must open the context as the decision's subject line: $(jq -r .state.context <<<"$body")" ;;
+esac
 argv=$(cat "$LOG/argv")
 assert_not_contains "$argv" "$KEY" "the key never appears on curl argv"
 assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the fixed endpoint"
@@ -289,7 +292,7 @@ assert_equals "looping|looping|ok" "$(jq -r '.record | [.answer, .claude_answer,
 pass "audit snapshot: exact context and prompts, matching sha256, no key, printed by show"
 
 # --- standing rules: the type's lines ride after the context ------------------------
-NOTE_HEAD="Firstmate's note, its own account rather than a source:"$'\n'
+NOTE_HEAD=$'Decision about: What is the stuck worker doing\n\n'"Firstmate's note, its own account rather than a source:"$'\n'
 reset
 mkdir -p "$HOME_DIR/config"
 printf '%s\n' '# operator rules' 'stuck-worker A worker that repeats one failed step is looping.' '' \
@@ -314,8 +317,8 @@ reset
 printf '%s\n' 'stuck-worker Only a rule.' > "$HOME_DIR/config/jev-constraints"
 TYPESAFE_API_KEY=$KEY run code out err ask --type stuck-worker --summary 'No context' --question 'Which?' \
   --option working --option looping --option confused
-assert_equals $'Standing operator rules for this question:\n- Only a rule.' "$(jq -r .state.context "$LOG/body")" \
-  "with no context file the rules are the whole context"
+assert_equals $'Decision about: No context\n\nStanding operator rules for this question:\n- Only a rule.' "$(jq -r .state.context "$LOG/body")" \
+  "with no context file the subject and the rules are the whole context"
 wait_for "the duplicate settles before the next case" settled 1
 reset
 printf '%s\n' 'effort-level Only for effort.' > "$HOME_DIR/config/jev-constraints"
@@ -342,7 +345,7 @@ pass "standing rules: the type's lines follow the context, a missing or unmatche
 reset
 TYPESAFE_API_KEY=$KEY run code out err ask --type deploy-check --summary 'Is the deploy safe' --question 'Is it safe?' --yes-no
 assert_equals '{"yes":"Yes.","no":"No."}' "$(jq -c .questions.q.criteria "$LOG/body")" "--yes-no is the yes/no Choice"
-assert_equals '' "$(jq -r .state.context "$LOG/body")" "no context file sends an empty context"
+assert_equals 'Decision about: Is the deploy safe' "$(jq -r .state.context "$LOG/body")" "no context file sends the subject line alone"
 assert_equals '' "$out" "a response over other options is not an answer"
 assert_contains "$err" 'jev: error (response is not a Choice answer over the options)' "the mismatch is named"
 wait_for "the yes/no duplicate settles" settled 1
@@ -947,13 +950,15 @@ cc_id=$(sed -n 's/^  decision_id: //p' <<<"$out")
 body=$(cat "$LOG/body")
 assert_equals '["supported","contradicted","not-addressed"]' "$(jq -c '.questions.q.criteria | keys_unsorted' <<<"$body")" "claim-check options"
 assert_equals 'Does the quoted evidence, read from the named source, support the claim?' "$(jq -r .questions.q.instructions <<<"$body")" "claim-check question"
-assert_equals "Claim: PR 42 is merged.
+assert_equals "Decision about: PR 42 is merged.
+
+Claim: PR 42 is merged.
 Source: $SOURCE_FILE
 Evidence, quoted verbatim from the source:
 state: OPEN
 
 Firstmate's note, its own account rather than a source:
-The operator asked for the ticket to show the PR state." "$(jq -r .state.context <<<"$body")" "the fields are the English state, then firstmate's labelled note"
+The operator asked for the ticket to show the PR state." "$(jq -r .state.context <<<"$body")" "the subject line, the fields as the English state, then firstmate's labelled note"
 assert_equals 'claim-check|PR 42 is merged.' "$(calls | jq -r '[.question_type, .summary] | join("|")')" "the summary defaults to the claim, since the type is its own field"
 assert_contains "$err" "jev: WARNING: firstmate disagrees with Jev on claim-check $cc_id: jev contradicted (0.8), firstmate supported" "a disagreeing claim-check warns"
 assert_equals "firstmate|claim-check|notion:26ab1f9f4c5f80b18d3bd10a6b1d2f4e|$cc_id|ok|supported|contradicted|0.8" \
@@ -976,7 +981,9 @@ TYPESAFE_API_KEY=$KEY run code out err ask --template ask-scope --words 'update 
   --candidate 'page-a=The login flake ticket' --candidate page-b --mine page-a
 body=$(cat "$LOG/body")
 assert_equals '["page-a","page-b","several","unclear"]' "$(jq -c '.questions.q.criteria | keys_unsorted' <<<"$body")" "ask-scope options"
-assert_equals "The operator's words, verbatim:
+assert_equals "Decision about: update the login ticket
+
+The operator's words, verbatim:
 update the login ticket
 Candidate targets:
 - page-a: The login flake ticket
@@ -1124,7 +1131,7 @@ expect_code 0 "$code" "a manual ask with sources"
 assert_contains "$out" '  answer: ship   confidence: 0.9' "the ask with --source reaches Jev"
 ctx=$(sent_context); ctx=${ctx%x}
 raw=$(cat "$RAW"; printf x); raw=${raw%x}
-[[ $ctx == "Source $RAW, verbatim:"$'\n'"$raw"$'\n\n'"Source $NOTE, verbatim:"$'\n'* ]] \
+[[ $ctx == $'Decision about: Which deliverable fits the request\n\n'"Source $RAW, verbatim:"$'\n'"$raw"$'\n\n'"Source $NOTE, verbatim:"$'\n'* ]] \
   || fail "each --source is sent labelled and byte for byte, in order: $ctx"
 assert_not_contains "$ctx" "zq-mine-marker" "firstmate's --mine choice never enters the context"
 pass "each --source file reaches Jev byte for byte under its path, and --mine stays out of the context"
@@ -1139,7 +1146,9 @@ expect_code 0 "$code" "a manual ask in a turn with recorded operator words"
 ctx=$(sent_context); ctx=${ctx%x}
 ts=$(jq -r .ts "$HOME_DIR/state/jev-turn-words.jsonl" | head -n 1)
 ts2=$(jq -r .ts "$HOME_DIR/state/jev-turn-words.jsonl" | tail -n 1)
-assert_equals "The operator's words this turn, verbatim, oldest first:
+assert_equals "Decision about: Which deliverable fits the request
+
+The operator's words this turn, verbatim, oldest first:
 Message at $ts:
 are workers stuck?
 look at t1
@@ -1151,7 +1160,7 @@ $raw
 
 Firstmate's note, its own account rather than a source:
 Looks like a ship to me, so ship it.
-" "$ctx" "the operator's words come first, mid-turn message included, then the sources, then the labelled note"
+" "$ctx" "the subject line, then the operator's words, mid-turn message included, then the sources, then the labelled note"
 assert_not_contains "$ctx" "zq-mine-marker" "firstmate's choice is absent from a context built with words and a note"
 wait_for "the manual asks settle" settled 1
 TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --context "$NOTE" --mine ship
