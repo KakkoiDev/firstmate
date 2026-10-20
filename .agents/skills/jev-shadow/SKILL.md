@@ -58,7 +58,7 @@ Options in angle brackets are filled from the live registry or fleet at the time
 
 Every script-embedded ask sends a one-line meaning with each option; pass `--option <id>=<meaning>` on a manual ask the same way.
 The three manual types have no script boundary to enforce them; ask them with `--mine` as in step 3.
-`merge-risk`, `finding-authority`, `report-has-captain-call`, and `mid-task-ask` are never handed to Jev, so firstmate's own choice always acts on them.
+`report-has-captain-call` is never handed to Jev, so firstmate's own choice always acts on it; every other type acts on Jev's answer once `config/jev-authority` lists it.
 For `report-has-captain-call`, a Jev answer can only add candidates to your inventory; it never closes or skips the inventory `captain-hold-lifecycle` requires.
 A chat-only request with no script boundary still starts at `deliverable-class`; the prompt reminder in `.claude/settings.json` points there and never blocks.
 

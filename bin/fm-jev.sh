@@ -43,10 +43,10 @@
 #   fm-merge-local, fm-control) ask this way through bin/fm-jev-gate-lib.sh.
 # Authority file: ${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/jev-authority, written
 #   only by the human operator; docs/configuration.md "Jev authority" owns its
-#   schema. Absent or empty means Jev decides nothing (shadow only). The four
-#   never-types (merge-risk, finding-authority, report-has-captain-call,
-#   mid-task-ask) and malformed lines are refused with one stderr warning
-#   each and never grant authority.
+#   schema. Absent or empty means Jev decides nothing (shadow only). A line
+#   naming a never-type (NEVER_TYPES below: report-has-captain-call) or a
+#   malformed line is refused with one stderr warning and never grants
+#   authority.
 # --mine that differs from Jev's answer prints one stderr line
 #   "jev: WARNING: firstmate disagrees with Jev on <type> <id>: jev <answer>
 #   (<confidence>), firstmate <choice>"; record-mine prints the same line.
