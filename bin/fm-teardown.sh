@@ -572,12 +572,51 @@ fm_lease_guard "$ID" "teardown (fm-teardown)"
 
 # Jev decision gate (bin/fm-jev-gate-lib.sh owns the asks and the refusal): an
 # ordinary scout teardown carries firstmate's yes/no reading of the report for
-# report-has-captain-call and scout-recommends-ship, each asked with the report
-# as context before any lock is taken. report-has-captain-call is never handed
+# report-has-captain-call and scout-recommends-ship, each asked before any lock
+# is taken with the scout's brief task sections, its captain-hold records
+# (teardown_jev_hold_records), and the report as context. report-has-captain-call is never handed
 # to Jev; the completion gate below still decides whether cleanup may proceed.
 # An acting yes on either prints a notice and never blocks by itself.
+# teardown_jev_hold_records: the captain calls recorded for $ID, one line
+# each: the task's own hold, its completion inventory with each entry's state,
+# and the keyed decisions still open in its status log; "none" when empty.
+teardown_hold_open() {  # <task-id>: fm-captain-hold.sh open's exit code
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-captain-hold.sh" open "$1" >/dev/null 2>&1
+}
+teardown_jev_hold_records() {
+  local keys entry rc key summary found=0
+  rc=0
+  teardown_hold_open "$ID" || rc=$?
+  case "$rc" in
+    0) echo "- $ID itself is held for the captain"; found=1 ;;
+    2) echo "- whether $ID itself is held for the captain could not be read"; found=1 ;;
+  esac
+  if [ "$(fm_meta_get "$STATE/$ID.meta" decisions_reviewed)" = 1 ]; then
+    keys=$(fm_meta_get "$STATE/$ID.meta" decision_keys)
+    [ -n "$keys" ] || { echo "- completion inventory attested with no captain call"; found=1; }
+    while IFS= read -r entry; do
+      [ -n "$entry" ] || continue
+      rc=0
+      teardown_hold_open "$entry" || rc=$?
+      case "$rc" in
+        0) echo "- inventory task $entry: still held for the captain" ;;
+        1) echo "- inventory task $entry: no longer held" ;;
+        *) echo "- inventory task $entry: state could not be read" ;;
+      esac
+      found=1
+    done < <(printf '%s\n' "$keys" | tr ',' '\n')
+  fi
+  while IFS=$'\t' read -r key _ summary || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    echo "- open decision $key in the status log: $summary"
+    found=1
+  done < <(status_open_decisions "$STATE/$ID.status")
+  [ "$found" = 1 ] || echo none
+}
+
 teardown_jev_gate() {
-  local kind ctx type mine
+  local kind ctx type mine brief holds
   fm_jev_gate_enabled || return 0
   [ "$FORCE" != --force ] || return 0
   [ -f "$STATE/$ID.meta" ] || return 0
@@ -592,7 +631,14 @@ teardown_jev_gate() {
     esac
   done
   ctx=$(mktemp) || fm_jev_gate_refuse fm-teardown.sh "mktemp failed; nothing was changed"
-  fm_jev_gate_context "$ctx" "$DATA/$ID/report.md"
+  brief=$(mktemp) || { rm -f "$ctx"; fm_jev_gate_refuse fm-teardown.sh "mktemp failed; nothing was changed"; }
+  holds=$(mktemp) || { rm -f "$ctx" "$brief"; fm_jev_gate_refuse fm-teardown.sh "mktemp failed; nothing was changed"; }
+  fm_jev_gate_context "$brief" "$DATA/$ID/brief.md"
+  [ -s "$brief" ] || printf 'none recorded\n' > "$brief"
+  teardown_jev_hold_records > "$holds"
+  fm_jev_gate_context "$ctx" "$DATA/$ID/report.md" "The scout's instructions" "$brief" \
+    "Captain calls already recorded for this scout" "$holds"
+  rm -f "$brief" "$holds"
   fm_jev_gate_ask fm-teardown.sh report-has-captain-call "$REPORT_CALL" \
     "Does the report of scout $ID contain a call only the human operator can make" "$ctx"
   [ "$FM_JEV_GATE_ACTING" != yes ] \
