@@ -126,3 +126,53 @@ summary ''
 run_payload "$(prompt_in 'fourth ask')"
 assert_equals 'fourth ask' "$(words)" "a Stop summary without a hookErrors array falls back to the marker"
 pass "the transcript's Stop summaries decide whether the turn ended, and the marker decides only when they cannot"
+
+# The anchor is the transcript's byte size at the previous prompt, and no byte
+# before it is read. The region before the anchor holds a NUL byte, which makes
+# grep treat any read covering it as binary and print no summary lines, so a
+# hook that reads the whole transcript cannot see the Stop summary that ended
+# the turn after the anchor and wrongly joins the next prompt to the old turn.
+rm -f "$WORDS" "$CLOSED" "$HOME_DIR/state/jev-turn-anchor"
+printf 'pre-anchor bytes \000 never read\n' > "$TRANSCRIPT"
+summary ',"hookErrors":[]'
+run_payload "$(prompt_in 'request before the anchor')"
+assert_equals "b$(wc -c < "$TRANSCRIPT" | tr -d ' ')" "$(cut -f3 "$HOME_DIR/state/jev-turn-anchor")" \
+  "the anchor records the transcript's byte size"
+summary ',"hookErrors":[]'
+run_payload "$(prompt_in 'request after the turn end')"
+assert_equals 'request after the turn end' "$(words)" \
+  "a Stop summary after the anchor ends the turn whatever the bytes before the anchor hold"
+pass "the prompt hook reads only the transcript bytes after its anchor"
+
+# A run cut short while reading the transcript leaves no words, never the
+# previous turn's. A grep that stalls on the Stop-summary read stands in for
+# a transcript too slow to read before the hook timeout kills the hook.
+SLOWBIN="$TMP_ROOT/slowbin"
+REACHED="$TMP_ROOT/slow-grep-reached"
+mkdir -p "$SLOWBIN"
+cat > "$SLOWBIN/grep" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *stop_hook_summary*) printf '%s\n' "\$\$" > '$REACHED'; exec sleep 30 ;;
+esac
+exec $(command -v grep) "\$@"
+SH
+chmod +x "$SLOWBIN/grep"
+rm -f "$WORDS" "$CLOSED" "$HOME_DIR/state/jev-turn-anchor" "$REACHED"
+: > "$TRANSCRIPT"
+run_payload "$(prompt_in 'old request from the previous turn')"
+summary ',"hookErrors":[]'
+printf '%s' "$(prompt_in 'new request')" > "$TMP_ROOT/slow-payload"
+env -u FM_TASK_ID FM_JEV_GATE=on FM_HOME="$HOME_DIR" PATH="$SLOWBIN:$PATH" "$HOOK" \
+  < "$TMP_ROOT/slow-payload" > /dev/null 2>&1 &
+hook_pid=$!
+for _ in $(seq 1 100); do
+  [ ! -s "$REACHED" ] || break
+  sleep 0.1
+done
+[ -s "$REACHED" ] || { kill "$hook_pid" 2>/dev/null; fail "the hook never reached the transcript read"; }
+kill "$hook_pid" 2>/dev/null
+kill "$(cat "$REACHED")" 2>/dev/null
+wait "$hook_pid" 2>/dev/null
+[ ! -s "$WORDS" ] || fail "a hook killed mid-read kept the previous turn's words: $(cat "$WORDS")"
+pass "a prompt hook cut short leaves no words rather than the previous turn's"
