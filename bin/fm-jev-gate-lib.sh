@@ -65,7 +65,8 @@ fm_jev_gate_question() {  # <type>
 }
 
 # Options per type as "id=meaning" lines, one per option; project-match and
-# secondmate-scope read the live registries. Each meaning is one line.
+# secondmate-scope read the live registries, and bin/fm-jev.sh ask fills
+# project-match from here itself. Each meaning is one line.
 # effort-level is asked only for a ship or scout spawn, so it offers no xhigh,
 # max, or ultra: bin/fm-spawn.sh refuses those levels for a worker.
 # stuck-worker names every state firstmate itself distinguishes, from:
@@ -84,11 +85,11 @@ fm_jev_gate_question() {  # <type>
 #     death evidence bin/fm-crew-state.sh reports.
 # The first six ids predate the rest and stay valid for recorded decisions.
 fm_jev_gate_option_lines() {  # <type>
-  local id
+  local id line
   case "$1" in
     project-match)
-      while IFS= read -r id; do
-        [ -z "$id" ] || printf '%s=The request is about the registered project %s.\n' "$id" "$id"
+      while IFS=$'\t' read -r id line; do
+        [ -z "$id" ] || printf '%s=The request is about the registered project whose registry entry reads: %s\n' "$id" "$line"
       done < <(fm_jev_gate_projects)
       printf 'none=No registered project fits the request.\nseveral=More than one registered project fits the request.\n'
       ;;
@@ -169,15 +170,17 @@ fm_jev_gate_options() {  # <type>
   fm_jev_gate_option_lines "$1" | sed 's/=.*//'
 }
 
-# Registered project names from data/projects.md: the text after "- " up to
-# the first " [" or " - ".
+# Registered projects from data/projects.md, one "<name>\t<line>" each: the
+# name is the text after "- " up to the first " [" or " - ", and the line is
+# the whole registry entry after "- ".
 fm_jev_gate_projects() {
   local reg="${FM_DATA_OVERRIDE:-$FM_HOME/data}/projects.md"
   [ -f "$reg" ] || return 0
   awk 'substr($0, 1, 2) == "- " {
-    n = substr($0, 3); i = index(n, " ["); j = index(n, " - ")
+    l = substr($0, 3); n = l; i = index(n, " ["); j = index(n, " - ")
     if (i && (!j || i < j)) n = substr(n, 1, i - 1); else if (j) n = substr(n, 1, j - 1)
-    if (n != "") print n }' "$reg"
+    gsub(/\t/, " ", l)
+    if (n != "") print n "\t" l }' "$reg"
 }
 
 # Registered secondmate ids from data/secondmates.md.
@@ -254,10 +257,11 @@ fm_jev_gate_live_state() {
 }
 
 # The exact command firstmate runs for a choice asked before the script.
+# project-match carries no --option: bin/fm-jev.sh ask fills it from the registry.
 fm_jev_gate_ask_command() {  # <type>
   local cmd opt
   cmd="bin/fm-jev.sh ask --type $1 --summary \"<one line naming the request>\" --question \"$(fm_jev_gate_question "$1")\""
-  while IFS= read -r opt; do
+  [ "$1" = project-match ] || while IFS= read -r opt; do
     [ -n "$opt" ] || continue
     cmd="$cmd --option $(printf '%q' "$opt")"
   done < <(fm_jev_gate_option_lines "$1")

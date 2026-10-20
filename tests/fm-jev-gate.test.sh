@@ -123,7 +123,16 @@ assert_contains "$out" "fm-spawn.sh: refused: project-match=off needs a project-
 assert_contains "$out" "  run: bin/fm-jev.sh ask --type project-match " "the off refusal names the ask"
 printf 'Fix the flaky login test.\n' > "$TMP_ROOT/off-context"
 run "$H" code out -- fm-jev.sh ask --type project-match --summary "which project" --question q \
+  --source "$TMP_ROOT/off-context" --mine spawn-proj
+expect_code 2 "$code" "project-match with an empty registry"
+assert_contains "$out" "project-match needs registered projects" "an empty registry refuses the project-match ask"
+printf -- '- spawn-proj [direct-PR] - The login service and its flaky tests\n- other-proj [no-mistakes] - Billing exports\n' > "$H/data/projects.md"
+run "$H" code out -- fm-jev.sh ask --type project-match --summary "which project" --question q \
   --option spawn-proj --option none --source "$TMP_ROOT/off-context" --mine spawn-proj
+expect_code 2 "$code" "project-match with caller options"
+assert_contains "$out" "project-match options come from the project registry" "caller options are refused for project-match"
+run "$H" code out -- fm-jev.sh ask --type project-match --summary "which project" --question q \
+  --source "$TMP_ROOT/off-context" --mine spawn-proj
 assert_contains "$out" "jev: off (TYPESAFE_API_KEY absent" "the project-match ask finds Jev off"
 run "$H" code out -- fm-jev.sh ask --type deliverable-class --summary "which deliverable" --question q \
   --option ship --option scout --source "$TMP_ROOT/off-context" --mine ship
@@ -183,12 +192,16 @@ assert_not_contains "$EFFORT_CTX" "t2 project=" "the effort ask carries no work 
 rm -f "$H/state/t2.meta" "$H/state/mate.meta"
 pass "the concurrency and effort asks carry the kind and mode, concurrency the other work, and effort no level above high"
 
-write_response spawn-proj 0.9 other-proj
 printf 'mismatch\n' > "$TMP_ROOT/pm-context"
+write_response_all spawn-proj spawn-proj other-proj none several
 run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-jev.sh ask --type project-match --summary "which project" \
-  --question "Which registered project is this request about?" --option spawn-proj --option other-proj \
+  --question "Which registered project is this request about?" \
   --source "$TMP_ROOT/pm-context" --mine other-proj
 expect_code 0 "$code" "project-match ask"
+[ "$(jq -c '.questions.q.criteria | keys_unsorted' "$LOG/body")" = '["spawn-proj","other-proj","none","several"]' ] \
+  || fail "project-match options are not the registry: $(jq -c '.questions.q.criteria' "$LOG/body")"
+assert_contains "$(jq -r '.questions.q.criteria["spawn-proj"]' "$LOG/body")" "spawn-proj [direct-PR] - The login service and its flaky tests" \
+  "each project's meaning is its whole registry entry"
 PM_ID=$(sed -n 's/^  decision_id: //p' <<<"$out")
 [ -n "$PM_ID" ] || fail "project-match ask printed no decision_id: $out"
 run "$H" code out -- "${SPAWN[@]}" --decision "project-match=$PM_ID" --decision deliverable-class=off --concurrency parallel

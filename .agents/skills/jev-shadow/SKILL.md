@@ -40,7 +40,7 @@ Options in angle brackets are filled from the live registry or fleet at the time
 
 | Type | Asked by | Question | Options |
 | --- | --- | --- | --- |
-| `project-match` | you, before `fm-spawn.sh --decision project-match=<id\|off>` | Which registered project is this request about? | `<each registered project>`, `none`, `several` |
+| `project-match` | you, before `fm-spawn.sh --decision project-match=<id\|off>` | Which registered project is this request about? | `<each registered project>`, `none`, `several`, filled by `fm-jev.sh ask` itself from `data/projects.md` with each whole registry entry as the meaning; pass no `--option` |
 | `deliverable-class` | you, before `fm-spawn.sh --decision deliverable-class=<id\|off>` | Should this message ship a change, scout for knowledge, be answered from a finished worker report or text the captain supplied, steer a worker already on it, or only be acknowledged? | `ship`, `scout`, `answer-from-evidence` (only when the answer already sits in a finished worker report under `data/` or in text the captain supplied; a fresh read of a project, PR, ticket, or outside source is `scout` or `ship`), `steer-existing`, `acknowledge` |
 | `secondmate-scope` | you, before `fm-spawn.sh --decision secondmate-scope=<id\|off>` when secondmates are registered | Which persistent secondmate scope fits this work? | `<each registered secondmate id>`, `main` |
 | `surface-class` | you, before `fm-spawn.sh --decision surface-class=<id\|off>` for a ship on a `no-mistakes-prod-only` project | Is this task's surface internal-only, product-facing, mixed, or uncertain? | `internal-only`, `product-facing`, `mixed`, `uncertain` |

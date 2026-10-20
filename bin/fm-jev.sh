@@ -101,7 +101,11 @@
 #   criteria}}}: the question text is the instructions, each --option is one
 #   criterion (its meaning defaults to the id; an id is letters, digits, dot,
 #   dash, or underscore, so a registered project name fits), --yes-no is the choice
-#   {yes, no}, and the state is the context ask builds itself, one section
+#   {yes, no}; --type project-match takes neither, because ask fills its
+#   options from the project registry, each project's whole registry entry as
+#   its meaning, then none and several (fm_jev_gate_option_lines in
+#   bin/fm-jev-gate-lib.sh), and refuses an empty registry; the state is the
+#   context ask builds itself, one section
 #   after another with a blank line between them:
 #     1. "Decision about: <summary>", the summary on one line;
 #     2. the template's rendered fields, when --template is given;
@@ -590,6 +594,15 @@ cmd_ask() {
   slug_ok "$qtype" || die "--type must be a kebab slug: $qtype"
   [ -n "$summary" ] || die "--summary required"
   [ -n "$question" ] || die "--question required"
+  if [ "$qtype" = project-match ]; then
+    [ "$criteria" = '{}' ] && [ "$yes_no" = 0 ] \
+      || die "project-match options come from the project registry; drop --option and --yes-no"
+    # shellcheck source=bin/fm-jev-gate-lib.sh
+    . "$SCRIPT_DIR/fm-jev-gate-lib.sh"
+    [ -n "$(fm_jev_gate_projects)" ] \
+      || die "project-match needs registered projects, and ${FM_DATA_OVERRIDE:-$FM_HOME/data}/projects.md lists none"
+    while IFS= read -r f; do add_option "$f"; done < <(fm_jev_gate_option_lines project-match)
+  fi
   if [ "$yes_no" = 1 ]; then
     [ "$criteria" = '{}' ] || die "--yes-no and --option are exclusive"
     criteria='{"yes":"Yes.","no":"No."}'
