@@ -405,6 +405,24 @@ assert_contains "$(jq -r .context "$H/state/jev-audit/$MR_ID.json")" "Change fea
   "an unreadable branch says the features could not be computed"
 pass "the merge-risk ask carries locally computed counts and path facts, never a path"
 
+# --- mid-task ask: the worker's recent status lines ride along -----------------
+
+H=$(new_home events ship)
+for n in $(seq 1 25); do printf 'working [at=%s]: status line %02d\n' "$n" "$n"; done > "$H/state/t1.status"
+write_response_all follow-up invalidates follow-up downstream-correction
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-send.sh t1 --mid-task-ask follow-up "Also cover the logout path."
+assert_contains "$out" "jev mid-task-ask decision " "the mid-task ask went out"
+EVENTS_CTX=$(jq -r '.state.context' "$LOG/body")
+assert_contains "$EVENTS_CTX" "The worker's last status lines, its own event log, oldest first:" "the status lines are labelled as an event log"
+assert_contains "$EVENTS_CTX" "status line 06"$'\n'"working [at=7]" "the twenty newest lines go, oldest first"
+assert_contains "$EVENTS_CTX" "status line 25" "the newest line goes"
+assert_not_contains "$EVENTS_CTX" "status line 05" "lines older than the newest twenty stay home"
+assert_contains "$EVENTS_CTX" "Fix the flaky login test." "the brief still goes"
+rm -f "$H/state/t1.status"
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-send.sh t1 --mid-task-ask follow-up "Also cover the logout path."
+assert_contains "$(jq -r '.state.context' "$LOG/body")" "oldest first:"$'\n'"none recorded" "a task with no status says none recorded"
+pass "a mid-task ask carries the worker's last twenty status lines as an event log"
+
 # --- blind choice before the answer, through a gated script -------------------
 
 H=$(new_home blind ship)
