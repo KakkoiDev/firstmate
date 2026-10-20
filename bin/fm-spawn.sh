@@ -109,6 +109,8 @@
 #   from that harness's launch rather than guessed. Ultra is the explicit
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
+#   With the Jev gate on (FM_JEV_GATE, default on), a ship or scout spawn or
+#   relaunch refuses xhigh, max, and ultra, so only a secondmate runs above high.
 #   OpenCode 2 has no interactive model or effort flag, so its selected model
 #   and effort are written as the build agent's model and variant inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
@@ -1147,6 +1149,22 @@ case "$EFFORT" in
   exit 1
   ;;
 esac
+# With the Jev gate on, a ship or scout worker never runs above high: xhigh
+# and max are banned for workers, ultra sits above max, and the effort-level
+# decision offers none of them. FM_JEV_GATE=off, as the test suite runs, keeps
+# the whole effort axis so harness launches can still be verified at every
+# level. A relaunch learns its kind from the task record, so it repeats this
+# check as soon as that record is found.
+spawn_refuse_worker_effort() {
+  fm_jev_gate_enabled || return 0
+  case "$EFFORT" in
+  xhigh | max | ultra)
+    echo "error: --effort $EFFORT is not allowed for a ${KIND:-ship} worker; use low, medium, or high" >&2
+    exit 1
+    ;;
+  esac
+}
+[ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ] || spawn_refuse_worker_effort
 
 # --relaunch reuses an existing task's endpoint, worktree, project, and kind,
 # so every axis this block resolves for a fresh spawn instead comes from that
@@ -2137,9 +2155,34 @@ spawn_gate_refuse() {  # <ctx-file|''> <message> [<command>]
 # refuses when the acting answer contradicts it: another project, another
 # deliverable, a secondmate scope, a non-internal surface under direct-PR, or
 # concurrency other than parallel; an acting effort that differs from --effort
-# replaces it. Runs before any lock, endpoint, or worktree exists.
+# replaces it. Both asks carry the task's kind and, for a ship, its delivery
+# mode; concurrency also carries every other task record in this home as id,
+# project, and kind. Runs before any lock, endpoint, or worktree exists.
+spawn_jev_kind() {  # <out-file>
+  if [ "$KIND" = scout ]; then
+    printf 'Brief kind: scout (report only)\n' > "$1"
+  else
+    printf 'Brief kind: ship (a project change)\nDelivery mode: %s\n' "$MODE" > "$1"
+  fi
+}
+spawn_jev_work_under_way() {  # <out-file>
+  local meta other kind project n=0
+  : > "$1"
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    other=${meta##*/}
+    other=${other%.meta}
+    [ "$other" != "$ID" ] || continue
+    kind=$(fm_meta_get "$meta" kind)
+    [ "$kind" != secondmate ] || continue
+    project=$(fm_meta_get "$meta" project)
+    printf '%s project=%s kind=%s\n' "$other" "${project##*/}" "${kind:-ship}" >> "$1"
+    n=$((n + 1))
+  done
+  [ "$n" -gt 0 ] || printf 'none\n' > "$1"
+}
 spawn_jev_gate() {
-  local brief="$DATA/$ID/brief.md" proj_name type id ctx='' mine d seen='' required
+  local brief="$DATA/$ID/brief.md" proj_name type id ctx='' mine d seen='' required kind_file fleet_file
   [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] || return 0
   fm_jev_gate_enabled || return 0
   for d in "${DECISIONS[@]+"${DECISIONS[@]}"}"; do
@@ -2188,13 +2231,19 @@ spawn_jev_gate() {
   fm_jev_gate_is_option concurrency "$CONCURRENCY" \
     || spawn_gate_refuse '' "--concurrency must be one of $(fm_jev_gate_choices concurrency) (got '$CONCURRENCY')"
   ctx=$(mktemp) || spawn_gate_refuse '' "mktemp failed"
-  fm_jev_gate_context "$ctx" "$brief"
+  kind_file=$(mktemp) || spawn_gate_refuse "$ctx" "mktemp failed"
+  fleet_file=$(mktemp) || { rm -f "$kind_file"; spawn_gate_refuse "$ctx" "mktemp failed"; }
+  spawn_jev_kind "$kind_file"
+  spawn_jev_work_under_way "$fleet_file"
+  fm_jev_gate_context "$ctx" "$brief" "Task being spawned" "$kind_file" \
+    "Other task records in this home (work under way or awaiting cleanup), as id, project, kind" "$fleet_file"
   fm_jev_gate_ask fm-spawn.sh concurrency "$CONCURRENCY" "Can task $ID run in parallel with the work under way" "$ctx"
   [ "$FM_JEV_GATE_ACTING" = parallel ] \
-    || spawn_gate_refuse "$ctx" "concurrency for task $ID acts as '$FM_JEV_GATE_ACTING'; keep it queued until that clears"
+    || { rm -f "$kind_file" "$fleet_file"; spawn_gate_refuse "$ctx" "concurrency for task $ID acts as '$FM_JEV_GATE_ACTING'; keep it queued until that clears"; }
   mine=${EFFORT:-default}
+  fm_jev_gate_context "$ctx" "$brief" "Task being spawned" "$kind_file"
   fm_jev_gate_ask fm-spawn.sh effort-level "$mine" "Which reasoning effort fits task $ID" "$ctx"
-  rm -f "$ctx"
+  rm -f "$ctx" "$kind_file" "$fleet_file"
   if [ "$FM_JEV_GATE_ACTING" != "$mine" ]; then
     [ "$FM_JEV_GATE_ACTING" != default ] && EFFORT=$FM_JEV_GATE_ACTING || EFFORT=
     echo "fm-spawn.sh: effort ${EFFORT:-default} replaces $mine (decided by $FM_JEV_GATE_DECIDER)" >&2
@@ -2384,6 +2433,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch needs an existing task record; no $RELAUNCH_META" >&2
     exit 1
   fi
+  KIND=$(fm_meta_get "$RELAUNCH_META" kind)
+  [ "$KIND" = secondmate ] || spawn_refuse_worker_effort
   fm_backlog_record_present "$RELAUNCH_META" "task record" "$STATE" || {
     echo "error: --relaunch refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
     exit 1

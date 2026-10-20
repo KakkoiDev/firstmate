@@ -50,7 +50,7 @@ fm_jev_gate_enabled() {
 fm_jev_gate_question() {  # <type>
   case "$1" in
     project-match) printf 'Which registered project is this request about?' ;;
-    deliverable-class) printf 'Should this request ship a change, scout for knowledge, or be answered from a finished worker report or text the captain supplied?' ;;
+    deliverable-class) printf 'Should this message ship a change, scout for knowledge, be answered from a finished worker report or text the captain supplied, steer a worker already on it, or only be acknowledged?' ;;
     secondmate-scope) printf 'Which persistent secondmate scope fits this work?' ;;
     surface-class) printf "Is this task's surface internal-only, product-facing, mixed, or uncertain?" ;;
     concurrency) printf 'Can this task run in parallel with work under way, or what blocks it?' ;;
@@ -66,6 +66,8 @@ fm_jev_gate_question() {  # <type>
 
 # Options per type as "id=meaning" lines, one per option; project-match and
 # secondmate-scope read the live registries. Each meaning is one line.
+# effort-level is asked only for a ship or scout spawn, so it offers no xhigh,
+# max, or ultra: bin/fm-spawn.sh refuses those levels for a worker.
 # stuck-worker names every state firstmate itself distinguishes, from:
 #   working, parked, blocked, paused, done, failed, unknown - the states
 #     bin/fm-crew-state.sh reports; parked is its needs-decision or
@@ -94,7 +96,9 @@ fm_jev_gate_option_lines() {  # <type>
       printf '%s\n' \
         'ship=A project change delivered through the selected delivery mode.' \
         'scout=Knowledge delivered as a report, with no project change.' \
-        'answer-from-evidence=Answerable from a finished worker report or text the captain supplied, with no fresh read.'
+        'answer-from-evidence=Answerable from a finished worker report or text the captain supplied, with no fresh read.' \
+        'steer-existing=A steer, answer, or correction for a worker already on this work, so no new worker is dispatched.' \
+        'acknowledge=An acknowledgement, or a question about work under way answered from firstmate'"'"'s own records, so no work is dispatched.'
       ;;
     secondmate-scope)
       while IFS= read -r id; do
@@ -118,12 +122,9 @@ fm_jev_gate_option_lines() {  # <type>
       ;;
     effort-level)
       printf '%s\n' \
-        'low=Well-understood explicit work.' \
-        'medium=Moderate work between low and high.' \
-        'high=Substantial work that needs careful reasoning.' \
-        'xhigh=Ambiguous investigation or design.' \
-        'max=Strongest reasoning, used only on an explicit captain preference.' \
-        'ultra=Native-only effort above max, on profiles that support it.' \
+        'low=Well-understood explicit work with nothing left to decide.' \
+        'medium=Ship work: implementing a change whose scope its instructions already set.' \
+        'high=Ambiguous investigation or design, where the work must find out what to build.' \
         'default=No explicit effort; the harness default applies.'
       ;;
     mid-task-ask)
