@@ -17,6 +17,11 @@
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],
       "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
+    },
+    {
+      "when": "The task is review-only: reading a pull request, diff, document, or report to report findings, with no project change.",
+      "use": { "harness": "claude", "model": "claude-sonnet-5", "effort": "medium" },
+      "why": "A review reads and reports; it needs careful reading, not the strongest coding profile."
     }
   ],
   "default": [
