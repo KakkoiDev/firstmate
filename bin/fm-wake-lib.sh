@@ -2522,6 +2522,12 @@ fm_wake_status_key_map() {  # <queue-key>
       id=${key%.turn-ended}
       FM_WAKE_STATUS_HISTORICAL=true
       ;;
+    *.prompt-wait)
+      # The record carries the blocked prompt itself in its payload, so the
+      # task's status log is background here exactly as it is for a turn-end.
+      id=${key%.prompt-wait}
+      FM_WAKE_STATUS_HISTORICAL=true
+      ;;
     *)
       return 1
       ;;

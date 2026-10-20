@@ -4536,6 +4536,16 @@ if [ "$KIND" != secondmate ]; then
     fi
     ;;
   esac
+  # A prompt-wait record (bin/fm-prompt-wait.sh) belongs to the incarnation that
+  # opened it. Arming a new one supersedes it, and its own hooks are gone, so
+  # nothing would ever close it: retire it here rather than leave a retired
+  # agent's dialog re-surfacing against its replacement. Runs for every adapter,
+  # including a relaunch away from one that records prompt waits to one that
+  # does not.
+  "$FM_ROOT/bin/fm-prompt-wait.sh" retire "$STATE_REAL" "$ID" || {
+    echo "error: could not retire the previous prompt-wait record for $ID" >&2
+    exit 1
+  }
   case "$HARNESS" in
   claude*)
     # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
@@ -4547,15 +4557,40 @@ if [ "$KIND" != secondmate ]; then
     # the turn-ended NOTIFICATION touch for the watcher. Every
     # hook command tolerates a refused event (|| true) so a stale-gen writer
     # can never break Claude's own lifecycle.
+    #
+    # Prompt-wait hooks (bin/fm-prompt-wait.sh): a pane blocked mid-turn on a
+    # permission or confirmation dialog emits none of the events above, so
+    # PermissionRequest opens the record the moment Claude asks, and
+    # Notification covers the two blocking dialogs PermissionRequest is
+    # documented not to reach - a sandboxed command's network request and an
+    # MCP elicitation form - at that event's own six-second gate.
+    # PostToolBatch closes the record: it fires once after every call in a
+    # batch has resolved, so nothing in that batch is still at a prompt, and
+    # unlike a per-tool event it cannot clear a sibling call's open dialog.
+    # The turn-boundary hooks close it too, so no episode outlives its turn.
+    # PermissionDenied reports an auto-mode classifier denial, which no other
+    # event surfaces (bin/fm-prompt-wait.sh owns both status lines).
+    # Every one of these is an observer: Notification hooks cannot block or
+    # modify a notification, and a PermissionRequest hook that exits 0 with
+    # empty stdout returns no decision and leaves the permission flow exactly
+    # as it was (verified live, docs/verification/worker-prompt-wait.md).
     mkdir -p "$WT/.claude"
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
     busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
-    j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
-    j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
-    j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
-    j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+    wait_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-prompt-wait.sh")"
+    wait_task="$(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+    wait_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
+    wait_clear="$wait_cmd_prefix clear $wait_task --gen $(shell_quote "$BUSY_GEN") >/dev/null 2>&1 || true"
+    j_submit=$(json_escape "$wait_clear; $busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
+    j_stop=$(json_escape "$wait_clear; touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+    j_stopfail=$(json_escape "$wait_clear; $busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
+    j_sessionend=$(json_escape "$wait_clear; $busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+    j_permreq=$(json_escape "$wait_cmd_prefix record $wait_task $wait_suffix --event permission-request >/dev/null 2>&1 || true")
+    j_notify=$(json_escape "$wait_cmd_prefix record $wait_task $wait_suffix --event notification-dialog >/dev/null 2>&1 || true")
+    j_batch=$(json_escape "$wait_clear")
+    j_denied=$(json_escape "$wait_cmd_prefix denied $wait_task --gen $(shell_quote "$BUSY_GEN") >/dev/null 2>&1 || true")
     cat >"$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}],"PermissionRequest":[{"hooks":[{"type":"command","command":"$j_permreq"}]}],"Notification":[{"matcher":"permission_prompt|elicitation_dialog|elicitation_url_dialog","hooks":[{"type":"command","command":"$j_notify"}]}],"PostToolBatch":[{"hooks":[{"type":"command","command":"$j_batch"}]}],"PermissionDenied":[{"hooks":[{"type":"command","command":"$j_denied"}]}]}}
 EOF
     exclude_path '.claude/settings.local.json'
     ;;

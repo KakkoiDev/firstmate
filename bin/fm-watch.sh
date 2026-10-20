@@ -1939,6 +1939,35 @@ surface_nonterminal_stale() {  # <window> <hash>
   wake "stale: $win"
 }
 
+# The queued payload for one prompt-wait record, in the captain-facing shape the
+# drain prints: which worker is blocked and what it asked. The record's own
+# summary is best-effort detail (bin/fm-prompt-wait.sh), so a missing one still
+# names the worker rather than producing a payload firstmate cannot act on.
+prompt_wait_payload() {  # <prompt-wait-file>
+  local f=$1 task summary
+  task=$(basename "$f"); task=${task%.prompt-wait}
+  summary=$("$FM_ROOT/bin/fm-prompt-wait.sh" summary "$STATE" "$task" 2>/dev/null) || summary=
+  [ -n "$summary" ] || summary="see the pane for the exact dialog"
+  printf 'prompt-wait: worker %s is waiting on a prompt: %s' "$task" "$summary"
+}
+
+# Re-surface an open prompt-wait record on the bounded cadence its ladder owns
+# (bin/fm-prompt-wait.sh due), so a dialog nobody answered cannot go quiet after
+# its first wake. The re-surface is a touch, not a second queueing route: the
+# record's size:mtime signature is what scan_signals below already keys on, so
+# the repeat travels the identical path as the first surface and cannot drift
+# from it. Runs before that scan so a due record lands in this same poll.
+prompt_wait_rering() {
+  local f task due
+  for f in "$STATE"/*.prompt-wait; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    task=$(basename "$f"); task=${task%.prompt-wait}
+    due=$("$FM_ROOT/bin/fm-prompt-wait.sh" due "$STATE" "$task" 2>/dev/null) || continue
+    case "$due" in resurface*) ;; *) continue ;; esac
+    "$FM_ROOT/bin/fm-prompt-wait.sh" resurfaced "$STATE" "$task" >/dev/null 2>&1 || true
+  done
+}
+
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
@@ -1966,7 +1995,7 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # and commits a status classification position only after a successful span read.
 scan_signals() {
   local f sig sf
-  for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
+  for f in "$STATE"/*.status "$STATE"/*.turn-ended "$STATE"/*.prompt-wait; do
     if [ ! -e "$f" ]; then
       case "$f" in *.status) [ -L "$f" ] || continue ;; *) continue ;; esac
     fi
@@ -2170,7 +2199,20 @@ signal_files_actionable() {  # <status-file> ...
   local f task record rest endpoint ident needs_decision rc found=1
   FM_SIGNAL_SURFACE_ENDPOINTS=''
   FM_SIGNAL_NEEDS_DECISION_FILES=''
+  FM_SIGNAL_PROMPT_WAIT_FILES=''
   for f in "$@"; do
+    # A prompt-wait record (bin/fm-prompt-wait.sh) says the harness itself is
+    # blocked on a human decision, which no absorb may ever swallow: the crew
+    # looks provably working (its turn is open) and its pane may still be
+    # rendering, so both of the caller's absorb proofs would hold while nothing
+    # can progress. Actionable unconditionally, before any of them is consulted.
+    case "$f" in
+      *.prompt-wait)
+        FM_SIGNAL_PROMPT_WAIT_FILES="${FM_SIGNAL_PROMPT_WAIT_FILES} ${f}"
+        found=0
+        continue
+        ;;
+    esac
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || [ -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
@@ -2833,15 +2875,29 @@ EOF
     fi
   fi
 
+  prompt_wait_rering
+
   # On the first changed signal, linger one grace period and re-scan before
   # classifying: a crewmate's final status write and the same turn's turn-end
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
+  #
+  # A file that has not changed during the grace is reported by BOTH scans,
+  # because the .seen-* marker it is compared against is only advanced once this
+  # batch is surfaced or absorbed. Collapsing the two scans to one row per file -
+  # keeping the last, which is what makes the re-scan's newer signature win, in
+  # first-seen order - is what makes one changed file one queued wake rather than
+  # two identical ones.
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
-    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)" | awk -F'\t' '
+      NF >= 3 {
+        if (!($3 in seen)) { seen[$3] = ++n; order[n] = $3 }
+        last[$3] = $0
+      }
+      END { for (i = 1; i <= n; i++) print last[order[i]] }')
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
     # surfacing or absorbing the signal, but never wait on it: see
@@ -2881,6 +2937,7 @@ EOF
     # status span, and the capture only once the authoritative verdict comes up short.
     FM_SIGNAL_SURFACE_ENDPOINTS=''
     FM_SIGNAL_NEEDS_DECISION_FILES=''
+    FM_SIGNAL_PROMPT_WAIT_FILES=''
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     signal_files_actionable $files
     signal_actionable=$?
@@ -2901,6 +2958,7 @@ EOF
         [ -n "$sf" ] || continue
         file_reason="$reason"
         case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
+        case " $FM_SIGNAL_PROMPT_WAIT_FILES " in *" $f "*) file_reason=$(prompt_wait_payload "$f") ;; esac
         fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
       done <<EOF
 $pending
