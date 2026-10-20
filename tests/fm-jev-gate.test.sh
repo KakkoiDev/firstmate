@@ -65,6 +65,17 @@ write_response() {  # <choice> <confidence> <other-option>
      usage: {input_tokens: 420, output_tokens: 55}}' > "$RESPONSE"
 }
 
+# write_response_all <choice> <id>...: an answer whose probabilities cover every option.
+write_response_all() {
+  local choice=$1
+  shift
+  printf '%s\n' "$@" | jq -Rn --arg c "$choice" '
+    [inputs] as $ids |
+    {model: "jev-1.13.0",
+     answers: {q: {type: "choice", choice: $c, confidence: 0.9,
+       probabilities: ([$ids[] | {key: ., value: (if . == $c then 0.9 else (0.1 / (($ids | length) - 1)) end)}] | from_entries)}},
+     usage: {input_tokens: 420, output_tokens: 55}}' > "$RESPONSE"
+}
 export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" FM_JEV_GATE=on FM_JEV_TRANSCRIPT_WAIT=0
 
 new_home() {  # <name> <kind> -> echoes a home with a t1 task of <kind>
@@ -134,6 +145,43 @@ assert_contains "$out" "jev project-match not recorded (off or failed)" "jev off
 assert_contains "$out" "jev effort-level not recorded (off or failed); default acts" "jev off effort-level accepted"
 assert_not_contains "$out" "refused:" "jev off never blocks the spawn"
 pass "fm-spawn with Jev off passes the gate on firstmate's own choices"
+
+for level in xhigh max ultra; do
+  run "$H" code out -- "${SPAWN[@]}" --decision project-match=off --decision deliverable-class=off --concurrency parallel --effort "$level"
+  expect_code 1 "$code" "worker spawn at --effort $level"
+  assert_contains "$out" "error: --effort $level is not allowed for a ship worker; use low, medium, or high" "the $level refusal names the allowed levels"
+  assert_not_contains "$out" "jev " "a refused effort asks nothing"
+done
+run "$H" code out -- fm-spawn.sh t1 --relaunch --effort max
+expect_code 1 "$code" "worker relaunch at --effort max"
+assert_contains "$out" "error: --effort max is not allowed for a ship worker" "a relaunch refuses max too"
+run "$H" code out FM_JEV_GATE=off -- "${SPAWN[@]}" --effort xhigh
+assert_not_contains "$out" "is not allowed for a" "the gate off keeps every effort level"
+pass "with the gate on, a worker spawn or relaunch refuses xhigh, max, and ultra"
+
+fm_write_meta "$H/state/t2.meta" "window=sess:fm-t2" "kind=scout" "harness=claude" "project=$TMP_ROOT/other-proj"
+fm_write_meta "$H/state/mate.meta" "window=sess:fm-mate" "kind=secondmate" "harness=claude"
+# The fake Jev gives one answer per run, so each ask is answered in its own run.
+write_response_all parallel parallel semantic-dependency shared-external-state migration-conflict
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- "${SPAWN[@]}" --decision project-match=off --decision deliverable-class=off --concurrency parallel --effort medium
+CONC_ID=$(sed -n 's/.*jev concurrency decision \([^:]*\):.*/\1/p' <<<"$out" | head -n 1)
+[ -n "$CONC_ID" ] || fail "the spawn recorded no concurrency decision: $out"
+write_response_all medium low medium high default
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- "${SPAWN[@]}" --decision project-match=off --decision deliverable-class=off --concurrency parallel --effort medium
+EFFORT_ID=$(sed -n 's/.*jev effort-level decision \([^:]*\):.*/\1/p' <<<"$out" | head -n 1)
+[ -n "$EFFORT_ID" ] || fail "the spawn recorded no effort decision: $out"
+CONC_CTX=$(jq -r .context "$H/state/jev-audit/$CONC_ID.json")
+assert_contains "$CONC_CTX" $'Task being spawned:\nBrief kind: ship (a project change)\nDelivery mode: direct-PR' "the concurrency ask carries the kind and delivery mode"
+assert_contains "$CONC_CTX" "t2 project=other-proj kind=scout" "the concurrency ask lists other work by id, project, and kind"
+assert_not_contains "$CONC_CTX" "mate project=" "a secondmate is not listed as work under way"
+assert_not_contains "$CONC_CTX" "t1 project=" "the task being spawned is not listed as other work"
+EFFORT_CTX=$(jq -r .context "$H/state/jev-audit/$EFFORT_ID.json")
+assert_contains "$EFFORT_CTX" $'Brief kind: ship (a project change)\nDelivery mode: direct-PR' "the effort ask carries the kind and delivery mode"
+assert_not_contains "$EFFORT_CTX" "t2 project=" "the effort ask carries no work list"
+[ "$(jq -c '.questions.q.criteria | keys_unsorted' "$LOG/body")" = '["low","medium","high","default"]' ] \
+  || fail "the effort options offer a level a worker may not run at: $(jq -c '.questions.q.criteria | keys_unsorted' "$LOG/body")"
+rm -f "$H/state/t2.meta" "$H/state/mate.meta"
+pass "the concurrency and effort asks carry the kind and mode, concurrency the other work, and effort no level above high"
 
 write_response spawn-proj 0.9 other-proj
 printf 'mismatch\n' > "$TMP_ROOT/pm-context"
@@ -205,17 +253,6 @@ run "$H" code out -- fm-control.sh t1 interrupt --worker-state stuck
 expect_code 2 "$code" "invalid --worker-state"
 pass "fm-control refuses interrupt and relaunch without a valid worker state, touching nothing"
 
-# write_response_all <choice> <id>...: an answer whose probabilities cover every option.
-write_response_all() {
-  local choice=$1
-  shift
-  printf '%s\n' "$@" | jq -Rn --arg c "$choice" '
-    [inputs] as $ids |
-    {model: "jev-1.13.0",
-     answers: {q: {type: "choice", choice: $c, confidence: 0.9,
-       probabilities: ([$ids[] | {key: ., value: (if . == $c then 0.9 else (0.1 / (($ids | length) - 1)) end)}] | from_entries)}},
-     usage: {input_tokens: 420, output_tokens: 55}}' > "$RESPONSE"
-}
 # meanings_ok <body-file>: every option id carries a meaning that is not the id or a bare Yes/No.
 meanings_ok() {
   jq -e '.questions.q.criteria | all(to_entries[]; .value != .key and (.value | length) > 12)' "$1" >/dev/null
@@ -279,6 +316,12 @@ for qtype in project-match deliverable-class secondmate-scope surface-class conc
 done
 pass "every script-embedded ask sends a one-line meaning with each option"
 
+DC_IDS=$(bash -c 'SCRIPT_DIR=$1/bin; FM_HOME=$2; . "$1/bin/fm-jev-gate-lib.sh"; fm_jev_gate_choices deliverable-class' _ "$SELF_ROOT" "$H")
+for id in steer-existing acknowledge; do
+  assert_contains " ${DC_IDS//|/ } " " $id " "deliverable-class offers $id"
+done
+pass "deliverable-class offers a steer of work under way and a bare acknowledgement"
+
 # --- merges -----------------------------------------------------------------
 
 H=$(new_home merge ship)
@@ -300,7 +343,7 @@ write_response no 0.99 yes
 rm -f "$LOG/usage-at-post"
 run "$H" code out TYPESAFE_API_KEY="$KEY" FAKE_CURL_USAGE="$H/state/jev-usage.jsonl" -- fm-merge-local.sh t1 --merge-risk yes
 assert_contains "$out" "jev merge-risk decision " "the gate asked Jev"
-assert_contains "$out" ": yes acts (decided by firstmate)" "a never-type acts on firstmate's call even against a confident Jev"
+assert_contains "$out" ": yes acts (decided by firstmate)" "with no authority entry, firstmate's call acts even against a confident Jev"
 assert_present "$LOG/usage-at-post" "the fake Jev saw the usage log at request time"
 [ "$(jq -sc '[.[] | select(.event == "mine") | {mine, blind}]' "$LOG/usage-at-post")" = '[{"mine":"yes","blind":true}]' ] \
   || fail "the blind choice was not recorded before the request: $(cat "$LOG/usage-at-post")"
@@ -308,7 +351,7 @@ assert_present "$LOG/usage-at-post" "the fake Jev saw the usage log at request t
   || fail "Jev's answer was recorded before the request left"
 [ "$(jq -src 'map(select(.event == "call")) | last | .question_type' "$H/state/jev-usage.jsonl")" = merge-risk ] \
   || fail "the answered call was not recorded as merge-risk"
-pass "a gated script records firstmate's blind choice before Jev is asked, and a never-type stays firstmate's"
+pass "a gated script records firstmate's blind choice before Jev is asked, and without authority its call stays firstmate's"
 
 H=$(new_home words ship)
 jq -cn '{hook_event_name: "UserPromptSubmit", session_id: "s1", prompt: "land t1 now, it is only docs"}' \
