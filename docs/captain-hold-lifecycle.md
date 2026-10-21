@@ -118,6 +118,7 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 - No keyed status decision opened after the last `complete`.
 
 A keyed status decision opened after the last `complete` makes `verify` fail, and re-running `complete` is the repair.
+On the markdown backend, an answered entry pruned out of the live backlog stays durable for `verify` and `complete` while its newest row in the configured archive is closed with a recorded answer; `bin/fm-captain-hold.sh`'s header owns that lookup.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 ## Cleanup never closes a captain call

@@ -4034,6 +4034,173 @@ test_retained_body_keeps_its_utf8_bytes() {
   pass "cleanup preserves every byte of a retained body's non-ASCII characters"
 }
 
+# A markdown backlog prunes closed rows into its configured archive, where
+# `show` cannot read them. An inventory entry whose captain call was answered
+# and then pruned stays durable; one closed without an answer, or found
+# nowhere, still fails and names the entry.
+test_verify_accepts_an_answered_hold_pruned_into_the_archive() {
+  local home answered legacy_scout scout
+  home=$(make_home archived-hold)
+  printf 'Ship the north route.\n' > "$home/answer.txt"
+  run_captain "$home" hold sample-archived-call \
+    --title "Choose route: north, south" --reason "captain route choice pending" \
+    --repo sample >/dev/null || fail "could not hold the archived-call fixture"
+  run_captain "$home" answer sample-archived-call --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not answer the archived-call fixture"
+  run_captain "$home" hold sample-legacy-scout-decision-route \
+    --title "Choose legacy route" --reason "captain legacy route choice pending" \
+    --repo sample >/dev/null || fail "could not hold the legacy fixture"
+  run_captain "$home" answer sample-legacy-scout-decision-route --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not answer the legacy fixture"
+  tasks_in "$home" add sample-closed-unanswered "Closed without an answer" --kind captain \
+    --repo sample >/dev/null || fail "could not create the unanswered fixture"
+  tasks_in "$home" 'done' sample-closed-unanswered >/dev/null \
+    || fail "could not close the unanswered fixture"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "could not prune the closed rows"
+  for answered in sample-archived-call sample-legacy-scout-decision-route sample-closed-unanswered; do
+    assert_no_grep "] $answered - " "$home/data/backlog.md" \
+      "fixture row $answered was not pruned out of the live backlog"
+    assert_grep "] $answered - " "$home/data/done-archive.md" \
+      "fixture row $answered did not reach the configured archive"
+  done
+
+  scout=sample-archived-scout
+  write_scout_with_attested_inventory "$home" "$scout" sample-archived-call
+  run_captain "$home" verify "$scout" > "$home/verify.out" 2> "$home/verify.err" \
+    || fail "verify refused an answered captain call that was pruned into the archive: $(cat "$home/verify.err")"
+  run_captain "$home" complete "$scout" sample-archived-call > "$home/complete.out" 2> "$home/complete.err" \
+    || fail "complete refused an answered captain call that was pruned into the archive: $(cat "$home/complete.err")"
+
+  legacy_scout=sample-legacy-scout
+  write_scout_with_attested_inventory "$home" "$legacy_scout" route
+  run_captain "$home" verify "$legacy_scout" > "$home/legacy.out" 2> "$home/legacy.err" \
+    || fail "verify refused a legacy-identity answer pruned into the archive: $(cat "$home/legacy.err")"
+
+  scout=sample-unanswered-scout
+  write_scout_with_attested_inventory "$home" "$scout" sample-closed-unanswered
+  if run_captain "$home" verify "$scout" > "$home/unanswered.out" 2> "$home/unanswered.err"; then
+    fail "verify accepted an archived row closed without a recorded captain answer"
+  fi
+  assert_grep "sample-closed-unanswered" "$home/unanswered.err" \
+    "the refusal did not name the unanswered entry"
+  assert_grep "closed without a recorded captain answer" "$home/unanswered.err" \
+    "the refusal did not say the archived row carries no answer"
+
+  scout=sample-nowhere-scout
+  write_scout_with_attested_inventory "$home" "$scout" sample-never-held
+  if run_captain "$home" verify "$scout" > "$home/nowhere.out" 2> "$home/nowhere.err"; then
+    fail "verify accepted an inventory entry that exists nowhere"
+  fi
+  assert_grep "no captain-held task sample-never-held" "$home/nowhere.err" \
+    "the refusal did not name the entry found nowhere"
+  pass "an answered captain call stays durable after it is pruned into the archive, and nothing else does"
+}
+
+# A finished scout whose copy was already handed back to the pool records it as
+# worktree_released= with no worktree=. Cleanup closes it through every existing
+# gate without touching that copy, which now belongs to another task.
+write_released_copy_meta() {  # <home> <id> <kind> <released-path>
+  local home=$1 id=$2 kind=$3 released=$4
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree_released=$released" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=$kind" \
+    "mode=$kind" \
+    "spawn_gen=fixture-$id"
+}
+
+test_teardown_closes_a_scout_whose_copy_was_released() {
+  local home copy id show
+  home=$(make_home teardown-released-copy)
+  copy="$home/pool/slot-1"
+  mkdir -p "$copy"
+  printf 'the next task works here\n' > "$copy/live-work.txt"
+  cat > "$home/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$home/treehouse.log"
+SH
+  chmod +x "$home/fakebin/treehouse"
+
+  id=sample-released-scout
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the released sample" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the released-scout fixture"
+  write_released_copy_meta "$home" "$id" scout "$copy"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Released sample\n\nNothing waits on the captain.\n' > "$home/data/$id/report.md"
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "completion gate failed for the released-scout fixture"
+  run_teardown "$home" "$id" > "$home/released.out" 2> "$home/released.err" \
+    || fail "cleanup refused a finished scout whose copy was already released: $(cat "$home/released.err")"
+  assert_absent "$home/state/$id.meta" "cleanup did not release the finished scout's record"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the released scout's row vanished"
+  assert_contains "$show" "state: done" "cleanup did not close the released scout's backlog item"
+  assert_contains "$show" "data/$id/report.md" "cleanup lost the released scout's report link"
+  assert_present "$copy/live-work.txt" "cleanup touched the copy another task now holds"
+  assert_absent "$home/treehouse.log" "cleanup returned a copy that was already released"
+  assert_grep "already released" "$home/released.out" \
+    "cleanup did not say the released copy was left untouched"
+
+  # The report gate still runs.
+  id=sample-released-no-report
+  tasks_in "$home" add "$id" "Investigate without a report" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the no-report fixture"
+  write_released_copy_meta "$home" "$id" scout "$copy"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "completion gate failed for the no-report fixture"
+  if run_teardown "$home" "$id" > "$home/no-report.out" 2> "$home/no-report.err"; then
+    fail "cleanup closed a released scout that has no report"
+  fi
+  assert_grep "has no report" "$home/no-report.err" "the no-report refusal changed"
+  assert_present "$home/state/$id.meta" "a refused cleanup removed the scout record"
+
+  # The captain-call completion gate still runs.
+  id=sample-released-uninventoried
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate without an inventory" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the uninventoried fixture"
+  write_released_copy_meta "$home" "$id" scout "$copy"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Uninventoried\n' > "$home/data/$id/report.md"
+  if run_teardown "$home" "$id" > "$home/uninventoried.out" 2> "$home/uninventoried.err"; then
+    fail "cleanup closed a released scout that never passed the completion gate"
+  fi
+  assert_grep "captain-call completion gate" "$home/uninventoried.err" \
+    "the completion-gate refusal changed"
+  assert_present "$home/state/$id.meta" "a refused cleanup removed the scout record"
+
+  # A ship with the same shape, or a scout with two released copies, still refuses.
+  id=sample-released-ship
+  tasks_in "$home" add "$id" "Ship with a released copy" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the ship fixture"
+  write_released_copy_meta "$home" "$id" ship "$copy"
+  if run_teardown "$home" "$id" > "$home/ship.out" 2> "$home/ship.err"; then
+    fail "cleanup closed a ship whose record names no worktree"
+  fi
+  assert_grep "ambiguous worktree identity" "$home/ship.err" "the ship refusal changed"
+  assert_present "$home/state/$id.meta" "a refused ship cleanup removed its record"
+
+  id=sample-released-twice
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Scout with two released copies" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the ambiguous fixture"
+  write_released_copy_meta "$home" "$id" scout "$copy"
+  printf 'worktree_released=%s\n' "$home/pool/slot-2" >> "$home/state/$id.meta"
+  printf '# Ambiguous\n' > "$home/data/$id/report.md"
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "completion gate failed for the ambiguous fixture"
+  if run_teardown "$home" "$id" > "$home/twice.out" 2> "$home/twice.err"; then
+    fail "cleanup closed a scout whose released copy is ambiguous"
+  fi
+  assert_grep "ambiguous worktree identity" "$home/twice.err" "the ambiguous refusal changed"
+  assert_present "$copy/live-work.txt" "a refused cleanup touched the released copy"
+  pass "cleanup closes a finished scout whose copy was released, through every gate, without touching the copy"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
@@ -4063,6 +4230,8 @@ test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
 test_teardown_never_closes_a_captain_held_task
+test_teardown_closes_a_scout_whose_copy_was_released
+test_verify_accepts_an_answered_hold_pruned_into_the_archive
 test_retained_row_artifacts_survive_captain_answers
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_answer_before_cleanup_replay_preserves_the_retained_report
