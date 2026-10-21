@@ -131,8 +131,8 @@ fm_jev_gate_option_lines() {  # <type>
     mid-task-ask)
       printf '%s\n' \
         'invalidates=The ask makes the work under way wrong or moot, so it must restart or be rescoped.' \
-        'follow-up=The ask adds new work and leaves the work under way valid.' \
-        'downstream-correction=The ask corrects text or evidence to match behavior already accepted; the work under way stands.'
+        'follow-up=The ask adds an action or deliverable the worker was not yet asked for, such as a new fix, edit, PR, or report item; the work under way stays valid.' \
+        'downstream-correction=The ask changes how work the worker already has proceeds or ends, such as a new constraint or stop point, a replaced instruction, new evidence to use, or a moved base to rebase onto, and adds no deliverable.'
       ;;
     report-has-captain-call)
       printf 'yes=The report holds a call only the human operator can make.\nno=The report holds no call reserved for the human operator.\n'
