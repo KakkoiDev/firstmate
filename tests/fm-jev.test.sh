@@ -1196,6 +1196,26 @@ TYPESAFE_API_KEY=$KEY FM_TASK_ID=t9 run code out err "${DC[@]}" --context "$NOTE
 expect_code 2 "$code" "inside a task worker the primary's words do not count"
 pass "the operator's verbatim words for the turn, mid-turn messages included, lead every ask's context"
 
+# --- a task worker's ask carries its brief's request, not the primary's words ---
+reset
+mkdir -p "$HOME_DIR/data/t9"
+printf '%s\n' '# Task' "## Captain's intent" 'move every open ticket to sprint 5' '' '## Firstmate spec' 'zq-spec-marker' > "$HOME_DIR/data/t9/brief.md"
+write_choice ship 0.8 ship scout zq-mine-marker
+TYPESAFE_API_KEY=$KEY FM_TASK_ID=t9 run code out err "${DC[@]}" --context "$NOTE" --mine ship
+expect_code 0 "$code" "the brief's request lifts the manual-ask refusal inside a worker"
+ctx=$(sent_context); ctx=${ctx%x}
+assert_contains "$ctx" $'The operator\'s request behind this task, verbatim from the worker\'s instructions:\nmove every open ticket to sprint 5' \
+  "the worker's ask carries its brief's request"
+assert_not_contains "$ctx" 'and t2, mid-turn' "the primary's turn words stay out of a worker's ask"
+assert_not_contains "$ctx" 'zq-spec-marker' "only the request section of the brief is sent"
+wait_for "the worker's brief-request ask settles" settled 1
+printf '%s\n' '# Task' "## Captain's intent" '' '## Firstmate spec' 'zq-spec-marker' > "$HOME_DIR/data/t9/brief.md"
+TYPESAFE_API_KEY=$KEY FM_TASK_ID=t9 run code out err "${DC[@]}" --context "$NOTE" --mine ship
+expect_code 2 "$code" "an empty request section carries nothing, so the refusal holds"
+rm -f "$HOME_DIR/data/t9/brief.md"
+pass "a task worker's ask carries its brief's request section and nothing else from the brief"
+
+
 # --- the operator's words survive a turn end another Stop hook blocks ---------
 STOP_CHECK="$ROOT/bin/fm-jev-stop-check.sh"
 TRANSCRIPT="$TMP_ROOT/transcript.jsonl"

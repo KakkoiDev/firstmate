@@ -84,8 +84,12 @@
 #   this turn in $FM_HOME/state/jev-turn-words.jsonl
 #   (bin/fm-jev-prompt-reminder.sh owns the record), oldest first, as
 #   "The operator's words this turn, verbatim, oldest first:" and then
-#   "Message at <ts>:" and the prompt for each; nothing inside a task worker
-#   (FM_TASK_ID set) or when none is recorded. Every caller puts it in the
+#   "Message at <ts>:" and the prompt for each; nothing when none is recorded.
+#   Inside a task worker (FM_TASK_ID set) it prints instead the
+#   `## Captain's intent` section of the worker's brief,
+#   ${FM_DATA_OVERRIDE:-$FM_HOME/data}/<task>/brief.md, under "The operator's
+#   request behind this task, verbatim from the worker's instructions:", and
+#   nothing when that section is absent or empty. Every caller puts it in the
 #   state of each ask it builds.
 #
 # Audit snapshot: fm_jev_write_audit writes $FM_HOME/state/jev-audit/<id>.json,
@@ -367,7 +371,17 @@ fm_jev_never_send_line() {  # <text-file>
 }
 
 fm_jev_turn_words() {
-  [ -z "${FM_TASK_ID:-}" ] || return 0
+  local brief intent
+  if [ -n "${FM_TASK_ID:-}" ]; then
+    case "$FM_TASK_ID" in */*|.|..) return 0 ;; esac
+    brief="${FM_DATA_OVERRIDE:-$FM_HOME/data}/$FM_TASK_ID/brief.md"
+    [ -f "$brief" ] || return 0
+    declare -F fm_brief_task_heading_body >/dev/null || . "${BASH_SOURCE[0]%/*}/fm-brief-heading-lib.sh"
+    intent=$(fm_brief_task_heading_body "$brief" "## Captain's intent")
+    [ -n "${intent//[[:space:]]/}" ] || return 0
+    printf "The operator's request behind this task, verbatim from the worker's instructions:\n%s\n" "$intent"
+    return 0
+  fi
   [ -s "$FM_HOME/state/jev-turn-words.jsonl" ] || return 0
   jq -Rrn '[inputs | fromjson? | select(type == "object" and (.prompt | type) == "string" and .prompt != "")]
     | if length == 0 then empty else

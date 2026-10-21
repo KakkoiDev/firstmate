@@ -109,8 +109,9 @@
 #   after another with a blank line between them:
 #     1. "Decision about: <summary>", the summary on one line;
 #     2. the template's rendered fields, when --template is given;
-#     3. the operator's words for the turn, mid-turn messages included
-#        (fm_jev_turn_words in bin/fm-jev-lib.sh owns the section);
+#     3. the operator's words for the turn, mid-turn messages included, or
+#        in a task worker its brief's request (fm_jev_turn_words in
+#        bin/fm-jev-lib.sh owns the section);
 #     4. per --source, in order, "Source <path>, verbatim:" and the file's
 #        bytes; each must be a readable, non-empty regular file;
 #     5. "Firstmate's note, its own account rather than a source:" and the
