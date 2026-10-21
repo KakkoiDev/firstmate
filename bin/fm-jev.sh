@@ -99,7 +99,9 @@
 # ask: one POST through the shared transport in bin/fm-jev-lib.sh. The request
 #   is {model, state: {context}, questions: {q: {type: choice, instructions,
 #   criteria}}}: the question text is the instructions, each --option is one
-#   criterion (its meaning defaults to the id; an id is letters, digits, dot,
+#   criterion (its meaning defaults to the id, or for a type
+#   fm_jev_gate_option_lines in bin/fm-jev-gate-lib.sh defines, to that
+#   option's meaning there; an id is letters, digits, dot,
 #   dash, or underscore, so a registered project name fits), --yes-no is the choice
 #   {yes, no}; --type project-match takes neither, because ask fills its
 #   options from the project registry, each project's whole registry entry as
@@ -605,6 +607,12 @@ cmd_ask() {
     [ -n "$(fm_jev_gate_projects)" ] \
       || die "project-match needs registered projects, and ${FM_DATA_OVERRIDE:-$FM_HOME/data}/projects.md lists none"
     while IFS= read -r f; do add_option "$f"; done < <(fm_jev_gate_option_lines project-match)
+  elif [ "$criteria" != '{}' ]; then
+    # shellcheck source=bin/fm-jev-gate-lib.sh
+    declare -F fm_jev_gate_option_lines >/dev/null || . "$SCRIPT_DIR/fm-jev-gate-lib.sh"
+    while IFS= read -r f; do
+      criteria=$(jq -c --arg s "${f%%=*}" --arg m "${f#*=}" 'if .[$s] == $s then .[$s] = $m else . end' <<<"$criteria")
+    done < <(fm_jev_gate_option_lines "$qtype" 2>/dev/null)
   fi
   if [ "$yes_no" = 1 ]; then
     [ "$criteria" = '{}' ] || die "--yes-no and --option are exclusive"

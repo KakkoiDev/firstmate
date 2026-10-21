@@ -204,8 +204,8 @@ body=$(cat "$LOG/body")
 assert_equals 'jev-latest' "$(jq -r .model <<<"$body")" "request uses the shared model"
 assert_equals '["q"]' "$(jq -c '.questions | keys' <<<"$body")" "one question is asked"
 assert_equals 'choice' "$(jq -r .questions.q.type <<<"$body")" "the question is a Choice"
-assert_equals '{"working":"Making progress.","looping":"Repeating the same failed step.","confused":"confused"}' \
-  "$(jq -c .questions.q.criteria <<<"$body")" "options become criteria, meaning defaulting to the slug"
+assert_equals '{"working":"Making progress.","looping":"Repeating the same failed step.","confused":"The worker misreads its task or works on the wrong thing."}' \
+  "$(jq -c .questions.q.criteria <<<"$body")" "options become criteria; a bare option takes the gate meaning its type defines"
 assert_contains "$(jq -r .state.context <<<"$body")" 'CONTEXT-ONLY-MARKER' "the context file is the state"
 case "$(jq -r .state.context <<<"$body")" in
   $'Decision about: What is the stuck worker doing\n\n'*) ;;
@@ -281,7 +281,7 @@ assert_equals "$(cat "$RESPONSE")" "$(jq -r .jev_response "$audit")" "the snapsh
 assert_equals "$claude_stdin" "$(jq -r .claude_prompt "$audit")" "the snapshot holds the exact claude prompt"
 assert_equals looping "$(jq -r '.claude_response | fromjson | .result' "$audit")" "the snapshot holds the raw claude answer"
 assert_equals 'Which state best describes the worker in the context?' "$(jq -r .question "$audit")" "the snapshot holds the question"
-assert_equals '{"working":"Making progress.","looping":"Repeating the same failed step.","confused":"confused"}' \
+assert_equals '{"working":"Making progress.","looping":"Repeating the same failed step.","confused":"The worker misreads its task or works on the wrong thing."}' \
   "$(jq -c .options "$audit")" "the snapshot holds the option meanings"
 grep -rqF -- "$KEY" "$AUDIT_DIR" && fail "the key is never in the audit snapshot"
 assert_not_contains "$(cat "$audit")" 'Authorization' "no auth header is in the audit snapshot"
@@ -1215,6 +1215,22 @@ expect_code 2 "$code" "an empty request section carries nothing, so the refusal 
 rm -f "$HOME_DIR/data/t9/brief.md"
 pass "a task worker's ask carries its brief's request section and nothing else from the brief"
 
+# --- bare options take the meaning the gate defines for their type -------------
+reset
+write_choice ship 0.8 ship scout zq-mine-marker
+TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --source "$RAW" --mine ship
+expect_code 0 "$code" "a manual deliverable-class ask with bare options"
+assert_equals '{"ship":"A project change delivered through the selected delivery mode.","scout":"Knowledge delivered as a report, with no project change.","zq-mine-marker":"zq-mine-marker"}' \
+  "$(jq -c .questions.q.criteria "$LOG/body")" "a bare id the gate defines takes its meaning; an unknown id keeps the slug"
+write_choice ship 0.8 ship scout
+TYPESAFE_API_KEY=$KEY run code out err ask --type deliverable-class --summary 'Which deliverable fits the request' \
+  --question 'Ship or scout?' --option 'ship=Change the code.' --option scout --source "$RAW" --mine ship
+assert_equals 'Change the code.' "$(jq -r .questions.q.criteria.ship "$LOG/body")" "a meaning the caller gives wins"
+write_choice a 0.8 a b
+TYPESAFE_API_KEY=$KEY run code out err ask --type zq-free-type --summary 'Pick one' --question 'A or b?' --option a --option b --source "$RAW"
+assert_equals '{"a":"a","b":"b"}' "$(jq -c .questions.q.criteria "$LOG/body")" "a type the gate does not define keeps bare slugs"
+wait_for "the bare-option asks settle" settled 3
+pass "a bare option takes the meaning bin/fm-jev-gate-lib.sh defines for its type; given meanings and other types stay as sent"
 
 # --- the operator's words survive a turn end another Stop hook blocks ---------
 STOP_CHECK="$ROOT/bin/fm-jev-stop-check.sh"
