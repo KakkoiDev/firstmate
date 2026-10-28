@@ -1126,11 +1126,13 @@ resolve_relaunch_profile() {
 # refuses outright when any of it cannot be established.
 CHECKPOINT_LINES=()
 safe_checkpoint() {
-  local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta
+  local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta ownership
   CHECKPOINT_LINES=()
   [ -n "$WT" ] || die "task $ID has no recorded worktree; refusing to relaunch without a recorded local copy to preserve"
   [ -d "$WT" ] || die "task $ID's recorded worktree $WT is missing; refusing to relaunch and lose track of its work"
   wt_real=$(cd "$WT" 2>/dev/null && pwd -P) || die "task $ID's recorded worktree $WT cannot be resolved"
+  ownership=$(fm_control_worktree_ownership_refusal "$WT" "$STATE" "$ID") \
+    || die "$ownership; refusing to relaunch into a checkout another worktree's agent may be using"
   wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null) \
     || die "task $ID's recorded worktree $WT is not a git worktree; refusing to relaunch without a checkout whose unlanded work can be accounted for"
   wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P) || wt_top_real=$wt_top

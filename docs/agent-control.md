@@ -138,6 +138,10 @@ Every transient or self-contradicting read stays `unreadable` or `ambiguous` and
 That proof has one owner for the whole control plane (`fm_control_endpoint_absence_verdict` in `bin/fm-control-lib.sh`), so `exit` and `relaunch` cannot reach two different answers about one endpoint.
 `exit` reports what the proof established and nothing more - see its row in the verb table above.
 
+Every relaunch, a reclaim included, first proves that the recorded worktree uses its own git dir, before the old agent is stopped and again in the launch owner.
+A linked worktree's `.git` file must name a git dir that still exists and whose own `gitdir` record names this worktree back, and no other task recorded in this home may have a worktree whose `.git` names the same git dir.
+A `.git` file left in a reused or restored directory can point at another, possibly live, worktree's git dir, and git would then read that worktree's HEAD and index from here, so either failure refuses with the reason (`fm_control_worktree_ownership_refusal` in `bin/fm-control-lib.sh`).
+
 What a reclaim is not:
 
 - It is **not a teardown**. The worktree is reused exactly as the previous agent left it; nothing unlanded is ever discarded, and the ordinary `--note` requirement still applies.

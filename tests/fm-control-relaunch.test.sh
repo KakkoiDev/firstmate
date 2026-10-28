@@ -1790,6 +1790,55 @@ test_missing_worktree_refuses_before_stopping_anything() {
   pass "fm-control relaunch: an unaccountable local copy refuses before the agent is touched"
 }
 
+# A .git file left in a reused or restored directory can name another, live
+# worktree's git dir. git then reads that worktree's HEAD and index from here,
+# so the relaunch must refuse before it stops anything.
+assert_gitdir_refusal() {  # <case-dir> <id> <expected-reason> <what>
+  local dir=$1 id=$2 reason=$3 what=$4 out rc
+  out=$(run_control "$dir" "$id" relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "relaunch must refuse ($what)"$'\n'"$out"
+  assert_contains "$out" "$reason" "the refusal must name the git dir problem ($what)"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch must not stop the agent ($what)"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing ($what)"
+  # With the agent already stopped, the launch owner still refuses on its own.
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" "$id" --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "fm-spawn --relaunch must refuse on its own ($what)"$'\n'"$out"
+  assert_contains "$out" "$reason" "fm-spawn's refusal must name the git dir problem ($what)"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "fm-spawn's refusal must launch nothing ($what)"
+}
+
+test_relaunch_refuses_a_worktree_aliasing_another_worktrees_git_dir() {
+  local dir
+  dir=$(new_case gitdir-alias rl80)
+  add_ship_task "$dir" rl80 claude
+  git -C "$dir/proj" worktree add --quiet -b task-live "$dir/live-wt"
+  cp "$dir/live-wt/.git" "$dir/wt/.git"
+  assert_gitdir_refusal "$dir" rl80 "belongs to another worktree" "aliased git dir"
+  pass "relaunch: a worktree whose .git names another worktree's git dir refuses before anything stops"
+}
+
+test_relaunch_refuses_a_worktree_whose_git_dir_is_gone() {
+  local dir
+  dir=$(new_case gitdir-gone rl81)
+  add_ship_task "$dir" rl81 claude
+  printf 'gitdir: %s\n' "$dir/proj/.git/worktrees/no-such-slot" > "$dir/wt/.git"
+  assert_gitdir_refusal "$dir" rl81 "no longer exists" "deleted git dir"
+  pass "relaunch: a worktree whose git dir no longer exists refuses before anything stops"
+}
+
+test_relaunch_refuses_a_git_dir_another_task_shares() {
+  local dir
+  dir=$(new_case gitdir-shared rl82)
+  add_ship_task "$dir" rl82 claude
+  # Another task in this home recorded a stale copy whose .git aliases rl82's.
+  mkdir -p "$dir/stale-slot"
+  cp "$dir/wt/.git" "$dir/stale-slot/.git"
+  printf 'worktree=%s\nwindow=fmses:fm-other\n' "$dir/stale-slot" > "$dir/home/state/other.meta"
+  assert_gitdir_refusal "$dir" rl82 "with task other's worktree" "git dir shared with another task"
+  pass "relaunch: a git dir another recorded task's worktree also uses refuses before anything stops"
+}
+
 test_missing_instructions_refuse_before_stopping_anything() {
   local dir out rc
   dir=$(new_case nobrief rl11)
@@ -3214,6 +3263,9 @@ test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
+test_relaunch_refuses_a_worktree_aliasing_another_worktrees_git_dir
+test_relaunch_refuses_a_worktree_whose_git_dir_is_gone
+test_relaunch_refuses_a_git_dir_another_task_shares
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status

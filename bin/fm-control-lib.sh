@@ -357,6 +357,88 @@ fm_control_backend_state_verified() {  # <backend>
   return 1
 }
 
+# fm_control_worktree_named_gitdir: the physical git dir <worktree>'s .git
+# names - the .git directory itself, or the one a linked worktree's .git file
+# points at - printed as "ok\t<git-dir>" or "refuse\t<reason>". It says
+# nothing about whether that git dir belongs to <worktree>.
+fm_control_worktree_named_gitdir() {  # <worktree>
+  local wt_real dotgit line gd
+  wt_real=$(cd "${1-}" 2>/dev/null && pwd -P) \
+    || { printf 'refuse\tit cannot be resolved'; return 0; }
+  dotgit="$wt_real/.git"
+  if [ -d "$dotgit" ] && [ ! -L "$dotgit" ]; then
+    printf 'ok\t%s' "$dotgit"
+    return 0
+  fi
+  [ -f "$dotgit" ] || { printf 'refuse\tit has no .git'; return 0; }
+  line=
+  IFS= read -r line < "$dotgit" || [ -n "$line" ] \
+    || { printf 'refuse\tits .git file cannot be read'; return 0; }
+  case "$line" in
+    'gitdir: '?*) gd=${line#gitdir: } ;;
+    *) printf 'refuse\tits .git file names no git dir'; return 0 ;;
+  esac
+  case "$gd" in /*) ;; *) gd="$wt_real/$gd" ;; esac
+  gd=$(cd "$gd" 2>/dev/null && pwd -P) \
+    || { printf 'refuse\tits .git file names git dir %s, which no longer exists' "${line#gitdir: }"; return 0; }
+  printf 'ok\t%s' "$gd"
+}
+
+# fm_control_worktree_gitdir: the physical git dir <worktree> uses, printed as
+# "ok\t<git-dir>", or "refuse\t<reason>" when that git dir is not provably
+# its own. git records the one worktree a linked git dir belongs to in that git
+# dir's `gitdir` file. A .git file left behind in a reused or restored
+# directory can name a git dir that has since been deleted, or one that now
+# belongs to a different, possibly live, worktree; git then reads that other
+# worktree's HEAD and index from here, so a relaunch would hand one agent
+# another agent's checkout.
+fm_control_worktree_gitdir() {  # <worktree>
+  local raw gd dotgit back back_dir
+  raw=$(fm_control_worktree_named_gitdir "${1-}")
+  [ "${raw%%$'\t'*}" = ok ] || { printf '%s' "$raw"; return 0; }
+  gd=${raw#*$'\t'}
+  dotgit="$(cd "$1" && pwd -P)/.git"
+  [ "$gd" != "$dotgit" ] || { printf 'ok\t%s' "$gd"; return 0; }
+  back=
+  if [ -f "$gd/gitdir" ]; then
+    IFS= read -r back < "$gd/gitdir" || true
+  fi
+  [ -n "$back" ] \
+    || { printf 'refuse\tits git dir %s records no worktree it belongs to' "$gd"; return 0; }
+  case "$back" in /*) ;; *) back="$gd/$back" ;; esac
+  back_dir=$(cd "${back%/*}" 2>/dev/null && pwd -P) || back_dir=
+  [ -n "$back_dir" ] && [ "$back_dir/${back##*/}" = "$dotgit" ] \
+    || { printf 'refuse\tits git dir %s belongs to another worktree (%s)' "$gd" "$back"; return 0; }
+  printf 'ok\t%s' "$gd"
+}
+
+# fm_control_worktree_ownership_refusal: prove task <id>'s <worktree> uses its
+# own git dir (fm_control_worktree_gitdir) and that no other task recorded in
+# <state-dir> has a worktree whose .git names that same git dir, whether or not
+# that other worktree owns it. Prints the reason and returns 1 when either
+# cannot be proven; prints nothing and returns 0 otherwise.
+fm_control_worktree_ownership_refusal() {  # <worktree> <state-dir> <id>
+  local wt=${1-} state=${2-} id=${3-} raw gd meta other other_raw
+  raw=$(fm_control_worktree_gitdir "$wt")
+  case "${raw%%$'\t'*}" in
+    ok) gd=${raw#*$'\t'} ;;
+    *) printf 'task %s'"'"'s recorded worktree %s cannot be proven to use its own git dir: %s' "$id" "$wt" "${raw#*$'\t'}"; return 1 ;;
+  esac
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] || continue
+    [ "$meta" != "$state/$id.meta" ] || continue
+    other=$(fm_meta_get "$meta" worktree)
+    [ -n "$other" ] && [ -d "$other" ] || continue
+    other_raw=$(fm_control_worktree_named_gitdir "$other")
+    if [ "$other_raw" = "ok"$'\t'"$gd" ]; then
+      meta=${meta##*/}
+      printf 'task %s'"'"'s recorded worktree %s shares its git dir %s with task %s'"'"'s worktree %s' "$id" "$wt" "$gd" "${meta%.meta}" "$other"
+      return 1
+    fi
+  done
+  return 0
+}
+
 # Whether <backend> can stop an agent for `exit`. T3 Code cannot: it has no
 # composer for the harness exit command, and its Orchestrator V2 `/mcp` tools
 # offer no session stop, only a turn interrupt that leaves the thread idle and

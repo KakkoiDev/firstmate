@@ -2546,6 +2546,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
     exit 1
   }
+  RELAUNCH_OWNERSHIP=$(fm_control_worktree_ownership_refusal "$RELAUNCH_WT" "$STATE" "$ID") || {
+    echo "error: $RELAUNCH_OWNERSHIP; refusing to relaunch into a checkout another worktree's agent may be using" >&2
+    exit 1
+  }
   if [ "$KIND" = secondmate ]; then
     FIRSTMATE_HOME=$(fm_meta_get "$RELAUNCH_META" home)
     [ -n "$FIRSTMATE_HOME" ] || FIRSTMATE_HOME=$RELAUNCH_WT
