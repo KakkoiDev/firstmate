@@ -178,6 +178,7 @@ For one-off or infrequent operational work, start with the simplest direct end-t
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
 
 Before commissioning an investigation, consult existing reports and established evidence.
+When a feature request calls for intent-to-production / dark factory work, or its observable behavior needs agreement before implementation, load `intent-to-production` before choosing the scout or ship path; that skill owns specification approval and the scope boundary.
 Classify the deliverable:
 
 - **Ship** is the default and produces a project change through the selected delivery mode; once implementation is authorized, dispatch a ship and keep any remaining bounded research inside it unless unresolved uncertainty could materially change whether or what to build.
