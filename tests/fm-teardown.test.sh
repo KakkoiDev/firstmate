@@ -1547,6 +1547,42 @@ test_scout_nested_clone_returns_with_no_untracked_entries() {
   pass "scout copy with a nested clone and a scratch file returns with no untracked entries"
 }
 
+test_linked_todo_outcome_survives_teardown() {
+  local case_dir rc=0 records
+  case_dir=$(make_case linked-todo-outcome)
+  write_meta "$case_dir" no-mistakes scout
+  prepare_scout_teardown "$case_dir"
+  printf 'done [at=2]: report written\n' > "$case_dir/state/task-x1.status"
+  printf '%s\n' '{"task": "task-x1", "key": "ship the parser", "text": "ship the parser", "at": 1}' \
+    '{"task": "other", "key": "other item", "text": "other item", "at": 1}' \
+    > "$case_dir/state/notes-todo-links.jsonl"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "linked-todo-outcome: teardown failed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.status" "linked-todo-outcome: setup error, the status log survived"
+  records=$(python3 -c 'import json,sys
+for line in open(sys.argv[1]):
+    r = json.loads(line)
+    if r.get("outcome"):
+        print(r["task"], r["outcome"], r.get("report", ""))' "$case_dir/state/notes-todo-links.jsonl")
+  assert_equals "task-x1 done $case_dir/data/task-x1/report.md" "$records" \
+    "linked-todo-outcome: the finished task's outcome was not kept in the links file"
+  pass "teardown keeps a linked task's outcome in the todo links file after its records are gone"
+}
+
+test_unlinked_task_teardown_leaves_links_alone() {
+  local case_dir rc=0
+  case_dir=$(make_case unlinked-todo-outcome)
+  write_meta "$case_dir" no-mistakes scout
+  prepare_scout_teardown "$case_dir"
+  printf '%s\n' '{"task": "other", "key": "other item", "text": "other item", "at": 1}' \
+    > "$case_dir/state/notes-todo-links.jsonl"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "unlinked-todo-outcome: teardown failed: $(cat "$case_dir/stderr")"
+  assert_equals 1 "$(wc -l < "$case_dir/state/notes-todo-links.jsonl" | tr -d ' ')" \
+    "unlinked-todo-outcome: a task no todo links was written into the links file"
+  pass "teardown of a task no todo links leaves the links file alone"
+}
+
 test_ship_nested_clone_is_refused_and_bytes_stay() {
   local case_dir wt rc head before after
   case_dir=$(make_case ship-nested-refuse)
@@ -5239,6 +5275,8 @@ test_untracked_only_refusal_diagnostic
 test_tracked_edit_refusal_diagnostic
 test_mixed_refusal_diagnostic
 test_scout_nested_clone_returns_with_no_untracked_entries
+test_linked_todo_outcome_survives_teardown
+test_unlinked_task_teardown_leaves_links_alone
 test_ship_nested_clone_is_refused_and_bytes_stay
 test_dirty_return_warns_which_slot_was_lost
 test_dirty_return_warns_even_when_a_later_step_refuses

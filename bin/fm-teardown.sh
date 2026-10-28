@@ -3972,6 +3972,16 @@ if [ -n "$LAUNCH_HOME_TOKEN" ]; then
 fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+# A todo linked to this task keeps its outcome after the status log and record
+# are gone (bin/fm-todo-guard.sh record-outcome owns the record).
+if [ -z "$FORCE" ]; then
+  TODO_OUTCOME_ARGS=()
+  [ -z "$PR_URL" ] || TODO_OUTCOME_ARGS+=(--pr "$PR_URL")
+  [ ! -f "$DATA/$ID/report.md" ] || TODO_OUTCOME_ARGS+=(--report "$DATA/$ID/report.md")
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
+    "$SCRIPT_DIR/fm-todo-guard.sh" record-outcome "$ID" ${TODO_OUTCOME_ARGS[@]+"${TODO_OUTCOME_ARGS[@]}"} \
+    || echo "warning: could not keep $ID's outcome for its linked todo; the todo may read open after cleanup" >&2
+fi
 # Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
 # retired so its last lines are captured; off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true

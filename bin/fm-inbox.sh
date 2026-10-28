@@ -30,7 +30,7 @@
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
 #   fm-inbox.sh list
-#   fm-inbox.sh drain [--ack <id>...]
+#   fm-inbox.sh drain [--ack <id>... [--no-dispatch <reason>]]
 #
 # `note --request-id` is the idempotent capture path: a repeat of the same
 # request id returns the original note instead of creating a second one, and
@@ -62,6 +62,11 @@
 # Each reply is stamped with a durable per-home sequence, so the receipts cursor
 # is a strict total order and two replies recorded in the same second are both
 # readable. One reply per note: a second one is refused.
+# `drain` on a pending notes-keeping todo note also prints the UNOWNED TODOS
+# section bin/fm-todo-guard.sh owns, and `drain --ack` refuses, acknowledging
+# nothing, while a named todo note still has an unowned open todo, unless
+# `--no-dispatch <reason>` records why nothing was dispatched in
+# state/inbox/.no-dispatch.log.
 # `ready` is the read-only primary-readiness projection (lock, wake-consumer
 # health, away posture, observation time). It never acquires the session lock
 # and never infers liveness from a lock file, a session, or a pane.
@@ -1113,15 +1118,57 @@ cmd_list() {
   [ "$any" -eq 1 ] || printf '(inbox empty)\n'
 }
 
+# The pending or named notes that are notes-keeping todo notes.
+todo_notes() {  # <note-file>...
+  local f
+  for f in "$@"; do
+    [ -f "$f" ] && sed -n '/^--$/,$p' "$f" | grep -q '^notes-keeping todo changed in .*:$' \
+      && printf '%s\n' "$f"
+  done
+  return 0
+}
+
+# bin/fm-todo-guard.sh owns what an unowned todo is; this prints its section
+# for the todo notes among <note-file>... and returns 1 when it listed any.
+unowned_todos() {  # <note-file>...
+  local args=() f rc=0
+  while IFS= read -r f; do args+=(--note "$f"); done < <(todo_notes "$@")
+  [ "${#args[@]}" -gt 0 ] || return 0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" FM_DATA_OVERRIDE="$DATA" \
+    "$SELF_DIR/fm-todo-guard.sh" unowned "${args[@]}" || rc=$?
+  case "$rc" in
+    0|1) return "$rc" ;;
+    *) die "could not check the todo notes for unowned todos" ;;
+  esac
+}
+
 cmd_drain() {
   if [ "${1:-}" = "--ack" ]; then
     shift
-    [ "$#" -gt 0 ] || die "usage: fm-inbox.sh drain --ack <id>..."
+    local ids=() reason='' reason_set=0 id paths=() report
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --no-dispatch)
+          [ "$#" -ge 2 ] && [ -n "$2" ] || die "--no-dispatch needs a non-empty reason"
+          reason=$2; reason_set=1; shift 2 ;;
+        *) ids+=("$1"); shift ;;
+      esac
+    done
+    [ "${#ids[@]}" -gt 0 ] || die "usage: fm-inbox.sh drain --ack <id>... [--no-dispatch <reason>]"
+    for id in "${ids[@]}"; do
+      [ ! -f "$INBOX/$id.note" ] || paths+=("$INBOX/$id.note")
+    done
+    if [ "$reason_set" -eq 0 ] && [ "${#paths[@]}" -gt 0 ]; then
+      if ! report=$(unowned_todos "${paths[@]}"); then
+        printf '%s\n' "$report" >&2
+        die "refusing to acknowledge a todo note while it has an unowned open todo: dispatch work for each (bin/fm-spawn.sh --todo), or pass --no-dispatch <reason>"
+      fi
+    fi
     mkdir -p "$INBOX/handled"
-    local id
-    for id in "$@"; do
+    for id in "${ids[@]}"; do
       if [ -f "$INBOX/$id.note" ]; then
         mv "$INBOX/$id.note" "$INBOX/handled/$id.note"
+        [ "$reason_set" -eq 0 ] || printf '%s\t%s\t%s\n' "$(date +%s)" "$id" "$reason" >> "$INBOX/.no-dispatch.log"
         printf 'acked %s\n' "$id"
       else
         printf 'already-acked %s\n' "$id"
@@ -1131,6 +1178,10 @@ cmd_drain() {
   fi
   cmd_list
   printf '\nAck with: fm-inbox.sh drain --ack <id>...\n'
+  [ -d "$INBOX" ] || return 0
+  local pending=("$INBOX"/*.note) report
+  [ -e "${pending[0]}" ] || return 0
+  report=$(unowned_todos "${pending[@]}") || printf '\n%s\n' "$report"
 }
 
 # ---------------------------------------------------------------- dispatch

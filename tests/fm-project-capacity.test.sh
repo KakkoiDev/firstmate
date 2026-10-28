@@ -623,10 +623,10 @@ SH
     [ "$i" -lt 200 ] || fail "the lock holder never took the project lock"
     sleep 0.05
   done
-  out=$(run_spawn "$case_dir" "$home" "$case_dir/unused" task-o "$case_dir/project" \
+  out=$(FM_SPAWN_PROJECT_LOCK_WAIT=1 run_spawn "$case_dir" "$home" "$case_dir/unused" task-o "$case_dir/project" \
     --backend orca --mode no-mistakes --yolo off) || rc=$?
   rc2=0
-  out2=$(run_spawn "$case_dir" "$home" "$case_dir/unused" task-o "$case_dir/project-2" \
+  out2=$(FM_SPAWN_PROJECT_LOCK_WAIT=1 run_spawn "$case_dir" "$home" "$case_dir/unused" task-o "$case_dir/project-2" \
     --backend orca --mode no-mistakes --yolo off) || rc2=$?
   : > "$case_dir/holder.release"
   wait "$holder" || true
@@ -649,6 +649,125 @@ SH
   pass "an Orca spawn takes the shared project lock whenever a same-origin clone is capped and defers before creating anything"
 }
 
+# A scout that finished: its report exists and its last status is done, so the
+# cleanup sweep may release it.
+write_finished_scout() {  # <home> <id> <project-dir>
+  local home=$1 id=$2 project=$3
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree=$home/absent-worktree-$id" \
+    "project=$project" \
+    "harness=codex" \
+    "kind=scout" \
+    "spawn_gen=s-$id" \
+    "decisions_reviewed=1"
+  printf 'done [at=2]: report written\n' > "$home/state/$id.status"
+  mkdir -p "$home/data/$id"
+  printf '# report\n' > "$home/data/$id/report.md"
+  if [ "$HAVE_TASKS_AXI" = 1 ]; then
+    add_item "$home" "$id"
+    tasks-axi start "$id" --file "$home/data/backlog.md" >/dev/null
+  fi
+}
+
+test_capacity_deferral_releases_finished_workers_and_retries() {
+  local case_dir home out rc=0
+  case_dir=$(make_case release-retry task-c)
+  home="$case_dir/home"
+  declare_capacity "$home" "project 1"
+  write_finished_scout "$home" done-scout "$case_dir/project"
+  out=$(spawn_ship "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "a place held only by a finished scout was not released for the spawn: $out"
+  assert_contains "$out" "released done-scout (report done)" "the spawn did not report the cleanup it ran"
+  assert_contains "$out" "spawned task-c" "the spawn was not retried after the cleanup"
+  assert_absent "$home/state/done-scout.meta" "the finished scout still holds its record"
+  pass "a capacity deferral cleans up finished workers and retries the spawn once"
+}
+
+test_capacity_deferral_with_nothing_finished_still_defers() {
+  local case_dir home out rc=0
+  case_dir=$(make_case release-nothing task-c)
+  home="$case_dir/home"
+  declare_capacity "$home" "project 1"
+  write_live "$home" live-a "$case_dir/project"
+  out=$(spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a project full of unfinished workers admitted a spawn: $out"
+  assert_present "$home/state/live-a.meta" "an unfinished worker was cleaned up"
+  assert_equals 1 "$(printf '%s\n' "$out" | grep -c '^deferred:')" "the spawn retried with nothing released"
+  pass "a capacity deferral with nothing finished defers once, as before"
+}
+
+test_spawn_waits_for_a_held_slot_lock() {
+  local case_dir home out rc=0 holder i
+  case_dir=$(make_case lock-wait task-c)
+  home="$case_dir/home"
+  # shellcheck disable=SC2016 # expanded by the holder's own shell
+  FM_HOME="$home" FM_STATE_OVERRIDE='' bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    lock=$(fm_treehouse_project_lock_path "$2") || exit 1
+    fm_lock_try_acquire "$lock" || exit 1
+    : > "$3.held"
+    sleep 2
+    fm_lock_release "$lock"
+  ' _ "$ROOT" "$case_dir/project" "$case_dir/holder" &
+  holder=$!
+  i=0
+  while [ ! -f "$case_dir/holder.held" ]; do
+    i=$((i + 1))
+    [ "$i" -lt 200 ] || fail "the lock holder never took the project lock"
+    sleep 0.05
+  done
+  out=$(spawn_ship "$case_dir" task-c) || rc=$?
+  wait "$holder" || true
+  expect_code 0 "$rc" "a spawn did not wait out a slot allocation in progress: $out"
+  assert_contains "$out" "spawned task-c" "the spawn did not launch after the lock cleared"
+  pass "a spawn waits for another slot allocation instead of refusing to race it"
+}
+
+write_bridge() {  # <home> <status-json>
+  cat > "$1/config/notes-keeping-bridge" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  status) cat "$FM_HOME/bridge-status.json" ;;
+  link) shift; printf '%s\t%s\n' "$1" "$2" >> "$FM_HOME/bridge-links.log" ;;
+esac
+SH
+  chmod +x "$1/config/notes-keeping-bridge"
+  printf '%s\n' "$2" > "$1/bridge-status.json"
+}
+
+test_todo_is_linked_at_spawn() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-link task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{}'
+  out=$(run_spawn "$case_dir" "$home" "$(new_worktree "$case_dir" task-c)" task-c "$case_dir/project" \
+    --mode no-mistakes --yolo off --todo "Ship the parser" --todo "write the release note") || rc=$?
+  expect_code 0 "$rc" "a spawn with --todo failed: $out"
+  assert_equals "task-c	Ship the parser
+task-c	write the release note" "$(cat "$home/bridge-links.log")" "the spawn did not link each todo to its task"
+  assert_contains "$(cat "$home/state/task-c.meta")" "todo=Ship the parser" "the task record does not name its todo"
+  assert_contains "$(cat "$home/state/task-c.meta")" "todo=write the release note" "the task record lost a repeated todo"
+  pass "--todo links each todo to the new task through the bridge and records it"
+}
+
+test_spawn_without_todo_names_unowned_todos() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-warn task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{}'
+  printf '# Todo\n\n- [ ] answer the vendor\n' > "$home/notes.md"
+  mkdir -p "$home/state/inbox/handled"
+  printf 'id=x\n--\nnotes-keeping todo changed in %s:\n' "$home/notes.md" > "$home/state/inbox/handled/$(date +%s)-abcdef.note"
+  out=$(spawn_ship "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "a spawn without --todo failed: $out"
+  assert_contains "$out" "warning: task-c was spawned without --todo" "the spawn did not warn about the missing todo link"
+  assert_contains "$out" "answer the vendor" "the warning did not name the unowned todo"
+  [ ! -e "$home/bridge-links.log" ] || fail "a spawn without --todo linked something"
+  pass "a spawn without --todo names the open unowned todos"
+}
+
 test_undeclared_capacity_keeps_dispatch_uncapped
 test_available_capacity_admits_the_worker
 test_exhausted_capacity_defers_without_leaving_anything_behind
@@ -665,3 +784,8 @@ test_failed_spawn_after_admission_holds_no_place
 test_unreadable_declaration_refuses_every_spawn
 test_batch_reports_a_deferred_pair
 test_orca_spawn_is_admitted_under_the_shared_project_lock
+test_capacity_deferral_releases_finished_workers_and_retries
+test_capacity_deferral_with_nothing_finished_still_defers
+test_spawn_waits_for_a_held_slot_lock
+test_todo_is_linked_at_spawn
+test_spawn_without_todo_names_unowned_todos

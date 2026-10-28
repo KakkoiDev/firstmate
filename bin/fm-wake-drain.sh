@@ -6,6 +6,7 @@
 # newer branch outcome, OPEN DECISIONS, captain-call record divergence, and on
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
+# A heartbeat row also runs print_heartbeat_sweep: AUTO-RELEASE and UNOWNED TODOS.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -809,6 +810,19 @@ print_status_presentation() {  # [<deduped-raw-rows>]
   return "$rc"
 }
 
+# On a heartbeat, clean up finished workers (bin/fm-auto-release.sh) and then
+# name the open notes-keeping todos no work owns (bin/fm-todo-guard.sh), so
+# neither depends on the supervisor remembering to look.
+print_heartbeat_sweep() {  # <deduped-raw-rows>
+  local released rc=0
+  printf '%s\n' "$1" | awk -F '\t' '$3 == "heartbeat" { found = 1 } END { exit !found }' || return 0
+  released=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-auto-release.sh") || true
+  [ -z "$released" ] || printf 'AUTO-RELEASE (finished workers cleaned up without --force):\n%s\n' "$released"
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-todo-guard.sh" unowned || rc=$?
+  [ "$rc" -le 1 ] || printf 'UNOWNED TODOS: the notes-keeping bridge could not be read\n'
+  return 0
+}
+
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
   local status=$?
@@ -1073,6 +1087,7 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (print_status_presentation "$RAW_ROWS") || true
+print_heartbeat_sweep "$RAW_ROWS"
 print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
 assert_watcher_liveness
 exit "$BRANCH_OUTCOMES_RC"

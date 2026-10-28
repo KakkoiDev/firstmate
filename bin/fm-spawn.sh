@@ -1,14 +1,26 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait] <jev decisions>
-#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait] <jev decisions>
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait] [--todo <todo text>]... <jev decisions>
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait] [--todo <todo text>]... <jev decisions>
 #   <jev decisions> = --concurrency <parallel|semantic-dependency|shared-external-state|migration-conflict>
 #   --decision project-match=<id|off> --decision deliverable-class=<id|off>
 #   [--decision secondmate-scope=<id|off>] [--decision surface-class=<id|off>],
 #   required on every fresh ship or scout spawn; spawn_jev_gate below owns
 #   which are required when and what refuses, bin/fm-jev-gate-lib.sh the asks.
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#   --todo names a captain notes-keeping todo this task works on; repeatable.
+#   Each is recorded as a todo= line in state/<id>.meta and, after a successful
+#   launch, linked to the task through config/notes-keeping-bridge's `link` verb
+#   so the plugin can follow it to done. When that bridge exists and a fresh
+#   ship or scout gets no --todo, the spawn warns with the open todos no work
+#   owns (bin/fm-todo-guard.sh unowned). A link failure warns; the launch stands.
+#   A spawn deferred for project capacity runs bin/fm-auto-release.sh, prints its
+#   lines, and when that cleaned anything up retries the identical spawn once.
+#   Another Treehouse slot allocation or return holding the project lock is
+#   waited out for FM_SPAWN_PROJECT_LOCK_WAIT seconds (default 120; 0 refuses at
+#   once), and `treehouse get` gets FM_SPAWN_WORKTREE_WAIT seconds (default 180)
+#   to enter an isolated worktree before the spawn refuses.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -833,6 +845,8 @@ TRACEPARENT_SET=0
 RELAUNCH=0
 CONCURRENCY=
 DECISIONS=()
+TODOS=()
+SPAWN_ARGV=("$@")
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
 HERDR_RESUME_LOCK_WAIT=0
@@ -889,6 +903,9 @@ for a in "$@"; do
       ;;
     concurrency) CONCURRENCY=$a ;;
     decision) DECISIONS+=("$a") ;;
+    todo)
+      TODOS+=("$a")
+      ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
       exit 1
@@ -953,6 +970,8 @@ for a in "$@"; do
     UPSTREAM_CONSENT=${a#--upstream-consent=}
     UPSTREAM_CONSENT_SET=1
     ;;
+  --todo) want_value=todo ;;
+  --todo=*) TODOS+=("${a#--todo=}") ;;
   --traceparent) want_value=traceparent ;;
   --traceparent=*)
     TRACEPARENT_ARG=${a#--traceparent=}
@@ -997,6 +1016,14 @@ done
   echo "error: --upstream-consent requires a non-empty <host>/<owner>/<repo> value" >&2
   exit 1
 }
+for todo in ${TODOS[@]+"${TODOS[@]}"}; do
+  case "$todo" in
+  '' | *$'\n'*)
+    echo "error: --todo requires a non-empty single-line todo text" >&2
+    exit 1
+    ;;
+  esac
+done
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || {
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
@@ -1728,6 +1755,20 @@ spawn_abort_cleanup() {
       rm -rf "$GIT_HOOKS_DIR" 2>/dev/null || true
     fi
     fm_lock_release "$SPAWN_TASK_LOCK" || true
+  fi
+  # A capacity deferral first cleans up finished workers (bin/fm-auto-release.sh)
+  # and, when that freed anything, retries this exact spawn once. Every lock is
+  # released above, and nothing was created before the deferral.
+  if [ "$status" -eq "${FM_PROJECT_CAPACITY_DEFER_EXIT:-75}" ] && [ "${SPAWN_RELEASE_ON_DEFER:-0}" = 1 ] &&
+    [ -z "${FM_SPAWN_RELEASED_ON_DEFER:-}" ]; then
+    local released
+    released=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-auto-release.sh" 2>&1) || true
+    [ -z "$released" ] || printf '%s\n' "$released" >&2
+    if printf '%s\n' "$released" | grep -q '^released '; then
+      trap - EXIT
+      FM_SPAWN_RELEASED_ON_DEFER=1 exec "$0" ${SPAWN_ARGV[@]+"${SPAWN_ARGV[@]}"}
+    fi
   fi
   return "$status"
 }
@@ -3696,7 +3737,12 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
   }
-  if ! fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
+  # Another allocation or return usually finishes in seconds, so wait for it
+  # (FM_SPAWN_PROJECT_LOCK_WAIT seconds, default 120, 0 refuses at once).
+  SPAWN_PROJECT_LOCK_WAIT=${FM_SPAWN_PROJECT_LOCK_WAIT:-120}
+  if ! fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK" &&
+    { [ "$SPAWN_PROJECT_LOCK_WAIT" = 0 ] ||
+      ! fm_lock_acquire_wait_bounded "$SPAWN_TREEHOUSE_PROJECT_LOCK" "$SPAWN_PROJECT_LOCK_WAIT"; }; then
     if [ "$BACKEND" = orca ]; then
       echo "error: another spawn or cleanup holds the shared project lock for $PROJ_ABS; refusing to race its capacity admission" >&2
     else
@@ -3712,6 +3758,7 @@ if [ -n "$SPAWN_PROJECT_CAPACITY" ]; then
     exit 1
   fi
   if [ "$FM_PROJECT_CAPACITY_OCCUPANTS" -ge "$SPAWN_PROJECT_CAPACITY" ]; then
+    SPAWN_RELEASE_ON_DEFER=1
     echo "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_PROJECT_CAPACITY worker(s) at once on this machine ($FM_PROJECT_CAPACITY_FILE) and $FM_PROJECT_CAPACITY_OCCUPANTS already hold a place ($FM_PROJECT_CAPACITY_OCCUPANT_IDS); task $ID was not launched and its backlog item stays queued - dispatch it again once one of them records its ready PR or is cleaned up" >&2
     exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
   fi
@@ -5193,7 +5240,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   candidate=""
   last_seen=""
   last_reason="the pane reported no path"
-  for _ in $(seq 1 60); do
+  SPAWN_WORKTREE_WAIT=${FM_SPAWN_WORKTREE_WAIT:-180}
+  for _ in $(seq 1 "$SPAWN_WORKTREE_WAIT"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$p" ] || last_seen="$p"
     if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
@@ -5211,7 +5259,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
+    echo "error: treehouse get did not enter an isolated worktree within ${SPAWN_WORKTREE_WAIT}s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
     exit 1
   fi
 
@@ -6047,6 +6095,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
+  [ "$RELAUNCH" -eq 1 ] || for todo in ${TODOS[@]+"${TODOS[@]}"}; do echo "todo=$todo"; done
   # Read by bin/fm-dod-lib.sh's ready-report gate; absent on every other forge.
   [ "$EXTERNAL_REVIEW" = 0 ] || echo "forge=external"
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_remote=$EXTERNAL_BACKUP_REMOTE"
@@ -6802,4 +6851,17 @@ SPAWN_ACCOUNT=
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
 # new endpoint now rather than at the next watcher poll; off costs one file test.
 [ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true
+# Link each --todo to this task through the notes-keeping bridge, and name the
+# open todos nothing owns when a fresh worker was given none.
+if [ -x "$CONFIG/notes-keeping-bridge" ] && [ "$KIND" != secondmate ]; then
+  for todo in ${TODOS[@]+"${TODOS[@]}"}; do
+    FM_HOME=$FM_HOME "$CONFIG/notes-keeping-bridge" link "$ID" "$todo" ||
+      echo "warning: could not link todo '$todo' to $ID through $CONFIG/notes-keeping-bridge" >&2
+  done
+  if [ "${#TODOS[@]}" -eq 0 ] && [ "$RELAUNCH" -eq 0 ]; then
+    SPAWN_UNOWNED=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
+      "$SCRIPT_DIR/fm-todo-guard.sh" unowned 2>&1) ||
+      printf 'warning: %s was spawned without --todo while these todos have no owner; link the one it works on with bin/fm-spawn.sh --todo on the next dispatch or the bridge link verb:\n%s\n' "$ID" "$SPAWN_UNOWNED" >&2
+  fi
+fi
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"
