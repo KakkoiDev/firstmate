@@ -59,6 +59,15 @@ make_tmux_stub() {  # <dir>
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
+# `-S <socket>` addresses one named server. Its answers come from separate
+# socket-* files, so a test can make the server this process addresses and the
+# server a record names disagree.
+SOCK=
+if [ "${1:-}" = -S ]; then
+  SOCK=${2:-}
+  shift 2
+  printf '%s\n' "$SOCK" >> "$D/socket-queries"
+fi
 case "${1:-}" in
   send-keys)
     shift
@@ -104,6 +113,15 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do
       case "$a" in
+        *start_time*)
+          if [ -n "$SOCK" ]; then
+            [ -f "$D/socket-identity" ] || { echo "error connecting to $SOCK (Connection refused)" >&2; exit 1; }
+            cat "$D/socket-identity"
+          else
+            [ -f "$D/identity" ] || { echo 'no server running on /tmp/tmux-1000/default' >&2; exit 1; }
+            cat "$D/identity"
+          fi
+          exit 0 ;;
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*)
@@ -124,6 +142,15 @@ case "${1:-}" in
     fi
     exit 0 ;;
   list-windows)
+    if [ -n "$SOCK" ]; then
+      if [ -f "$D/socket-session-missing" ]; then
+        echo "can't find session: $(cat "$D/session-name")" >&2
+        exit 1
+      fi
+      [ -f "$D/socket-windows" ] || { echo "error connecting to $SOCK (Connection refused)" >&2; exit 1; }
+      cat "$D/socket-windows"
+      exit 0
+    fi
     # The three shapes real tmux answers a per-session inventory with. The
     # first two are DEFINITIVE and classify `missing`; the third is not and
     # classifies `unreadable`.
@@ -166,6 +193,8 @@ case "${1:-}" in
         *) shift ;;
       esac
     done
+    # A window that now exists means its session and server exist too.
+    rm -f "$D/session-missing" "$D/server-dead"
     printf '%s\n' "$name" >> "$D/windows"
     printf '%s\n' "$name" >> "$D/created-windows"
     printf '@9\n'
@@ -174,6 +203,30 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
+  # The machine-wide process table the tmux absence proof reads. Every other ps
+  # read goes to the real ps.
+  cat > "$fb/ps" <<'SH'
+#!/usr/bin/env bash
+# A row "@<pid> <start-epoch> <comm>" reports the elapsed time since that
+# start, so it stays the same process however long the test runs.
+if [ "$*" = "-A -o pid= -o etime= -o comm=" ]; then
+  [ -f "$FM_FAKE_DIR/ps" ] || exit 0
+  now=$(date +%s)
+  while read -r pid rest; do
+    case "$pid" in
+      @*)
+        start=${rest%% *}
+        e=$((now - start))
+        printf '%s %d-%02d:%02d:%02d %s\n' "${pid#@}" $((e / 86400)) $((e % 86400 / 3600)) $((e % 3600 / 60)) $((e % 60)) "${rest#* }"
+        ;;
+      *) printf '%s %s\n' "$pid" "$rest" ;;
+    esac
+  done < "$FM_FAKE_DIR/ps"
+  exit 0
+fi
+exec /bin/ps "$@"
+SH
+  chmod +x "$fb/ps"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_LOCK_WAITING:-}" ] || : > "$FM_FAKE_LOCK_WAITING"
@@ -192,6 +245,9 @@ new_case() {
   printf 'claude' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' fmses > "$dir/fake/session-name"
+  # A tmux server older than any task record is running, so a record without
+  # a server identity cannot be proven gone unless a test says otherwise.
+  printf '%s\n' '  4242 10-00:00:00 tmux' > "$dir/fake/ps"
   make_tmux_stub "$dir"
   printf '%s\n' "$dir"
 }
@@ -2347,12 +2403,10 @@ strand_endpoint() {  # <case-dir> <id>
   : > "$1/fake/windows"
 }
 
-# Every tmux `missing` refuses on BOTH verbs, whatever produced it. tmux is the
-# one verified backend whose absence cannot be proven from a task record: the
-# record carries no socket identity for the endpoint, and any inventory
-# describes only the server this process happens to address. So a window that
-# is merely on a server this seat cannot reach is indistinguishable from one
-# that was destroyed, and neither verb will guess.
+# A tmux `missing` is only a finding about the server this process addresses.
+# Both verbs act on it only when the record proves the window's own server is
+# gone; otherwise the window may be alive on a server this seat cannot see, and
+# neither verb will guess.
 assert_tmux_missing_refuses() {  # <case-dir> <id> <what-was-staged>
   local dir=$1 id=$2 what=$3 out rc brief_before
 
@@ -2376,6 +2430,55 @@ assert_tmux_missing_refuses() {  # <case-dir> <id> <what-was-staged>
   assert_absent "$dir/fake/created-windows" "a refused transaction must not create a window ($what)"
   assert_absent "$dir/fake/created-sessions" "a refused transaction must not create a session ($what)"
   [ ! -s "$dir/fake/literal" ] || fail "a refused transaction must launch nothing ($what)"
+  LAST_REFUSAL=$out
+}
+
+# assert_tmux_reclaimed <case-dir> <id> <what-was-staged>: exit reports the
+# endpoint gone, then relaunch re-creates ONE window for the same task in its
+# recorded worktree and leaves the work alone.
+assert_tmux_reclaimed() {
+  local dir=$1 id=$2 what=$3 out rc head_before
+
+  printf 'never committed\n' > "$dir/wt/dirty.txt"
+  head_before=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_control "$dir" "$id" exit); rc=$?
+  expect_code 0 "$rc" "exit must accept a proven-gone tmux endpoint ($what)"$'\n'"$out"
+  assert_contains "$out" "endpoint-gone" "exit must report the endpoint gone ($what)"
+  [ ! -s "$dir/fake/literal" ] || fail "exit on a gone endpoint must send nothing ($what)"
+
+  out=$(run_control "$dir" "$id" relaunch --note "the tmux server restarted; pick the work back up"); rc=$?
+  expect_code 0 "$rc" "relaunch must reclaim a proven-gone tmux endpoint ($what)"$'\n'"$out"
+  [ "$(grep -c "^fm-$id\$" "$dir/fake/created-windows")" = 1 ] \
+    || fail "a reclaim must create exactly one window for the task ($what)"
+  case "$(meta_field "$dir" "$id" window)" in
+    *":fm-$id") ;;
+    *) fail "the record must rebind to the re-created window ($what): $(meta_field "$dir" "$id" window)" ;;
+  esac
+  [ "$(meta_field "$dir" "$id" worktree)" = "$dir/wt" ] \
+    || fail "a reclaim must keep the recorded worktree ($what)"
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head_before" ] \
+    || fail "a reclaim moved the worktree's HEAD ($what)"
+  assert_contains "$(cat "$dir/wt/dirty.txt")" "never committed" \
+    "a reclaim destroyed an uncommitted change ($what)"
+  assert_contains "$(cat "$dir/home/data/$id/brief.md")" "the tmux server restarted" \
+    "the replacement must inherit the progress note ($what)"
+  [ "$(journal_field "$dir" "$id" exit_result)" = endpoint-gone ] \
+    || fail "the transaction should record that the endpoint was already gone ($what)"
+  assert_present "$dir/fake/literal" "the replacement agent must be launched ($what)"
+}
+
+# record_server_identity <case-dir> <id> <pid> <start> <socket>
+record_server_identity() {
+  printf 'tmux_server_pid=%s\ntmux_server_start=%s\ntmux_socket=%s\n' "$3" "$4" "$5" \
+    >> "$1/home/state/$2.meta"
+}
+
+# age_record <case-dir> <id>: date the task record well into the past, so a
+# tmux process that started seconds ago provably started after it.
+age_record() {
+  touch -t 202001010000 "$1/home/state/$2.meta"
 }
 
 test_tmux_refuses_a_window_missing_from_its_session() {
@@ -2384,7 +2487,8 @@ test_tmux_refuses_a_window_missing_from_its_session() {
   add_ship_task "$dir" rl60 claude
   strand_endpoint "$dir" rl60
   assert_tmux_missing_refuses "$dir" rl60 "window absent from a readable session inventory"
-  pass "tmux: a window absent from its session refuses both verbs rather than being assumed gone"
+  assert_contains "$LAST_REFUSAL" "pid 4242" "the refusal must name the tmux process that may still hold the window"
+  pass "tmux: a record without a server identity refuses while an older tmux process runs"
 }
 
 test_tmux_refuses_a_session_that_cannot_be_found() {
@@ -2396,18 +2500,113 @@ test_tmux_refuses_a_session_that_cannot_be_found() {
   # window and its agent survived elsewhere.
   : > "$dir/fake/session-missing"
   assert_tmux_missing_refuses "$dir" rl61 "recorded session not found"
-  pass "tmux: an unfindable session refuses both verbs, so a live agent is never duplicated"
+  pass "tmux: an unfindable session refuses both verbs while an older tmux process runs"
 }
 
 test_tmux_refuses_when_the_server_is_gone() {
   local dir
   dir=$(new_case tmux-noserver rl62)
   add_ship_task "$dir" rl62 claude
-  # No server on the socket this process addresses. Another server may still be
-  # running the task's window, and the record cannot say which socket is its.
+  # No server on the socket this process addresses, but an older tmux process
+  # still runs: it may be another server holding the task's window.
   : > "$dir/fake/server-dead"
   assert_tmux_missing_refuses "$dir" rl62 "no tmux server on this socket"
-  pass "tmux: a dead server on this socket refuses both verbs rather than proving absence"
+  pass "tmux: a dead server on this socket refuses both verbs while another older tmux runs"
+}
+
+test_tmux_legacy_record_is_reclaimed_when_every_tmux_process_is_newer() {
+  local dir
+  dir=$(new_case tmux-legacy-restart rl64)
+  add_ship_task "$dir" rl64 claude
+  : > "$dir/fake/session-missing"
+  age_record "$dir" rl64
+  # After a restart only young tmux processes run. An old process whose name
+  # merely starts with tmux is not a tmux server.
+  printf '%s\n' '  5001 00:05 tmux' '  5002 10-00:00:00 tmux-agent-mesh' '  5003 05:00 /opt/homebrew/bin/tmux' \
+    > "$dir/fake/ps"
+  printf '5001 1700000000 /tmp/tmux-1000/default\n' > "$dir/fake/identity"
+  assert_tmux_reclaimed "$dir" rl64 "legacy record, every tmux process started after it"
+  [ "$(meta_field "$dir" rl64 tmux_server_pid)" = 5001 ] \
+    || fail "the rebound record must carry the new server's pid"
+  [ "$(meta_field "$dir" rl64 tmux_server_start)" = 1700000000 ] \
+    || fail "the rebound record must carry the new server's start time"
+  [ "$(meta_field "$dir" rl64 tmux_socket)" = /tmp/tmux-1000/default ] \
+    || fail "the rebound record must carry the new server's socket"
+  pass "tmux: a legacy record is reclaimed when no tmux process predates it"
+}
+
+test_tmux_legacy_record_refuses_when_the_process_table_is_unreadable() {
+  local dir
+  dir=$(new_case tmux-legacy-nops rl65)
+  add_ship_task "$dir" rl65 claude
+  : > "$dir/fake/session-missing"
+  age_record "$dir" rl65
+  printf '%s\n' 'garbage' > "$dir/fake/ps"
+  assert_tmux_missing_refuses "$dir" rl65 "process table unreadable"
+  pass "tmux: an unreadable process table proves nothing"
+}
+
+test_tmux_identity_reclaims_when_the_recorded_server_no_longer_runs() {
+  local dir
+  dir=$(new_case tmux-id-dead rl66)
+  add_ship_task "$dir" rl66 claude
+  : > "$dir/fake/session-missing"
+  # The older tmux process 4242 still runs, so only the identity can prove this.
+  record_server_identity "$dir" rl66 777 1600000000 "$dir/sock"
+  assert_tmux_reclaimed "$dir" rl66 "recorded server pid gone"
+  pass "tmux: a record whose server process is gone is reclaimed"
+}
+
+test_tmux_identity_reclaims_when_the_recorded_pid_was_reused() {
+  local dir
+  dir=$(new_case tmux-id-reused rl67)
+  add_ship_task "$dir" rl67 claude
+  : > "$dir/fake/session-missing"
+  printf '%s\n' '  777 00:30 tmux' > "$dir/fake/ps"
+  record_server_identity "$dir" rl67 777 1600000000 "$dir/sock"
+  assert_tmux_reclaimed "$dir" rl67 "recorded pid now a newer tmux server"
+  pass "tmux: a restarted server that reused the recorded pid is still a different server"
+}
+
+test_tmux_identity_refuses_a_window_alive_on_its_recorded_server() {
+  local dir start
+  dir=$(new_case tmux-id-alive rl68)
+  add_ship_task "$dir" rl68 claude
+  : > "$dir/fake/session-missing"
+  start=$(( $(date +%s) - 600 ))
+  printf '@777 %s tmux\n' "$start" > "$dir/fake/ps"
+  record_server_identity "$dir" rl68 777 "$start" "$dir/sock"
+  printf '777 %s\n' "$start" > "$dir/fake/socket-identity"
+  printf '%s\n' fm-rl68 > "$dir/fake/socket-windows"
+  assert_tmux_missing_refuses "$dir" rl68 "window alive on the recorded server"
+  assert_contains "$LAST_REFUSAL" "$dir/sock" "the refusal must name the server that still holds the window"
+  pass "tmux: a window still alive on its recorded server, unseen from this seat, refuses both verbs"
+}
+
+test_tmux_identity_refuses_a_running_server_whose_socket_does_not_answer() {
+  local dir start
+  dir=$(new_case tmux-id-nosock rl69)
+  add_ship_task "$dir" rl69 claude
+  : > "$dir/fake/session-missing"
+  start=$(( $(date +%s) - 600 ))
+  printf '@777 %s tmux\n' "$start" > "$dir/fake/ps"
+  record_server_identity "$dir" rl69 777 "$start" "$dir/sock"
+  assert_tmux_missing_refuses "$dir" rl69 "recorded server runs, socket silent"
+  pass "tmux: a recorded server that still runs but cannot be asked refuses both verbs"
+}
+
+test_tmux_identity_reclaims_a_window_closed_on_a_running_server() {
+  local dir start
+  dir=$(new_case tmux-id-closed rl70)
+  add_ship_task "$dir" rl70 claude
+  : > "$dir/fake/session-missing"
+  start=$(( $(date +%s) - 600 ))
+  printf '@777 %s tmux\n' "$start" > "$dir/fake/ps"
+  record_server_identity "$dir" rl70 777 "$start" "$dir/sock"
+  printf '777 %s\n' "$start" > "$dir/fake/socket-identity"
+  printf '%s\n' fm-other > "$dir/fake/socket-windows"
+  assert_tmux_reclaimed "$dir" rl70 "window closed on its still-running server"
+  pass "tmux: a window closed on its still-running recorded server is reclaimed"
 }
 
 test_reclaim_refuses_an_unreadable_endpoint() {
@@ -3042,6 +3241,13 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_tmux_refuses_a_window_missing_from_its_session
 test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone
+test_tmux_legacy_record_is_reclaimed_when_every_tmux_process_is_newer
+test_tmux_legacy_record_refuses_when_the_process_table_is_unreadable
+test_tmux_identity_reclaims_when_the_recorded_server_no_longer_runs
+test_tmux_identity_reclaims_when_the_recorded_pid_was_reused
+test_tmux_identity_refuses_a_window_alive_on_its_recorded_server
+test_tmux_identity_refuses_a_running_server_whose_socket_does_not_answer
+test_tmux_identity_reclaims_a_window_closed_on_a_running_server
 test_reclaim_refuses_an_unreadable_endpoint
 test_herdr_relaunch_resumes_only_the_registered_pi_session
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server

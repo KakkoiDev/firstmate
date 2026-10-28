@@ -924,14 +924,20 @@ test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop() {
   dir=$(new_case gone)
   add_task "$dir" t1 claude
   : > "$dir/fake/windows"
+  # A tmux process older than the record still runs, and the record carries no
+  # server identity, so it may be another server holding the window.
+  cat > "$dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = "-A -o pid= -o etime= -o comm=" ]; then echo '4242 10-00:00:00 tmux'; exit 0; fi
+exec /bin/ps "$@"
+SH
+  chmod +x "$dir/fakebin/ps"
   out=$(run_control "$dir" t1 exit); rc=$?
-  # `missing` on tmux is not a finding about the endpoint. A task record carries
-  # no socket identity for it, and any inventory describes only the tmux server
-  # this process addresses, so a window that is merely on a server this seat
-  # cannot reach is indistinguishable from one that was destroyed. exit refuses
+  # `missing` on tmux is not a finding about the endpoint: any inventory
+  # describes only the tmux server this process addresses. exit refuses
   # rather than claim a stop it cannot see, and sends nothing to an address it
-  # cannot trust. Reclaim of a destroyed endpoint is Herdr-only
-  # (docs/agent-control.md "Reclaiming a task whose endpoint is gone").
+  # cannot trust (docs/agent-control.md "Reclaiming a task whose endpoint is
+  # gone" owns the tmux proof).
   expect_code 1 "$rc" "a tmux endpoint whose absence cannot be proven must refuse"
   assert_not_contains "$out" "endpoint-gone" "exit must not report a stop it could not prove"
   [ -z "$(literals "$dir")" ] || fail "nothing may be sent into an endpoint exit cannot trust"

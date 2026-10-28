@@ -529,3 +529,140 @@ fm_backend_tmux_agent_alive() {  # <target>
     *) printf 'unknown' ;;
   esac
 }
+
+# fm_backend_tmux_server_identity: the identity of the tmux server that hosts
+# <target>, printed as "<pid> <start-time> <socket-path>". A task record keeps
+# it so a later absence proof can ask about the window's OWN server rather than
+# whichever server this process happens to address. The server pid and its
+# start time together change on every server restart, including one that
+# reuses the pid.
+fm_backend_tmux_server_identity() {  # <target>
+  local out pid start socket
+  out=$(tmux display-message -p -t "$1" '#{pid} #{start_time} #{socket_path}' 2>/dev/null) || return 1
+  read -r pid start socket <<EOF2
+$out
+EOF2
+  case "$pid:$start" in *[!0-9:]*|:*|*:) return 1 ;; esac
+  [ -n "$socket" ] || return 1
+  printf '%s %s %s\n' "$pid" "$start" "$socket"
+}
+
+# ps's elapsed-time column, [[dd-]hh:]mm:ss, in seconds.
+fm_backend_tmux_etime_seconds() {  # <etime>
+  local e=$1 d=0 h=0 m s a b c
+  case "$e" in *-*) d=${e%%-*}; e=${e#*-} ;; esac
+  IFS=: read -r a b c <<EOF2
+$e
+EOF2
+  if [ -n "$c" ]; then h=$a; m=$b; s=$c; else m=$a; s=$b; fi
+  case "$d:$h:$m:$s" in *[!0-9:]*|*::*|:*|*:) return 1 ;; esac
+  printf '%s\n' $(( ((10#$d * 24 + 10#$h) * 60 + 10#$m) * 60 + 10#$s ))
+}
+
+# Every process on this machine as "<pid> <start-epoch> <is-tmux>", where
+# is-tmux is 1 for a process whose command is tmux itself (a server or a
+# client; Linux retitles them `tmux: server` and `tmux: client`). Start times
+# come from elapsed time, so they carry a second or two of error; callers
+# allow for it. Fails when the table cannot be read or a row cannot be parsed,
+# because a row that was skipped could have been the window's server.
+fm_backend_tmux_process_starts() {
+  local table now pid etime comm secs name rows=0
+  table=$(LC_ALL=C ps -A -o pid= -o etime= -o comm= 2>/dev/null) || return 1
+  now=$(date +%s) || return 1
+  while read -r pid etime comm; do
+    [ -n "$pid$etime$comm" ] || continue
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    secs=$(fm_backend_tmux_etime_seconds "$etime") || return 1
+    name=${comm##*/}
+    case "$name" in
+      tmux|tmux:*) printf '%s %s 1\n' "$pid" $(( now - secs )) ;;
+      *) printf '%s %s 0\n' "$pid" $(( now - secs )) ;;
+    esac
+    rows=$((rows + 1))
+  done <<EOF2
+$table
+EOF2
+  [ "$rows" -gt 0 ]
+}
+
+# fm_backend_tmux_endpoint_absence_recheck: whether <target>'s window is
+# PROVEN gone, printed as "missing\t" or "unproven\t<reason>". A tmux window
+# lives only inside its server process, so the proof is about that process:
+#   - A record carrying the server identity (tmux_server_pid,
+#     tmux_server_start, tmux_socket) proves the window gone when that server
+#     no longer runs - its pid is gone, is no longer tmux, or started at another
+#     time - or when that same server, asked through its own socket, no longer
+#     has the window. A server that still runs but cannot be asked, or that
+#     still has the window, proves nothing from this seat.
+#   - A record without it (written before spawn recorded one) proves the window
+#     gone only when NO tmux process on this machine started before the record
+#     was last written: the window was created before the record, and a server
+#     that started later cannot hold it. Limits: a tmux server whose executable
+#     is not named tmux is not recognized, and a window closed on a server that
+#     is still running cannot be proven gone this way.
+fm_backend_tmux_endpoint_absence_recheck() {  # <target> <meta>
+  local target=$1 meta=$2 session pid start socket starts row rpid rstart rtmux
+  local answer windows bound slack=2
+  session=${target%%:*}
+  pid=$(fm_meta_get "$meta" tmux_server_pid)
+  start=$(fm_meta_get "$meta" tmux_server_start)
+  socket=$(fm_meta_get "$meta" tmux_socket)
+  starts=$(fm_backend_tmux_process_starts) || {
+    printf 'unproven\tthe process table could not be read to tell whether the window'"'"'s tmux server still runs'
+    return 0
+  }
+  if [ -n "$pid$start$socket" ]; then
+    case "$pid:$start" in
+      *[!0-9:]*|:*|*:) printf 'unproven\tthe record'"'"'s tmux server identity is malformed'; return 0 ;;
+    esac
+    [ -n "$socket" ] || { printf 'unproven\tthe record'"'"'s tmux server identity has no socket'; return 0; }
+    row=$(printf '%s\n' "$starts" | awk -v p="$pid" '$1 == p')
+    read -r rpid rstart rtmux <<EOF2
+$row
+EOF2
+    if [ -z "$rpid" ] || [ "$rtmux" != 1 ] ||
+      [ "$rstart" -gt $((start + slack)) ] || [ "$rstart" -lt $((start - slack)) ]; then
+      printf 'missing\t'
+      return 0
+    fi
+    answer=$(tmux -S "$socket" display-message -p '#{pid} #{start_time}' 2>/dev/null) || {
+      printf 'unproven\tthe tmux server that holds the window (pid %s, socket %s) still runs but did not answer on its socket' "$pid" "$socket"
+      return 0
+    }
+    [ "$answer" = "$pid $start" ] || {
+      printf 'unproven\tthe tmux server that holds the window (pid %s) still runs, but its socket %s answers for another server' "$pid" "$socket"
+      return 0
+    }
+    if windows=$(LC_ALL=C tmux -S "$socket" list-windows -t "=$session" -F '#{window_name}' 2>&1); then
+      if printf '%s\n' "$windows" | grep -Fqx -- "${target#*:}"; then
+        printf 'unproven\tthe window is still present on its tmux server (pid %s, socket %s), which this seat does not address' "$pid" "$socket"
+      else
+        printf 'missing\t'
+      fi
+      return 0
+    fi
+    case "$windows" in
+      *"can't find session:"*) printf 'missing\t' ;;
+      *) printf 'unproven\tthe window'"'"'s tmux server (pid %s, socket %s) still runs but its windows could not be listed' "$pid" "$socket" ;;
+    esac
+    return 0
+  fi
+  bound=$(fm_backend_tmux_path_mtime "$meta") || bound=
+  case "$bound" in
+    ''|*[!0-9]*) printf 'unproven\tthe task record'"'"'s age could not be read'; return 0 ;;
+  esac
+  row=$(printf '%s\n' "$starts" | awk -v b=$((bound + slack)) '$3 == 1 && $2 <= b { print; exit }')
+  if [ -n "$row" ]; then
+    printf 'unproven\tthe record carries no tmux server identity, and tmux process pid %s started before the record was written, so it may be a server still holding the window' "${row%% *}"
+    return 0
+  fi
+  printf 'missing\t'
+}
+
+fm_backend_tmux_path_mtime() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
+}
