@@ -2164,17 +2164,17 @@ spawn_jev_kind() {  # <out-file>
   fi
 }
 spawn_jev_work_under_way() {  # <out-file>
-  local meta other kind project n=0
+  local meta other_id kind project n=0
   : > "$1"
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
-    other=${meta##*/}
-    other=${other%.meta}
-    [ "$other" != "$ID" ] || continue
+    other_id=${meta##*/}
+    other_id=${other_id%.meta}
+    [ "$other_id" != "$ID" ] || continue
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" != secondmate ] || continue
     project=$(fm_meta_get "$meta" project)
-    printf '%s project=%s kind=%s\n' "$other" "${project##*/}" "${kind:-ship}" >> "$1"
+    printf '%s project=%s kind=%s\n' "$other_id" "${project##*/}" "${kind:-ship}" >> "$1"
     n=$((n + 1))
   done
   [ "$n" -gt 0 ] || printf 'none\n' > "$1"

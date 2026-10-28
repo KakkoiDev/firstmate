@@ -275,7 +275,7 @@ fm_jev_gate_status_epoch() {
 # instead. A part that cannot be read says so instead of being left out.
 fm_jev_gate_live_state() {
   local out=$1 id=$2 state=$3 line unread tail_lines=${FM_JEV_GATE_SCREEN_TAIL_LINES:-25} screen=''
-  local backend='' agent='' pane='' class='' boot status_at contra='' frame
+  local backend='' agent_state='' pane='' class='' boot status_at contra='' frame
   line=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$state "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>&1 | head -n 3) || line=''
   [ -n "$line" ] || line='state: unknown · source: none · fm-crew-state.sh printed nothing'
   unread=$(fm_task_inbox_unhandled_count "$state" "$id")
@@ -283,7 +283,7 @@ fm_jev_gate_live_state() {
     backend=$FM_BACKEND_VALIDATED_BACKEND
     fm_backend_source "$backend" >/dev/null 2>&1 || true
     screen=$(fm_backend_capture "$backend" "$FM_BACKEND_VALIDATED_TARGET" "$tail_lines" "fm-$id" 2>/dev/null) || screen=''
-    agent=$(fm_backend_agent_state "$backend" "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null) || agent=''
+    agent_state=$(fm_backend_agent_state "$backend" "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null) || agent_state=''
     if [ "$backend" = tmux ] && declare -F fm_backend_tmux_current_command >/dev/null; then
       pane=$(fm_backend_tmux_current_command "$FM_BACKEND_VALIDATED_TARGET")
       [ -z "$pane" ] || ! declare -F fm_agent_process_classify_name >/dev/null \
@@ -292,8 +292,8 @@ fm_jev_gate_live_state() {
   fi
   boot=$(fm_jev_gate_boot_epoch)
   status_at=$(fm_jev_gate_status_epoch "$state/$id.status")
-  case "$agent" in
-    dead | missing) contra="the agent process reads $agent" ;;
+  case "$agent_state" in
+    dead | missing) contra="the agent process reads $agent_state" ;;
   esac
   [ "$class" != shell ] || contra="${contra:+$contra, and }the pane runs the bare shell $pane"
   if [ -n "$boot" ] && [ -n "$status_at" ] && [ "$status_at" -lt "$boot" ]; then
@@ -307,7 +307,7 @@ fm_jev_gate_live_state() {
   {
     printf '%s:\n%s\n\n' "$frame" "$line"
     printf 'Process facts, read just now:\n'
-    printf 'Agent process in the recorded endpoint: %s\n' "${agent:-(could not be read)}"
+    printf 'Agent process in the recorded endpoint: %s\n' "${agent_state:-(could not be read)}"
     if [ "$backend" = tmux ]; then
       printf 'Pane foreground command: %s\n' "${pane:-(could not be read)}${pane:+ (${class:-unclassified})}"
     else

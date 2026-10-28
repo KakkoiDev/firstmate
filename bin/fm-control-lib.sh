@@ -418,7 +418,7 @@ fm_control_worktree_gitdir() {  # <worktree>
 # that other worktree owns it. Prints the reason and returns 1 when either
 # cannot be proven; prints nothing and returns 0 otherwise.
 fm_control_worktree_ownership_refusal() {  # <worktree> <state-dir> <id>
-  local wt=${1-} state=${2-} id=${3-} raw gd meta other other_raw
+  local wt=${1-} state=${2-} id=${3-} raw gd meta other_wt other_raw
   raw=$(fm_control_worktree_gitdir "$wt")
   case "${raw%%$'\t'*}" in
     ok) gd=${raw#*$'\t'} ;;
@@ -427,12 +427,12 @@ fm_control_worktree_ownership_refusal() {  # <worktree> <state-dir> <id>
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
     [ "$meta" != "$state/$id.meta" ] || continue
-    other=$(fm_meta_get "$meta" worktree)
-    [ -n "$other" ] && [ -d "$other" ] || continue
-    other_raw=$(fm_control_worktree_named_gitdir "$other")
+    other_wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$other_wt" ] && [ -d "$other_wt" ] || continue
+    other_raw=$(fm_control_worktree_named_gitdir "$other_wt")
     if [ "$other_raw" = "ok"$'\t'"$gd" ]; then
       meta=${meta##*/}
-      printf 'task %s'"'"'s recorded worktree %s shares its git dir %s with task %s'"'"'s worktree %s' "$id" "$wt" "$gd" "${meta%.meta}" "$other"
+      printf 'task %s'"'"'s recorded worktree %s shares its git dir %s with task %s'"'"'s worktree %s' "$id" "$wt" "$gd" "${meta%.meta}" "$other_wt"
       return 1
     fi
   done
