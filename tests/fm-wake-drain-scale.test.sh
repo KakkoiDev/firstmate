@@ -72,5 +72,22 @@ test_quiet_drain_stat_launches_do_not_multiply_per_field() {
   pass "drain over $TASKS unchanged tasks launches $count stat processes"
 }
 
+# The presentation cursor manifest holds one row per task and is re-read for
+# each task, so a subshell per manifest row grows with the square of the fleet.
+# A tab field separator built with a command substitution is such a subshell.
+test_drain_row_reads_do_not_launch_subshells() {
+  local dir state out count
+  dir=$(make_case row-read-subshells)
+  state="$dir/state"
+  out="$dir/drain.out"
+  prime_tasks "$state"
+  count=$(FM_STATE_OVERRIDE="$state" PS4='+ ' bash -x "$DRAIN" 2>&1 >"$out" \
+    | grep -cE "^\++ printf '\\\\t'$")
+  [ "$count" -le "$TASKS" ] \
+    || fail "drain over $TASKS tasks launched $count tab-separator subshells, above $TASKS"
+  pass "drain over $TASKS tasks launches $count tab-separator subshells"
+}
+
 test_drain_stat_launches_do_not_multiply_per_field
 test_quiet_drain_stat_launches_do_not_multiply_per_field
+test_drain_row_reads_do_not_launch_subshells
