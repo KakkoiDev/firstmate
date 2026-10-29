@@ -261,7 +261,9 @@ test_claude_hooks_semantic_lifecycle() {
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy claude-hook" ] || fail "UserPromptSubmit must classify 'busy claude-hook', got '$out'"
 
+  rm -f "$state/$id.turn-ended"
   run_claude_hook "$settings" StopFailure || fail "StopFailure hook command failed"
+  [ -f "$state/$id.turn-ended" ] || fail "StopFailure must touch the notification marker: Claude runs no Stop hook when a turn ends on an API error"
   out=$(classify claude "$id" "$state")
   [ "$out" = "idle claude-hook" ] || fail "StopFailure must classify idle so an API error cannot strand busy, got '$out'"
 

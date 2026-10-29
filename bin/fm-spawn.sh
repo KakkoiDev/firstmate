@@ -5617,8 +5617,10 @@ BUSY_GEN=
     # and SessionEnd (process shutdown) all close it, so an abnormal end can
     # never leave a stale busy record. Claude fires no hook for a manual
     # interrupt: fm-control preserves the adapter-owned state, while the
-    # legacy fm-send --key Escape path records idle/fm-interrupt. Stop keeps
-    # the turn-ended NOTIFICATION touch for the watcher. A secondmate gets no
+    # legacy fm-send --key Escape path records idle/fm-interrupt. Stop and
+    # StopFailure keep the turn-ended NOTIFICATION touch for the watcher;
+    # Claude runs no Stop hook when a turn ends on an API error, so
+    # StopFailure is that turn end's only signal. A secondmate gets no
     # Stop hook here: its home's tracked Stop guard (bin/fm-turnend-guard.sh)
     # can block a Stop into a continuation that fires no UserPromptSubmit,
     # and Claude runs Stop hooks in parallel, so the guard is that mate's only
@@ -5660,7 +5662,11 @@ BUSY_GEN=
     wait_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
     wait_clear="$wait_cmd_prefix clear $wait_task --gen $(shell_quote "$BUSY_GEN") >/dev/null 2>&1 || true"
     j_submit=$(json_escape "$wait_clear; $busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
-    j_stopfail=$(json_escape "$wait_clear; $busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
+    stop_turnend=
+    if [ "$busy_notify_turnend" = true ]; then
+      stop_turnend="touch $(shell_quote "$TURNEND"); "
+    fi
+    j_stopfail=$(json_escape "$wait_clear; ${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$wait_clear; $busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
     j_permreq=$(json_escape "$wait_cmd_prefix record $wait_task $wait_suffix --event permission-request >/dev/null 2>&1 || true")
     j_notify=$(json_escape "$wait_cmd_prefix record $wait_task $wait_suffix --event notification-dialog >/dev/null 2>&1 || true")
@@ -5676,10 +5682,6 @@ BUSY_GEN=
       } >"$WT/.fm-busy-stop"
       exclude_path '.fm-busy-stop'
     else
-      stop_turnend=
-      if [ "$busy_notify_turnend" = true ]; then
-        stop_turnend="touch $(shell_quote "$TURNEND"); "
-      fi
       j_stop=$(json_escape "$wait_clear; ${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       stop_entry="\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stop\"}]}],"
     fi
