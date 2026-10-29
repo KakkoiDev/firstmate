@@ -32,7 +32,7 @@ for command_name in awk bash cat date dirname jq mkdir mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
 done
 # The worker marker would name the asker; each case sets it where it matters.
-unset TYPESAFE_API_KEY DD_API_KEY DD_SITE FM_TASK_ID
+unset TYPESAFE_API_KEY DD_API_KEY DD_SITE FM_TASK_ID CLAUDE_CODE_SESSION_ID FM_JEV_TRANSCRIPT
 
 printf '%s\n' 'Worker pane shows the same test failing for the third time.' 'CONTEXT-ONLY-MARKER' > "$CONTEXT"
 
@@ -1129,26 +1129,19 @@ sent_context() { jq -j .state.context "$LOG/body"; printf x; }
 
 reset
 mkdir -p "$HOME_DIR/state"
-TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --context "$NOTE" --mine zq-mine-marker
-expect_code 2 "$code" "a manual ask carrying only firstmate's note"
-assert_contains "$err" "error: deliverable-class is asked by hand, and this ask carries neither the operator's words for this turn nor a --source file" \
-  "the refusal says what is missing"
-assert_contains "$err" "nothing was asked" "the refusal says nothing was asked"
-assert_contains "$err" "  run: bin/fm-jev.sh ask --type deliverable-class" "the refusal prints the command to run"
-assert_contains "$err" "--mine zq-mine-marker --source <file holding the raw evidence: status lines, brief, report, or script output>" \
-  "the printed command keeps the caller's arguments and adds the --source placeholder"
-assert_absent "$LOG/argv" "a refused manual ask never calls Jev"
-assert_absent "$HOME_DIR/state/jev-asks.jsonl" "a refused manual ask writes no ledger line, so off cannot stand in for it"
-run code out err "${DC[@]}" --context "$NOTE" --mine ship
-expect_code 2 "$code" "the refusal holds with Jev off too"
-assert_absent "$HOME_DIR/state/jev-asks.jsonl" "an off manual ask with only a note is not ledgered"
+write_choice ship 0.9 ship scout zq-mine-marker
+TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --mine zq-mine-marker
+expect_code 0 "$code" "a manual ask with no --source, no note, and no recorded words"
+assert_contains "$out" '  answer: ship   confidence: 0.9' "the ask with no --source reaches Jev"
+assert_not_contains "$(sent_context)" "zq-mine-marker" "firstmate's choice stays out of a sourceless context"
+wait_for "the sourceless ask settles" settled 1
 run code out err "${DC[@]}" --source /dev/null --mine ship
 expect_code 2 "$code" "a --source that is not a regular file"
 printf '' > "$TMP_ROOT/empty"
 run code out err "${DC[@]}" --source "$TMP_ROOT/empty" --mine ship
 expect_code 2 "$code" "an empty --source"
 assert_equals "error: --source file is empty: $TMP_ROOT/empty" "$err" "an empty source carries nothing and is refused"
-pass "a manual ask with only firstmate's note is refused and prints the command with --source"
+pass "a manual ask needs no --source; a --source given must still be a non-empty file"
 
 reset
 write_choice ship 0.9 ship scout zq-mine-marker
@@ -1190,10 +1183,11 @@ Looks like a ship to me, so ship it.
 assert_not_contains "$ctx" "zq-mine-marker" "firstmate's choice is absent from a context built with words and a note"
 wait_for "the manual asks settle" settled 1
 TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --context "$NOTE" --mine ship
-expect_code 0 "$code" "the operator's words alone lift the refusal"
+expect_code 0 "$code" "an ask with the operator's words and a note"
 assert_contains "$(sent_context)" 'and t2, mid-turn' "the words reach Jev beside the note"
 TYPESAFE_API_KEY=$KEY FM_TASK_ID=t9 run code out err "${DC[@]}" --context "$NOTE" --mine ship
-expect_code 2 "$code" "inside a task worker the primary's words do not count"
+expect_code 0 "$code" "an ask inside a task worker"
+assert_not_contains "$(sent_context)" 'and t2, mid-turn' "inside a task worker the primary's words stay out"
 pass "the operator's verbatim words for the turn, mid-turn messages included, lead every ask's context"
 
 # --- a task worker's ask carries its brief's request, not the primary's words ---
@@ -1202,7 +1196,7 @@ mkdir -p "$HOME_DIR/data/t9"
 printf '%s\n' '# Task' "## Captain's intent" 'move every open ticket to sprint 5' '' '## Firstmate spec' 'zq-spec-marker' > "$HOME_DIR/data/t9/brief.md"
 write_choice ship 0.8 ship scout zq-mine-marker
 TYPESAFE_API_KEY=$KEY FM_TASK_ID=t9 run code out err "${DC[@]}" --context "$NOTE" --mine ship
-expect_code 0 "$code" "the brief's request lifts the manual-ask refusal inside a worker"
+expect_code 0 "$code" "an ask inside a worker with a brief request"
 ctx=$(sent_context); ctx=${ctx%x}
 assert_contains "$ctx" $'The operator\'s request behind this task, verbatim from the worker\'s instructions:\nmove every open ticket to sprint 5' \
   "the worker's ask carries its brief's request"
@@ -1211,7 +1205,8 @@ assert_not_contains "$ctx" 'zq-spec-marker' "only the request section of the bri
 wait_for "the worker's brief-request ask settles" settled 1
 printf '%s\n' '# Task' "## Captain's intent" '' '## Firstmate spec' 'zq-spec-marker' > "$HOME_DIR/data/t9/brief.md"
 TYPESAFE_API_KEY=$KEY FM_TASK_ID=t9 run code out err "${DC[@]}" --context "$NOTE" --mine ship
-expect_code 2 "$code" "an empty request section carries nothing, so the refusal holds"
+expect_code 0 "$code" "an ask with an empty request section"
+assert_not_contains "$(sent_context)" "The operator's request behind this task" "an empty request section carries nothing"
 rm -f "$HOME_DIR/data/t9/brief.md"
 pass "a task worker's ask carries its brief's request section and nothing else from the brief"
 
@@ -1296,7 +1291,98 @@ Its output:
 <bash-stdout>To github.com:org/repo.git
    968944aa62..342ebe251e  342ebe251e -> feature/x</bash-stdout><bash-stderr></bash-stderr>
 
-Source $RAW, verbatim:"* ]] || fail "the shell command and its output lead the context, labelled and verbatim: $ctx"
+"* ]] || fail "the shell command and its output lead the context, labelled and verbatim: $ctx"
+assert_contains "$ctx" "Source $RAW, verbatim:" "the source follows"
 assert_not_contains "$ctx" 'place the gate before the preview' "the turn before the shell command is not this turn's words"
 wait_for "the ask after the shell command settles" settled 1
 pass "a ! shell command and its output, not the previous turn's words, reach Jev on the next ask"
+
+# --- the turn slice: the session from the operator's latest message to the ask --
+SLICE_T="$TMP_ROOT/slice-transcript.jsonl"
+t_user() { jq -cn --arg c "$1" --arg ts "${2:-2026-10-29T01:00:00Z}" '{type: "user", timestamp: $ts, message: {role: "user", content: $c}}'; }
+t_meta() { jq -cn --arg c "$1" '{type: "user", isMeta: true, message: {role: "user", content: $c}}'; }
+t_text() { jq -cn --arg m "$1" --arg c "$2" '{type: "assistant", message: {id: $m, content: [{type: "text", text: $c}]}}'; }
+t_think() { jq -cn --arg m "$1" --arg c "$2" '{type: "assistant", message: {id: $m, content: [{type: "thinking", thinking: $c}]}}'; }
+t_call() { jq -cn --arg m "$1" --arg id "$2" --arg c "$3" '{type: "assistant", message: {id: $m, content: [{type: "tool_use", id: $id, name: "Bash", input: {command: $c}}]}}'; }
+t_result() { jq -cn --arg id "$1" --arg c "$2" '{type: "user", message: {role: "user", content: [{type: "tool_result", tool_use_id: $id, content: $c}]}}'; }
+t_queued() { jq -cn --arg c "$1" '{type: "attachment", attachment: {type: "queued_command", prompt: $c, origin: {kind: "human"}, timestamp: "2026-10-29T01:05:00Z"}}'; }
+SECRETS=$'TYPESAFE_API_KEY=sk-abcdefghijklmnopqrstuvwxyz0123\nAuthorization: Bearer qwertyuiopasdfgh1234\ngh token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaa\nDB_PASSWORD=hunter2hunter2\nSTATUS-RESULT-MARKER'
+{
+  t_user 'OLD-OPERATOR-MARKER'
+  t_text m0 'OLD-FIRSTMATE-MARKER'
+  t_user 'LATEST-OPERATOR-MARKER' 2026-10-29T01:01:00Z
+  t_meta 'META-MARKER'
+  t_think m1 'THINK-MARKER'
+  t_text m1 'READ-THE-STATUS'
+  t_call m1 c1 'cat state/t1.status'
+  t_result c1 "$SECRETS"
+  t_queued 'MIDTURN-MARKER'
+  t_call m2 c2 'bin/fm-jev.sh ask --type deliverable-class --mine zq-mine-marker'
+  t_result c2 'error: bad flag in: bin/fm-jev.sh ask --mine zq-mine-marker'
+  t_text m3 'CHOICE-NARRATION: I pick zq-mine-marker'
+  t_call m3 c3 'bin/fm-jev.sh ask --type deliverable-class --mine zq-mine-marker'
+} > "$SLICE_T"
+
+reset
+mkdir -p "$HOME_DIR/state"
+write_choice ship 0.9 ship scout zq-mine-marker
+FM_JEV_TRANSCRIPT=$SLICE_T TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --mine zq-mine-marker
+expect_code 0 "$code" "a manual ask with a transcript and no --source"
+ctx=$(sent_context); ctx=${ctx%x}
+[[ $ctx == "Decision about: "*$'\n\n'"Firstmate's session since the operator's latest message, oldest first:"$'\n'"Operator at 2026-10-29T01:01:00Z:"$'\n'"LATEST-OPERATOR-MARKER"$'\n\n'* ]] \
+  || fail "the slice starts at the operator's latest message: $ctx"
+for marker in OLD-OPERATOR-MARKER OLD-FIRSTMATE-MARKER META-MARKER THINK-MARKER; do
+  assert_not_contains "$ctx" "$marker" "the slice leaves out $marker"
+done
+assert_contains "$ctx" $'Firstmate:\nREAD-THE-STATUS' "firstmate's own text is in the slice"
+assert_contains "$ctx" $'Tool call Bash:\ncat state/t1.status' "a tool call is in the slice"
+assert_contains "$ctx" 'STATUS-RESULT-MARKER' "a tool result is in the slice"
+assert_contains "$ctx" $'Operator at 2026-10-29T01:05:00Z:\nMIDTURN-MARKER' "a mid-turn message is in the slice"
+assert_contains "$ctx" '--mine [withheld]' "an earlier call's --mine value is withheld"
+assert_not_contains "$ctx" 'zq-mine-marker' "firstmate's choice for this ask never reaches Jev"
+assert_not_contains "$ctx" 'CHOICE-NARRATION' "the message holding the running ask stays out"
+pass "the turn slice runs from the operator's latest message to the ask, mid-turn messages included, blind to firstmate's choice"
+
+for secret in sk-abcdefghijklmnopqrstuvwxyz0123 qwertyuiopasdfgh1234 ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaa hunter2hunter2; do
+  assert_not_contains "$(cat "$LOG/body")" "$secret" "the secret $secret is redacted from the request"
+done
+assert_contains "$ctx" 'TYPESAFE_API_KEY=[redacted]' "a dotenv value is replaced"
+assert_contains "$ctx" 'Authorization: Bearer [redacted]' "a bearer token is replaced"
+assert_contains "$ctx" 'gh token [redacted]' "a token shape is replaced"
+assert_contains "$ctx" 'DB_PASSWORD=[redacted]' "a secret-named assignment is replaced"
+pass "secret-looking values in the turn slice are redacted before anything is sent"
+
+wait_for "the slice ask settles" settled 1
+FM_JEV_TRANSCRIPT=$SLICE_T FM_TASK_ID=t9 TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --mine ship
+expect_code 0 "$code" "an ask inside a task worker"
+assert_not_contains "$(sent_context)" 'LATEST-OPERATOR-MARKER' "a task worker's ask carries no slice"
+pass "a task worker's ask carries no session slice"
+
+# cap: 80 entries of 1 KB overflow the budget; the oldest go first.
+pad=$(printf '%01000d' 0)
+{
+  t_user 'CAP-OPERATOR-MARKER'
+  for i in $(seq -w 1 80); do
+    t_call "m$i" "c$i" "echo $i"
+    t_result "c$i" "ENTRY-$i-$pad"
+  done
+  t_call mz cz 'bin/fm-jev.sh ask'
+} > "$SLICE_T"
+reset
+mkdir -p "$HOME_DIR/state"
+FM_JEV_TRANSCRIPT=$SLICE_T TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --mine ship
+expect_code 0 "$code" "an ask whose slice overflows the budget"
+ctx=$(sent_context)
+assert_contains "$ctx" 'ENTRY-80-' "the newest entry is kept"
+assert_not_contains "$ctx" 'ENTRY-01-' "the oldest entry is trimmed"
+assert_not_contains "$ctx" 'CAP-OPERATOR-MARKER' "the operator's message, oldest, is trimmed before newer entries"
+assert_contains "$ctx" 'earlier entries trimmed to fit Jev'"'"'s context limit]' "the trim is stated in the request"
+size=$(jq -j '.. | strings' "$LOG/body" | wc -c | tr -d ' ')
+[ "$size" -le 44236 ] || fail "the request text is $size bytes, over the 44236-byte budget"
+wait_for "the capped ask settles" settled 1
+{ t_user 'BIG-OPERATOR-MARKER'; t_call m1 c1 'cat big'; t_result c1 "HEAD-MARKER$(printf '%060000d' 0)TAIL-MARKER"; t_call m2 c2 'bin/fm-jev.sh ask'; } > "$SLICE_T"
+FM_JEV_TRANSCRIPT=$SLICE_T TYPESAFE_API_KEY=$KEY run code out err "${DC[@]}" --mine ship
+ctx=$(sent_context)
+assert_contains "$ctx" 'TAIL-MARKER' "an entry larger than the budget keeps its tail"
+assert_not_contains "$ctx" 'HEAD-MARKER' "and loses its head"
+pass "a slice over Jev's context limit keeps the newest, trims the oldest, and says so"

@@ -97,6 +97,32 @@
 #   nothing when that section is absent or empty. Every caller puts it in the
 #   state of each ask it builds.
 #
+# Turn slice: fm_jev_turn_slice <byte-budget> prints the primary session's
+#   transcript (fm_jev_transcript_path) from the operator's latest message up
+#   to the ask, oldest first, under "Firstmate's session since the operator's
+#   latest message, oldest first:". The operator's latest message is the last
+#   user line that is not meta, carries text and no tool result, and is not a
+#   task notification or an interruption marker; a message sent mid-turn is a
+#   queued_command attachment, never such a line, so it joins the slice as an
+#   operator entry without moving its start. Each entry is one of "Operator at <ts>:", "Firstmate:" (its
+#   text, never its thinking), "Notification:", "Tool call <name>:" (a Bash
+#   command as written, any other input as JSON), or "Tool result:", followed
+#   by the text. The slice stops before the assistant message holding the
+#   earliest tool call with no result yet, which is the call running the ask,
+#   so that message's text and every sibling call stay out; with no such call
+#   it drops the last assistant message instead. Every "--mine <value>" is
+#   printed as "--mine [withheld]", so firstmate's blind choice for a repeated
+#   ask never reaches Jev. When the entries exceed the budget the oldest go
+#   first, a newest entry larger than the whole budget keeps its tail, and a
+#   "[N earlier entries trimmed ...]" line says so. Nothing inside a task
+#   worker, without a single transcript, or with no operator message.
+#   FM_JEV_STATE_BYTES is the budget for the whole request text: Jev's
+#   per-question context (FM_JEV_QUESTION_TOKENS, the state plus one question
+#   without the long-context header, docs.typesafe.ai/models) at
+#   FM_JEV_BYTES_PER_100_TOKENS, the 1st percentile of context bytes per input
+#   token over 983 recorded asks larger than 4 KB on 2026-10-29. Callers give
+#   the slice what the rest of the request leaves.
+#
 # Audit snapshot: fm_jev_write_audit writes $FM_HOME/state/jev-audit/<id>.json,
 #   local only, so a later audit can re-judge the decision from what the models
 #   saw: {v, decision_id, ts, question_type, question, options, context,
@@ -168,6 +194,9 @@ FM_JEV_SUMMARY_MAX=200
 # Jev billing, captain 2026-09-28: $42 per billion input tokens, output tokens free.
 FM_JEV_USD_PER_BILLION_INPUT=42
 FM_JEV_DD_TIMEOUT=5
+FM_JEV_QUESTION_TOKENS=32768
+FM_JEV_BYTES_PER_100_TOKENS=135
+FM_JEV_STATE_BYTES=$(( FM_JEV_QUESTION_TOKENS * FM_JEV_BYTES_PER_100_TOKENS / 100 ))
 
 # Moves DD_API_KEY and DD_SITE out of the exported environment; see the header.
 fm_jev_capture_dd() {
@@ -402,6 +431,70 @@ fm_jev_turn_words() {
             (if (.output | type) == "string" then "Its output:", .output else "No output was recorded." end)
           else "Message at \(.ts // "an unrecorded time"):", .prompt end)
       end' "$FM_HOME/state/jev-turn-words.jsonl" 2>/dev/null || true
+}
+
+# shellcheck disable=SC2016 # $names below are jq variables, not shell ones.
+FM_JEV_SLICE_JQ='
+  def text_of($c):
+    if ($c | type) == "string" then $c
+    elif ($c | type) == "array" then
+      [$c[] | if .type == "text" then (.text // "") elif .type == "image" then "[image]" else empty end] | join("\n")
+    else "" end;
+  def has_result: (.message.content | type) == "array" and any(.message.content[]; .type == "tool_result");
+  def prompt:
+    .type == "user" and (.isMeta | not) and (.isCompactSummary | not)
+      and ((.origin.kind // "human") == "human") and (has_result | not)
+      and (text_of(.message.content) | length > 0 and (startswith("[Request interrupted") | not));
+  def queued:
+    .type == "attachment" and .attachment.type == "queued_command"
+      and ((.attachment.origin.kind // "human") == "human") and ((.attachment.prompt | type) == "string");
+  def entry:
+    if queued then "Operator at \(.attachment.timestamp // .timestamp // "an unrecorded time"):\n\(.attachment.prompt)"
+    elif prompt then "Operator at \(.timestamp // "an unrecorded time"):\n\(text_of(.message.content))"
+    elif .type == "user" and (.isMeta | not) and has_result then
+      .message.content[] | select(.type == "tool_result") | "Tool result:\n\(text_of(.content))"
+    elif .type == "user" and (.isMeta | not) and .origin.kind == "task-notification" then
+      "Notification:\n\(text_of(.message.content))"
+    elif .type == "assistant" and (.message.content | type) == "array" then
+      .message.content[]
+      | if .type == "text" and ((.text // "") | length > 0) then "Firstmate:\n\(.text)"
+        elif .type == "tool_use" then
+          "Tool call \(.name):\n\(if .name == "Bash" and (.input.command | type) == "string" then .input.command else (.input | tojson) end)"
+        else empty end
+    else empty end;
+  [inputs | try fromjson catch empty | select(type == "object")] as $l
+  | ([range($l | length) | select($l[.] | prompt)] | last) as $start
+  | if $start == null then empty else
+      $l[$start:] as $s
+      | [$s[] | select(.type == "user" and has_result) | .message.content[] | select(.type == "tool_result") | .tool_use_id] as $done
+      | ([$s[] | select(.type == "assistant" and (.message.content | type) == "array")
+          | select(any(.message.content[]; .type == "tool_use" and ((.id | IN($done[])) | not))) | .message.id] | first) as $running
+      | ($running // ([$s[] | select(.type == "assistant") | .message.id] | last)) as $drop
+      | ([range($s | length) | select($s[.].type == "assistant" and $s[.].message.id == $drop)] | first) as $cut
+      | [(if $cut == null then $s else $s[:$cut] end)[] | entry
+          | gsub("(?<f>--mine[ =]+)[^\\s\"'"'"';|&]+"; "\(.f)[withheld]")] as $e
+      | ($budget - 200) as $room
+      | reduce range(($e | length) - 1; -1; -1) as $i ({kept: [], used: 0, full: false};
+          if .full then .
+          else ($e[$i] | utf8bytelength + 2) as $n
+            | if .used + $n <= $room then .kept = [$e[$i]] + .kept | .used += $n
+              elif (.kept | length) == 0 then
+                .kept = ["[start trimmed]\n" + $e[$i][-(($room / 4) | floor):]] | .full = true
+              else .full = true end
+          end)
+      | (($e | length) - (.kept | length)) as $trimmed
+      | if $room < 512 then empty else
+          "Firstmate'"'"'s session since the operator'"'"'s latest message, oldest first:",
+          (if $trimmed > 0 then "[\($trimmed) earlier entries trimmed to fit Jev'"'"'s context limit]" else empty end),
+          (.kept | join("\n\n"))
+        end
+    end'
+
+fm_jev_turn_slice() {  # <byte-budget>
+  local path
+  [ -z "${FM_TASK_ID:-}" ] || return 0
+  path=$(fm_jev_transcript_path) || return 0
+  jq -Rrn --argjson budget "$1" "$FM_JEV_SLICE_JQ" "$path" 2>/dev/null || true
 }
 
 fm_jev_redact() {

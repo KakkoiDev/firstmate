@@ -20,7 +20,7 @@ LOG="$TMP_ROOT/log"
 RESPONSE="$TMP_ROOT/response.json"
 KEY='gate-key-7d1e0b55-never-on-argv'
 mkdir -p "$LOG"
-unset TYPESAFE_API_KEY DD_API_KEY DD_SITE
+unset TYPESAFE_API_KEY DD_API_KEY DD_SITE CLAUDE_CODE_SESSION_ID FM_JEV_TRANSCRIPT
 
 cat > "$FAKEBIN/curl" <<'SH'
 #!/usr/bin/env bash

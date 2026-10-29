@@ -31,7 +31,7 @@
 #   the meanings live in fm_jev_gate_option_lines next to the choice lists.
 # The context a script builds is whole: the extra texts come first, then the
 #   brief's task sections. It reaches bin/fm-jev.sh as a --source file, after
-#   the operator's words for the turn that bin/fm-jev.sh adds itself.
+#   the operator's words and the turn slice that bin/fm-jev.sh adds itself.
 
 # shellcheck source=bin/fm-brief-heading-lib.sh
 declare -F fm_brief_task_heading_body >/dev/null || . "$SCRIPT_DIR/fm-brief-heading-lib.sh"
@@ -332,7 +332,7 @@ fm_jev_gate_ask_command() {  # <type>
     [ -n "$opt" ] || continue
     cmd="$cmd --option $(printf '%q' "$opt")"
   done < <(fm_jev_gate_option_lines "$1")
-  printf '%s --source <file holding the raw evidence: status lines, brief, report, or script output> --mine <your choice>' "$cmd"
+  printf '%s --mine <your choice>' "$cmd"
 }
 
 fm_jev_gate_refuse() {  # <issuer> <message> [<command>]

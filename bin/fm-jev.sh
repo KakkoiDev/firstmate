@@ -114,22 +114,21 @@
 #     3. the operator's words for the turn, mid-turn messages included, or
 #        in a task worker its brief's request (fm_jev_turn_words in
 #        bin/fm-jev-lib.sh owns the section);
-#     4. per --source, in order, "Source <path>, verbatim:" and the file's
-#        bytes; each must be a readable, non-empty regular file;
-#     5. "Firstmate's note, its own account rather than a source:" and the
+#     4. the turn slice: firstmate's session transcript from the operator's
+#        latest message up to this ask, cut before the call running it and
+#        trimmed oldest first to what the rest of the request leaves of Jev's
+#        context limit (fm_jev_turn_slice in bin/fm-jev-lib.sh owns it);
+#     5. per optional --source, in order, "Source <path>, verbatim:" and the
+#        file's bytes; each must be a readable, non-empty regular file;
+#     6. "Firstmate's note, its own account rather than a source:" and the
 #        --context file, when given;
-#     6. the type's standing rules (fm_jev_constraints in bin/fm-jev-lib.sh);
+#     7. the type's standing rules (fm_jev_constraints in bin/fm-jev-lib.sh);
 #        the call record's constraints_sent says whether any went out.
 #   --mine never enters the state. The summary, question, option meanings,
 #   and whole state pass through fm_jev_redact in bin/fm-jev-lib.sh before
 #   anything is hashed, recorded, or sent. The duplicate queries and the audit
 #   snapshot see the same state. The summary is one English line naming the
 #   request or action the decision is about.
-#   Manual types (MANUAL_TYPES below: the types firstmate asks by hand, with
-#   no action script building the context) are refused with exit 2, asking
-#   and recording nothing, when the state would carry neither the operator's
-#   words nor a --source file, so a --context note alone never reaches Jev;
-#   the refusal prints the same command with a --source placeholder added.
 #   Output (stdout, TOON-style block):
 #     jev:
 #       decision_id: <id>
@@ -231,8 +230,7 @@
 # Home: FM_JEV_HOME, which bin/fm-spawn.sh exports into every ship and scout
 #   pane, wins over FM_HOME, so a worker's asks land in the home that launched
 #   it whatever directory it runs from; unset, FM_HOME and then this checkout.
-# Exit 2 only for a usage error (a manual-type ask without the operator's words
-# or a --source included), an unreadable context or source file, a missing jq,
+# Exit 2 only for a usage error, an unreadable context or source file, a missing jq,
 # or an unknown decision id or answer; record subcommands never touch the
 # network.
 #
@@ -265,9 +263,6 @@ CLAIM_FLOOR=0.5
 QKEY=q
 AUTHORITY_FILE="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/jev-authority"
 NEVER_TYPES='report-has-captain-call'
-# Types firstmate asks by hand, with no action script building the context.
-MANUAL_TYPES='deliverable-class project-match secondmate-scope surface-class brief-answers-question finding-authority heartbeat-suspicious'
-SOURCE_PLACEHOLDER='<file holding the raw evidence: status lines, brief, report, or script output>'
 GRAD_MIN_ANSWERED=20
 GRAD_MIN_AGREEMENT=0.95
 GRAD_MAX_OVERRULED=0
@@ -465,9 +460,10 @@ squash() { tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'; }
 
 # ctx_gap: uses cmd_ask's ctx. Prints what ends the context so far with one
 # blank line, or nothing while it is empty.
-ctx_gap() {
-  [ -s "$ctx" ] || return 0
-  if [ -z "$(tail -c 1 "$ctx")" ]; then printf '\n'; else printf '\n\n'; fi
+ctx_gap() {  # [<file>, default the context]
+  local f=${1:-$ctx}
+  [ -s "$f" ] || return 0
+  if [ -z "$(tail -c 1 "$f")" ]; then printf '\n'; else printf '\n\n'; fi
 }
 
 # template_fill: uses cmd_ask's locals. Checks the template's fields and sets
@@ -552,8 +548,8 @@ cmd_ask() {
   local criteria='{}' request resp='' options id='' http lat answer_ok prompt ctx sha start never
   local template_text='' default_summary='' evidence_sha='' f rules constraints_sent=false
   local tf_claim='' tf_source='' tf_evidence='' tf_ticket='' tf_current='' tf_proposed='' tf_words=''
-  local have_words=0 src
-  local -a candidates=() sources=() argv=("$@")
+  local src words slice rest budget
+  local -a candidates=() sources=()
   start=$(fm_timing_now_ms)
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -624,19 +620,6 @@ cmd_ask() {
     [ "$(jq -r --arg m "$mine" 'has($m)' <<<"$criteria")" = true ] \
       || die "--mine $mine is not one of $(jq -r 'keys_unsorted | join(", ")' <<<"$criteria")"
   fi
-  [ -z "$(fm_jev_turn_words | head -c 1)" ] || have_words=1
-  case " $MANUAL_TYPES " in
-    *" $qtype "*)
-      if [ "$have_words" = 0 ] && [ "${#sources[@]}" = 0 ]; then
-        printf 'error: %s is asked by hand, and this ask carries neither the operator'\''s words for this turn nor a --source file, so Jev would see only firstmate'\''s own account; nothing was asked\n' "$qtype" >&2
-        printf '  run: bin/fm-jev.sh ask' >&2
-        printf ' %q' "${argv[@]}" >&2
-        printf ' --source %s\n' "$SOURCE_PLACEHOLDER" >&2
-        exit 2
-      fi
-      ;;
-  esac
-
   if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
     TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
   fi
@@ -661,23 +644,30 @@ cmd_ask() {
   # are the same even if the caller rewrites or deletes its file.
   ctx=$(mktemp) || die "mktemp failed"
   resp=$(mktemp) || { rm -f "$ctx"; die "mktemp failed"; }
-  trap 'rm -f "$resp" "$ctx"' EXIT
+  rest=$(mktemp) || { rm -f "$ctx" "$resp"; die "mktemp failed"; }
+  trap 'rm -f "$resp" "$ctx" "$rest"' EXIT
   printf 'Decision about: %s\n' "$(squash <<<"$summary")" > "$ctx"
   [ -z "$template_text" ] || { ctx_gap; printf '%s\n' "$template_text"; } >> "$ctx"
-  if [ "$have_words" = 1 ]; then
-    { ctx_gap; fm_jev_turn_words; } >> "$ctx"
-  fi
+  words=$(fm_jev_turn_words)
+  [ -z "$words" ] || { ctx_gap; printf '%s\n' "$words"; } >> "$ctx"
+  # shellcheck disable=SC2094 # ctx_gap reads only the last byte before each append.
   for src in ${sources[@]+"${sources[@]}"}; do
-    { ctx_gap; printf 'Source %s, verbatim:\n' "$src"; cat "$src"; } >> "$ctx" 2>/dev/null \
+    { ctx_gap "$rest"; printf 'Source %s, verbatim:\n' "$src"; cat "$src"; } >> "$rest" 2>/dev/null \
       || die "--source file not readable: $src"
   done
   if [ -n "$context" ]; then
-    { ctx_gap; printf "Firstmate's note, its own account rather than a source:\n"; cat "$context"; } >> "$ctx" 2>/dev/null \
+    # shellcheck disable=SC2094 # as above
+    { ctx_gap "$rest"; printf "Firstmate's note, its own account rather than a source:\n"; cat "$context"; } >> "$rest" 2>/dev/null \
       || die "context file not readable: $context"
   fi
   if rules=$(fm_jev_constraints "$qtype"); then
-    { ctx_gap; printf '%s\n' "$rules"; } >> "$ctx" && constraints_sent=true
+    # shellcheck disable=SC2094 # as above
+    { ctx_gap "$rest"; printf '%s\n' "$rules"; } >> "$rest" && constraints_sent=true
   fi
+  budget=$(( FM_JEV_STATE_BYTES - $(wc -c < "$ctx") - $(wc -c < "$rest") - ${#question} - ${#criteria} ))
+  slice=$(fm_jev_turn_slice "$budget")
+  [ -z "$slice" ] || { ctx_gap; printf '%s\n' "$slice"; } >> "$ctx"
+  [ ! -s "$rest" ] || { ctx_gap; cat "$rest"; } >> "$ctx"
   if ! { fm_jev_redact < "$ctx" > "$resp" && cat "$resp" > "$ctx"; }; then
     die "could not redact secrets from the context"
   fi
