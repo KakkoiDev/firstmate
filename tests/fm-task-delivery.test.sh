@@ -396,7 +396,7 @@ STUB
     # payload ends at its Definition of done, as does an ordinary generated
     # brief, so identical suffixes prove both workers receive the same contract.
     rm "$home/data/$id/brief.md"
-    FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode "$mode" >/dev/null 2>&1 \
+    FM_HOME="$home" "$BRIEF" --no-egm test-fixture "$id" fixture-project --mode "$mode" >/dev/null 2>&1 \
       || fail "$mode: ordinary ship brief generation should succeed"
     brief_dod="$TMP_ROOT/promote-dod/brief-dod-$id"
     delivered_dod="$TMP_ROOT/promote-dod/delivered-dod-$id"
@@ -602,7 +602,7 @@ $rec
 EOF
 
   id=delivery-unfilled-ship
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null 2>&1 \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture "$id" proj --mode no-mistakes >/dev/null 2>&1 \
     || fail "unfilled ship brief should still scaffold"
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
   status=$?
@@ -614,7 +614,7 @@ EOF
   assert_absent "$home/state/$id.meta" "unfilled ship spawn wrote task metadata"
 
   id=delivery-filled-ship
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture "$id" proj --mode direct-PR >/dev/null 2>&1 \
     || fail "filled-ship brief should scaffold"
   fill_brief_subsections "$home/data/$id/brief.md" \
     "Fix replacement of \`{TASK}\` in Herdr briefs." \
@@ -746,7 +746,7 @@ EOF
   assert_absent "$home/state/$id.meta" "unfilled scout spawn wrote task metadata"
 
   id=delivery-empty-ship
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture "$id" proj --mode direct-PR >/dev/null 2>&1 \
     || fail "empty-ship brief should scaffold"
   fill_brief_subsections "$home/data/$id/brief.md" "" ""
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
@@ -923,7 +923,7 @@ $rec
 EOF
   id='intent-plain'
   words=$(printf '%s\n' 'Keep the original request intact.' '' "Preserve its provenance, punctuation, and \`literal code\`.")
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null 2>&1 \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture "$id" proj --mode no-mistakes >/dev/null 2>&1 \
     || fail "intent brief should scaffold"
   fill_brief_subsections "$home/data/$id/brief.md" "$words" 'This build constraint must not become intent.'
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
@@ -1194,7 +1194,7 @@ test_forge_gerrit_refuses_yolo() {
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
-  FM_HOME="$home" "$BRIEF" forge-yolo-s1 proj --mode no-mistakes --forge gerrit >/dev/null \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture forge-yolo-s1 proj --mode no-mistakes --forge gerrit >/dev/null \
     || fail "a gerrit ship brief should scaffold"
   fill_brief_subsections "$home/data/forge-yolo-s1/brief.md" \
     "Run the review loop on the Gerrit project." "Ship the review pass."
@@ -1244,7 +1244,7 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
   local home brief plain
   home="$TMP_ROOT/forge-dod/home"
   mkdir -p "$home/data" "$home/state"
-  FM_HOME="$home" "$BRIEF" forge-dod-g1 review-server-project --mode no-mistakes --forge gerrit >/dev/null \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture forge-dod-g1 review-server-project --mode no-mistakes --forge gerrit >/dev/null \
     || fail "a gerrit no-mistakes brief should scaffold"
   brief="$home/data/forge-dod-g1/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes forge=gerrit shape=squash" "$brief" \
@@ -1290,7 +1290,7 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
     "the gerrit worker lost the ask-user escalation rule"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'NEVER pass `--yes` (or `-y`)' "$brief" "the gerrit worker lost the --yes ban"
-  FM_HOME="$home" "$BRIEF" forge-dod-n1 other-project --mode no-mistakes >/dev/null \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture forge-dod-n1 other-project --mode no-mistakes >/dev/null \
     || fail "a default-forge no-mistakes brief should scaffold"
   plain="$home/data/forge-dod-n1/brief.md"
   awk '/^You drive no-mistakes by responding to its gates/ { emit = 1 }
@@ -1342,14 +1342,14 @@ EOF
     "the refusal did not say to preserve the filled subsections the re-scaffold discards"
   assert_absent "$home/state/forge-agree-a1.meta" "the refused spawn still recorded a task"
 
-  FM_HOME="$home" "$BRIEF" forge-agree-a2 proj --mode direct-PR --forge gerrit >/dev/null \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture forge-agree-a2 proj --mode direct-PR --forge gerrit >/dev/null \
     || fail "a gerrit direct-PR brief should scaffold"
   fill_brief_subsections "$home/data/forge-agree-a2/brief.md" "Publish the change." "Ship it."
   out=$(run_spawn "$home" "$fakebin" forge-agree-a2 "$proj" claude --mode direct-PR --yolo off 2>&1)
   assert_not_contains "$out" "forge mismatch" "a gerrit direct-PR brief was reported as drift"
   assert_not_contains "$out" "cannot ship" "direct-PR was refused on the forge it publishes to"
 
-  FM_HOME="$home" "$BRIEF" forge-agree-a3 proj --mode no-mistakes --forge gerrit >/dev/null \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture forge-agree-a3 proj --mode no-mistakes --forge gerrit >/dev/null \
     || fail "a gerrit ship brief should scaffold"
   fill_brief_subsections "$home/data/forge-agree-a3/brief.md" "Run the review loop." "Ship it."
   out=$(run_spawn "$home" "$fakebin" forge-agree-a3 "$proj" claude --mode no-mistakes --yolo off 2>&1)
@@ -1358,7 +1358,7 @@ EOF
   # local-only publishes nothing and cannot carry the forge, so a bound project
   # has no local-only brief that agrees with its registry: landing one would
   # fast-forward local main with content the review server never saw.
-  FM_HOME="$home" "$BRIEF" forge-agree-a4 proj --mode local-only >/dev/null \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture forge-agree-a4 proj --mode local-only >/dev/null \
     || fail "a local-only ship brief should scaffold without a forge"
   fill_brief_subsections "$home/data/forge-agree-a4/brief.md" "Land it locally." "Stop at a ready branch."
   out=$(run_spawn "$home" "$fakebin" forge-agree-a4 "$proj" claude --mode local-only --yolo off 2>&1)
@@ -1373,7 +1373,7 @@ EOF
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
-  FM_HOME="$home" "$BRIEF" forge-agree-a5 proj --mode no-mistakes --forge gerrit >/dev/null \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture forge-agree-a5 proj --mode no-mistakes --forge gerrit >/dev/null \
     || fail "a gerrit ship brief should scaffold"
   fill_brief_subsections "$home/data/forge-agree-a5/brief.md" "Run the review loop." "Ship it."
   out=$(run_spawn "$home" "$fakebin" forge-agree-a5 "$proj" claude --mode no-mistakes --yolo off 2>&1)
@@ -1401,7 +1401,7 @@ test_spawn_requires_the_brief_to_carry_the_selected_branch() {
 $rec
 EOF
 
-  FM_HOME="$home" "$BRIEF" branch-agree-a1 proj --mode no-mistakes --branch-prefix fix/ >/dev/null \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture branch-agree-a1 proj --mode no-mistakes --branch-prefix fix/ >/dev/null \
     || fail "a fix/-prefixed brief should scaffold"
   fill_brief_subsections "$home/data/branch-agree-a1/brief.md" "Run the review loop." "Ship it."
   out=$(run_spawn "$home" "$fakebin" branch-agree-a1 "$proj" claude --mode no-mistakes --yolo off --branch-prefix contrib/)
@@ -1426,7 +1426,7 @@ EOF
     "the legacy default did not warn about the brief's missing ship branch"
   assert_not_contains "$out" "branch mismatch" "the legacy default was refused as drift"
 
-  FM_HOME="$home" "$BRIEF" branch-agree-a4 proj --mode no-mistakes --branch-prefix fix/ >/dev/null \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture branch-agree-a4 proj --mode no-mistakes --branch-prefix fix/ >/dev/null \
     || fail "a second fix/-prefixed brief should scaffold"
   fill_brief_subsections "$home/data/branch-agree-a4/brief.md" "Run the review loop." "Ship it."
   out=$(run_spawn "$home" "$fakebin" branch-agree-a4 "$proj" claude --mode no-mistakes --yolo off --branch-prefix fix/)
@@ -1475,7 +1475,7 @@ EOF
   assert_contains "$out" "will read as firstmate-authored" \
     "the deviation notice did not name the cost of the drift"
 
-  FM_HOME="$home" "$BRIEF" prefix-dev-a2 proj --mode no-mistakes --branch-prefix fix/ >/dev/null \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture prefix-dev-a2 proj --mode no-mistakes --branch-prefix fix/ >/dev/null \
     || fail "a fix/-prefixed brief should scaffold"
   fill_brief_subsections "$home/data/prefix-dev-a2/brief.md" "Run the review loop." "Ship it."
   out=$(run_spawn "$home" "$fakebin" prefix-dev-a2 "$proj" claude --mode no-mistakes --yolo off --branch-prefix fix/)
@@ -1555,7 +1555,7 @@ STUB
   # Both real generation paths must end in the same contract, as they do for every
   # mode: a promoted worker is never handed a weaker one than a briefed worker.
   rm "$home/data/$id/brief.md"
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes --forge gerrit >/dev/null 2>&1 \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture "$id" proj --mode no-mistakes --forge gerrit >/dev/null 2>&1 \
     || fail "ordinary gerrit ship brief generation should succeed"
   awk '/^# Definition of done$/ { emit=1 } emit' "$home/data/$id/brief.md" > "$TMP_ROOT/forge-promote/brief-dod"
   awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$TMP_ROOT/forge-promote/delivered-dod"
@@ -1583,7 +1583,7 @@ EOF
     "the refusal did not print the forgejo re-scaffold command"
   assert_absent "$home/state/forge-forgejo-s1.meta" "the refused spawn still recorded a task"
 
-  FM_HOME="$home" "$BRIEF" forge-forgejo-s2 proj --mode direct-PR --forge forgejo >/dev/null \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture forge-forgejo-s2 proj --mode direct-PR --forge forgejo >/dev/null \
     || fail "a forgejo direct-PR brief should scaffold"
   fill_brief_subsections "$home/data/forge-forgejo-s2/brief.md" "Open the pull request." "Ship it."
   out=$(run_spawn "$home" "$fakebin" forge-forgejo-s2 "$proj" claude --mode direct-PR --yolo on 2>&1)
@@ -1625,7 +1625,7 @@ test_forge_gerrit_direct_pr_publishes_one_change() {
   local home brief out status
   home="$TMP_ROOT/forge-direct/home"
   mkdir -p "$home/data" "$home/state"
-  FM_HOME="$home" "$BRIEF" forge-direct-g1 review-server-project --mode direct-PR --forge gerrit >/dev/null \
+  FM_HOME="$home" "$BRIEF" --no-egm test-fixture forge-direct-g1 review-server-project --mode direct-PR --forge gerrit >/dev/null \
     || fail "a gerrit direct-PR brief should scaffold"
   brief="$home/data/forge-direct-g1/brief.md"
   grep -qx "Delivery contract: mode=direct-PR forge=gerrit shape=squash" "$brief" \
@@ -1649,16 +1649,16 @@ test_forge_gerrit_direct_pr_publishes_one_change() {
 
   # A stack is several changes and the merge watch follows one, so the shape is
   # refused with that reason until pinned-membership watching exists.
-  out=$(FM_HOME="$home" "$BRIEF" forge-direct-g2 review-server-project --mode direct-PR --forge gerrit --shape stack 2>&1)
+  out=$(FM_HOME="$home" "$BRIEF" --no-egm test-fixture forge-direct-g2 review-server-project --mode direct-PR --forge gerrit --shape stack 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a stack-shaped gerrit brief scaffolded"
   assert_contains "$out" "--shape stack is refused" "the stack refusal did not name the refused shape"
   assert_contains "$out" "pinned when its watch is armed" "the stack refusal did not carry its reason"
   assert_absent "$home/data/forge-direct-g2/brief.md" "the refused stack brief was still written"
-  out=$(FM_HOME="$home" "$BRIEF" forge-direct-g3 review-server-project --mode direct-PR --shape squash 2>&1)
+  out=$(FM_HOME="$home" "$BRIEF" --no-egm test-fixture forge-direct-g3 review-server-project --mode direct-PR --shape squash 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a shape was accepted without a forge that publishes changes"
-  out=$(FM_HOME="$home" "$BRIEF" forge-direct-g4 review-server-project --mode local-only --forge gerrit 2>&1)
+  out=$(FM_HOME="$home" "$BRIEF" --no-egm test-fixture forge-direct-g4 review-server-project --mode local-only --forge gerrit 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a local-only brief accepted a forge"
   assert_contains "$out" "cannot ship mode=local-only" "the local-only refusal did not name the mode"

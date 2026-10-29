@@ -52,6 +52,7 @@ Options in angle brackets are filled from the live registry or fleet at the time
 | `merge-risk` | `fm-pr-merge.sh` and `fm-merge-local.sh --merge-risk <yes\|no>` | Is this merge destructive, irreversible, or security-sensitive? | yes/no |
 | `report-has-captain-call` | `fm-teardown.sh` for a scout, `--report-has-captain-call <yes\|no>` | Does this report contain a call only the human operator can make? | yes/no |
 | `scout-recommends-ship` | `fm-teardown.sh` for a scout, `--scout-recommends-ship <yes\|no>` | Does this scout report recommend shippable work? | yes/no |
+| `egm-review` | `fm-brief.sh` for a ship, from `--egm-review` (yes) or `--no-egm` (no); not asked with `--egm` | Does this task need an EGM design review before it ships? | yes/no |
 | `brief-answers-question` | you, manually, in `stuck-crewmate-recovery` | Do the worker's instructions already answer its question? | yes/no |
 | `finding-authority` | you, manually, in `ask-user-authority` | How should this review finding be handled? | `decide-in-scope`, `escalate-expansion`, `escalate-product-call`, `escalate-same-theme`, `escalate-destructive` |
 | `heartbeat-suspicious` | you, manually, per task on a heartbeat | Does this task look suspicious enough to inspect now? | yes/no |

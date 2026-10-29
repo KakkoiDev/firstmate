@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> {--egm-review <report> [--egm]|--no-egm <reason>} [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -111,6 +111,17 @@
 # --mode, --forge, and --shape are refused on scout and secondmate scaffolds: a
 # scout's deliverable is a report rather than a merge, and a charter is not a
 # delivery contract.
+# A ship scaffold also requires firstmate's EGM design-review decision, exactly
+# one of --egm-review <report> (the elephant-goldfish review report a scout
+# produced before this ship) or --no-egm <reason> (why the task needs none).
+# --egm records that the captain forced the review on, so it requires
+# --egm-review. The egm-design-review skill owns the trigger criteria and how
+# the review runs. The brief records the absolute report path or the reason as
+# a "Design review:" line under `# Setup`, and never tells the worker to run
+# EGM, because its reviewers are subagents the ship rules forbid. Unless --egm
+# is given, the scaffold asks Jev the egm-review question with the decision as
+# --mine (bin/fm-jev-gate-lib.sh); the ask never blocks. Refused on --scout
+# and --secondmate.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
@@ -229,6 +240,11 @@ UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 PROJECT_DIR=
 PROJECT_DIR_SET=0
+EGM_REVIEW=
+EGM_REVIEW_SET=0
+NO_EGM=
+NO_EGM_SET=0
+EGM_FORCED=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -244,6 +260,8 @@ for a in "$@"; do
       shape) SHAPE=$a; SHAPE_SET=1 ;;
       upstream-consent) UPSTREAM_CONSENT=$a; UPSTREAM_CONSENT_SET=1 ;;
       project) PROJECT_DIR=$a; PROJECT_DIR_SET=1 ;;
+      egm-review) EGM_REVIEW=$a; EGM_REVIEW_SET=1 ;;
+      no-egm) NO_EGM=$a; NO_EGM_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -268,6 +286,11 @@ for a in "$@"; do
     --upstream-consent=*) UPSTREAM_CONSENT=${a#--upstream-consent=}; UPSTREAM_CONSENT_SET=1 ;;
     --project) want_value="project" ;;
     --project=*) PROJECT_DIR=${a#--project=}; PROJECT_DIR_SET=1 ;;
+    --egm-review) want_value="egm-review" ;;
+    --egm-review=*) EGM_REVIEW=${a#--egm-review=}; EGM_REVIEW_SET=1 ;;
+    --no-egm) want_value="no-egm" ;;
+    --no-egm=*) NO_EGM=${a#--no-egm=}; NO_EGM_SET=1 ;;
+    --egm) EGM_FORCED=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -353,6 +376,37 @@ if [ "$KIND" != ship ]; then
     echo "error: --project applies only to ship briefs" >&2
     exit 1
   }
+  [ "$EGM_REVIEW_SET" -eq 0 ] && [ "$NO_EGM_SET" -eq 0 ] && [ "$EGM_FORCED" -eq 0 ] || {
+    echo "error: --egm-review, --no-egm, and --egm apply only to ship briefs; a scout or second mate runs no ship" >&2
+    exit 1
+  }
+fi
+# The EGM design-review decision is firstmate's per-task call at intake; the
+# egm-design-review skill owns the criteria.
+if [ "$KIND" = ship ]; then
+  if [ "$EGM_FORCED" -eq 1 ] && [ "$EGM_REVIEW_SET" -eq 0 ]; then
+    echo "error: --egm forces the design review on, so it needs --egm-review <report> from the review scout" >&2
+    exit 1
+  fi
+  case "$EGM_REVIEW_SET$NO_EGM_SET" in
+    00)
+      echo "error: ship briefs require --egm-review <report> or --no-egm <reason>; decide at intake whether this task needs an EGM design review (load the egm-design-review skill)" >&2
+      exit 1 ;;
+    11)
+      echo "error: pass exactly one of --egm-review or --no-egm" >&2
+      exit 1 ;;
+  esac
+  if [ "$NO_EGM_SET" -eq 1 ] && [ -z "$(printf '%s' "$NO_EGM" | tr -d '[:space:]')" ]; then
+    echo "error: --no-egm needs a reason stating why this task needs no design review" >&2
+    exit 1
+  fi
+  if [ "$EGM_REVIEW_SET" -eq 1 ]; then
+    [ -f "$EGM_REVIEW" ] && [ -r "$EGM_REVIEW" ] || {
+      echo "error: --egm-review $EGM_REVIEW is not a readable file" >&2
+      exit 1
+    }
+    EGM_REVIEW="$(CDPATH='' cd -- "$(dirname -- "$EGM_REVIEW")" && pwd -P)/$(basename -- "$EGM_REVIEW")"
+  fi
 fi
 if [ "$UPSTREAM_CONSENT_SET" -eq 1 ]; then
   [ -n "$UPSTREAM_CONSENT" ] || {
@@ -429,6 +483,28 @@ append_brief_include() {
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
+
+# Jev's second guess on the design-review decision; it records and never
+# blocks. A captain-forced review is not firstmate's decision, so it is not asked.
+if [ "$KIND" = ship ] && [ "$EGM_FORCED" -eq 0 ] && [ "${FM_JEV_GATE:-on}" != off ]; then
+  # shellcheck source=bin/fm-jev-gate-lib.sh
+  . "$SCRIPT_DIR/fm-jev-gate-lib.sh"
+  if ! { egm_ctx=$(mktemp) && egm_task=$(mktemp) && egm_basis=$(mktemp); }; then
+    echo "error: mktemp failed; nothing was scaffolded" >&2
+    exit 1
+  fi
+  printf 'Ship task %s in %s, delivery mode %s.\n' "$ID" "${POS[1]}" "$MODE" > "$egm_task"
+  if [ "$EGM_REVIEW_SET" -eq 1 ]; then
+    egm_mine=yes egm_label='EGM design review report'
+    cat "$EGM_REVIEW" > "$egm_basis"
+  else
+    egm_mine=no egm_label='Reason firstmate gives for no design review'
+    printf '%s\n' "$NO_EGM" > "$egm_basis"
+  fi
+  fm_jev_gate_context "$egm_ctx" "$BRIEF" "Task" "$egm_task" "$egm_label" "$egm_basis"
+  fm_jev_gate_ask fm-brief.sh egm-review "$egm_mine" "Does ship task $ID need an EGM design review" "$egm_ctx"
+  rm -f "$egm_ctx" "$egm_task" "$egm_basis"
+fi
 mkdir -p "$DATA/$ID"
 
 ASK_USER_BLOCK=
@@ -682,6 +758,11 @@ Base branch: $BASE_BRANCH"
 else
   SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch."
 fi
+if [ "$EGM_REVIEW_SET" -eq 1 ]; then
+  DESIGN_REVIEW_LINE="Design review: EGM review report at $EGM_REVIEW; read it before implementing."
+else
+  DESIGN_REVIEW_LINE="Design review: none - $NO_EGM"
+fi
 
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
@@ -777,6 +858,7 @@ $HERDR_SECTION
 
 # Setup
 $SETUP_BASE
+$DESIGN_REVIEW_LINE
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.

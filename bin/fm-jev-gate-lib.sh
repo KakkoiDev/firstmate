@@ -3,7 +3,8 @@
 # Usage: . bin/fm-jev-gate-lib.sh   (after FM_HOME and SCRIPT_DIR are set)
 #
 # Sourced by bin/fm-spawn.sh, bin/fm-send.sh, bin/fm-teardown.sh,
-# bin/fm-pr-merge.sh, bin/fm-merge-local.sh, and bin/fm-control.sh. This file
+# bin/fm-pr-merge.sh, bin/fm-merge-local.sh, bin/fm-control.sh, and
+# bin/fm-brief.sh. This file
 # owns the question wording, options, and context of every script-embedded
 # ask and the refusal a missing decision argument prints; bin/fm-jev.sh owns
 # the ask, the blind-choice record, the acting answer, and grading.
@@ -60,6 +61,7 @@ fm_jev_gate_question() {  # <type>
     scout-recommends-ship) printf 'Does this scout report recommend shippable work?' ;;
     merge-risk) printf 'Is this merge destructive, irreversible, or security-sensitive?' ;;
     stuck-worker) printf 'Which state best describes this worker?' ;;
+    egm-review) printf 'Does this task need an EGM design review before it ships?' ;;
     *) return 1 ;;
   esac
 }
@@ -160,6 +162,11 @@ fm_jev_gate_option_lines() {  # <type>
         'held-for-captain=The task is held for the captain, so an idle worker is expected.' \
         'endpoint-gone=The worker endpoint or its agent process is gone.' \
         'state-unknown=No current-state source answers, so the state cannot be told.'
+      ;;
+    egm-review)
+      printf '%s\n' \
+        'yes=The task has design decisions to settle first, so an elephant-goldfish design review runs before it ships.' \
+        'no=What to build is already settled, so the task ships without a design review.'
       ;;
     *) return 1 ;;
   esac

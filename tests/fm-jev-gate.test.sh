@@ -338,7 +338,7 @@ printf -- '- spawn-proj [x]\n' > "$H/data/projects.md"
 printf -- '- mate-one [scope: x]\n' > "$H/data/secondmates.md"
 SELF_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 for qtype in project-match deliverable-class secondmate-scope surface-class concurrency effort-level mid-task-ask \
-  report-has-captain-call scout-recommends-ship merge-risk stuck-worker; do
+  report-has-captain-call scout-recommends-ship merge-risk stuck-worker egm-review; do
   lines=$(bash -c 'SCRIPT_DIR=$1/bin; FM_HOME=$2; . "$1/bin/fm-jev-gate-lib.sh"; fm_jev_gate_option_lines "$3"' _ "$SELF_ROOT" "$H" "$qtype") \
     || fail "$qtype has no option lines"
   [ -n "$lines" ] || fail "$qtype has no option lines"
@@ -354,6 +354,42 @@ for id in steer-existing acknowledge; do
   assert_contains " ${DC_IDS//|/ } " " $id " "deliverable-class offers $id"
 done
 pass "deliverable-class offers a steer of work under way and a bare acknowledgement"
+
+# --- fm-brief: the EGM design-review decision ---------------------------------
+
+H=$(new_home egm ship)
+EGM_REPORT="$TMP_ROOT/egm-report.md"
+printf '# EGM review\n\nSplit the webhook retry state from delivery.\n' > "$EGM_REPORT"
+run "$H" code out -- fm-brief.sh e0 spawn-proj --mode local-only --no-egm "bug fix with a repro"
+expect_code 0 "$code" "a brief with Jev off"
+assert_contains "$out" "fm-brief.sh: jev egm-review not recorded (off or failed); no acts" "Jev off records nothing and never blocks"
+assert_present "$H/data/e0/brief.md" "the brief is written with Jev off"
+
+write_response yes 0.9 no
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-brief.sh e1 spawn-proj --mode local-only --no-egm "bug fix with a repro"
+expect_code 0 "$code" "a disagreeing Jev never blocks the brief"
+assert_contains "$out" "fm-brief.sh: jev egm-review decision " "the egm-review ask went out"
+assert_contains "$out" "jev: WARNING: firstmate disagrees with Jev on egm-review" "a disagreement prints like the other asks"
+assert_present "$H/data/e1/brief.md" "the brief is written after a disagreement"
+EGM_ID=$(sed -n 's/.*jev egm-review decision \([^:]*\):.*/\1/p' <<<"$out" | head -n 1)
+assert_contains "$(jq -r .context "$H/state/jev-audit/$EGM_ID.json")" "bug fix with a repro" "the skip reason reaches the ask"
+[ "$(jq -sr '[.[] | select(.event == "mine")] | last | .mine' "$H/state/jev-usage.jsonl")" = no ] \
+  || fail "--no-egm was not asked with --mine no"
+
+write_response yes 0.9 no
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-brief.sh e2 spawn-proj --mode direct-PR --egm-review "$EGM_REPORT"
+expect_code 0 "$code" "a brief with a review report"
+assert_contains "$out" "fm-brief.sh: jev egm-review decision " "the egm-review ask went out for a review"
+assert_not_contains "$out" "disagrees" "an agreeing Jev prints no disagreement"
+[ "$(jq -sr '[.[] | select(.event == "mine")] | last | .mine' "$H/state/jev-usage.jsonl")" = yes ] \
+  || fail "--egm-review was not asked with --mine yes"
+EGM_ID=$(sed -n 's/.*jev egm-review decision \([^:]*\):.*/\1/p' <<<"$out" | head -n 1)
+assert_contains "$(jq -r .context "$H/state/jev-audit/$EGM_ID.json")" "Split the webhook retry state from delivery." "the review report reaches the ask"
+
+run "$H" code out TYPESAFE_API_KEY="$KEY" -- fm-brief.sh e3 spawn-proj --mode direct-PR --egm --egm-review "$EGM_REPORT"
+expect_code 0 "$code" "a captain-forced review"
+assert_not_contains "$out" "jev egm-review" "a captain-forced review is not firstmate's decision, so Jev is not asked"
+pass "fm-brief asks Jev the egm-review question with firstmate's decision as --mine and never blocks"
 
 # --- merges -----------------------------------------------------------------
 

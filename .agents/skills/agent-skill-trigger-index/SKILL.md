@@ -17,6 +17,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `ask-user-authority` - load before deciding any ask-user finding.
 - `validation-supervision` - load when a ship starts or already has an active no-mistakes validation run, including a mid-run requirement change or finding, and before deciding or answering any ask-user finding.
 - `ship-landing` - load when a ship reports a PR or ready branch, when deciding or monitoring landing, and before task cleanup.
+- `egm-design-review` - load at ship intake before scaffolding a ship brief with `bin/fm-brief.sh`, to decide whether the task needs an elephant-goldfish design review, and before dispatching or completing that review scout.
 - `scout-completion` - load when a scout reports completion, presents a visual artifact for iteration, or is being considered for promotion to implementation.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi default TOON.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
