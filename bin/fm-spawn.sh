@@ -17,7 +17,15 @@
 #   --todo because one todo cannot name every pair. Each resolved todo text is
 #   recorded as a todo= line in state/<id>.meta and, after a successful launch,
 #   linked to the task through the bridge's `link` verb so the plugin can follow
-#   it to done; --no-todo is recorded as no_todo=<reason>. A relaunch keeps both
+#   it to done; an item whose line ends in the plugin's `<!-- id:<id> -->` is
+#   recorded without that comment and linked as id:<id> --by firstmate.
+#   Without --todo, while the bridge's `active` names a notes file, the spawn
+#   runs the bridge's `update <file> "<id>: <first Captain's intent line>"
+#   --by firstmate --task <id>`, which the plugin writes as firstmate's [UPDATE]
+#   and turns into a todo; that todo is recorded as todo=id:<item-id> and linked
+#   the same way. A failed update refuses, launching nothing, and --no-todo is
+#   refused while a notes file is active; --no-todo is recorded as
+#   no_todo=<reason>. A relaunch keeps both
 #   lines and the links. A link failure warns; the launch stands.
 #   A spawn deferred for project capacity runs bin/fm-auto-release.sh, prints its
 #   lines, and when that cleaned anything up retries the identical spawn once.
@@ -1965,21 +1973,50 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
 fi
 # A fresh worker in a home with the notes-keeping bridge is linked to the todo
 # it works on, or says why it has none; each --todo becomes the one open todo
-# it names, so the bridge links the exact item text.
+# it names, so the bridge links the exact item text, or the item's id when its
+# line ends in the plugin's <!-- id:<id> --> comment, which the record leaves
+# out. Without --todo, while a
+# notes-keeping session is active, the first line of the brief's Captain's
+# intent becomes firstmate's [UPDATE] in that session's notes, and the todo the
+# plugin makes from it is linked by id; --no-todo is then refused.
+SPAWN_TODO_LINKS=()
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ -x "$CONFIG/notes-keeping-bridge" ]; then
-  if [ "${#TODOS[@]}" -eq 0 ] && [ "$NO_TODO_SET" -eq 0 ]; then
+  SPAWN_NOTES=
+  [ "${#TODOS[@]}" -gt 0 ] || SPAWN_NOTES=$(FM_HOME=$FM_HOME "$CONFIG/notes-keeping-bridge" active 2>/dev/null) || SPAWN_NOTES=
+  if [ -n "$SPAWN_NOTES" ]; then
+    [ "$NO_TODO_SET" -eq 0 ] || {
+      printf 'error: %s: the notes-keeping session for %s makes this task its todo; omit --no-todo, or pass --todo naming an open one; nothing was launched\n' "$ID" "$SPAWN_NOTES" >&2
+      exit 1
+    }
+    SPAWN_INTENT=$(fm_brief_task_heading_body "$DATA/$ID/brief.md" "## Captain's intent" 2>/dev/null | awk 'NF { $1 = $1; print; exit }')
+    [ -n "$SPAWN_INTENT" ] || {
+      printf "error: %s: no Captain's intent in %s to add as its notes-keeping objective; nothing was launched\n" "$ID" "$DATA/$ID/brief.md" >&2
+      exit 1
+    }
+    SPAWN_TODO=$(FM_HOME=$FM_HOME "$CONFIG/notes-keeping-bridge" update "$SPAWN_NOTES" "$ID: $SPAWN_INTENT" --by firstmate --task "$ID" 2>&1) || {
+      printf 'error: %s: could not add its notes-keeping objective update; nothing was launched\n%s\n' "$ID" "$SPAWN_TODO" >&2
+      exit 1
+    }
+    TODOS=("id:$SPAWN_TODO")
+    SPAWN_TODO_LINKS=("id:$SPAWN_TODO")
+  elif [ "${#TODOS[@]}" -eq 0 ] && [ "$NO_TODO_SET" -eq 0 ]; then
     SPAWN_UNOWNED=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
       "$SCRIPT_DIR/fm-todo-guard.sh" unowned 2>&1) || true
     printf 'error: %s needs --todo "<todo text>" naming the notes-keeping todo it works on, or --no-todo "<reason>" when it works on none; nothing was launched\n%s' "$ID" "${SPAWN_UNOWNED:+$SPAWN_UNOWNED$'\n'}" >&2
     exit 1
   fi
-  for i in ${TODOS[@]+"${!TODOS[@]}"}; do
+  [ -n "$SPAWN_NOTES" ] || for i in ${TODOS[@]+"${!TODOS[@]}"}; do
     SPAWN_TODO=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
       "$SCRIPT_DIR/fm-todo-guard.sh" resolve "${TODOS[$i]}" 2>&1) || {
       printf 'error: --todo for %s must name exactly one open todo; nothing was launched\n%s\n' "$ID" "$SPAWN_TODO" >&2
       exit 1
     }
     TODOS[i]=$SPAWN_TODO
+    SPAWN_TODO_LINKS[i]=$SPAWN_TODO
+    if [[ $SPAWN_TODO =~ ^(.*[^[:space:]])[[:space:]]*'<!-- id:'([a-z0-9]+)' -->'$ ]]; then
+      TODOS[i]=${BASH_REMATCH[1]}
+      SPAWN_TODO_LINKS[i]=id:${BASH_REMATCH[2]}
+    fi
   done
 fi
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
@@ -6907,8 +6944,9 @@ SPAWN_ACCOUNT=
 [ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true
 # Link each --todo to this task through the notes-keeping bridge.
 if [ -x "$CONFIG/notes-keeping-bridge" ] && [ "$KIND" != secondmate ]; then
-  for todo in ${TODOS[@]+"${TODOS[@]}"}; do
-    FM_HOME=$FM_HOME "$CONFIG/notes-keeping-bridge" link "$ID" "$todo" ||
+  for todo in ${SPAWN_TODO_LINKS[@]+"${SPAWN_TODO_LINKS[@]}"}; do
+    case "$todo" in id:*) SPAWN_TODO_BY=(--by firstmate) ;; *) SPAWN_TODO_BY=() ;; esac
+    FM_HOME=$FM_HOME "$CONFIG/notes-keeping-bridge" link "$ID" "$todo" ${SPAWN_TODO_BY[@]+"${SPAWN_TODO_BY[@]}"} ||
       echo "warning: could not link todo '$todo' to $ID through $CONFIG/notes-keeping-bridge" >&2
   done
 fi

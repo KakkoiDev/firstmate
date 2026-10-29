@@ -730,7 +730,14 @@ write_bridge() {  # <home> <status-json>
 #!/usr/bin/env bash
 case "$1" in
   status) cat "$FM_HOME/bridge-status.json" ;;
-  link) shift; printf '%s\t%s\n' "$1" "$2" >> "$FM_HOME/bridge-links.log" ;;
+  link) shift; printf '%s\t%s\n' "$1" "${*:2}" >> "$FM_HOME/bridge-links.log" ;;
+  active) [ -e "$FM_HOME/bridge-active" ] || { echo "no notes-keeping session has asked for pending updates" >&2; exit 1; }; cat "$FM_HOME/bridge-active" ;;
+  update)
+    shift
+    printf '%s\n' "$*" >> "$FM_HOME/bridge-updates.log"
+    [ ! -e "$FM_HOME/bridge-update-fail" ] || { cat "$FM_HOME/bridge-update-fail" >&2; exit 1; }
+    echo 1kmv58p
+    ;;
 esac
 SH
   chmod +x "$1/config/notes-keeping-bridge"
@@ -770,6 +777,21 @@ task-c	write the release note" "$(cat "$home/bridge-links.log")" "the spawn did 
   pass "--todo links each named open todo to the new task through the bridge and records it"
 }
 
+test_todo_with_an_id_is_linked_by_id() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-id task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{}'
+  write_todos "$home" "we need to investigate the queue <!-- id:1peq8w8 -->"
+  out=$(run_spawn "$case_dir" "$home" "$(new_worktree "$case_dir" task-c)" task-c "$case_dir/project" \
+    --mode no-mistakes --yolo off --todo "investigate the queue") || rc=$?
+  expect_code 0 "$rc" "a spawn with --todo naming an item with an id failed: $out"
+  assert_equals "task-c	id:1peq8w8 --by firstmate" "$(cat "$home/bridge-links.log")" "the spawn did not link the todo by its id"
+  assert_contains "$(cat "$home/state/task-c.meta")" "todo=we need to investigate the queue" "the task record does not name its todo"
+  if grep -q '<!--' "$home/state/task-c.meta"; then fail "the task record kept the todo's id comment"; fi
+  pass "--todo naming an item with an id links it by id and records its text without the comment"
+}
+
 test_spawn_without_todo_is_refused() {
   local case_dir home out rc=0
   case_dir=$(make_case todo-refuse task-c)
@@ -796,6 +818,51 @@ test_spawn_with_no_todo_reason_launches() {
   assert_contains "$(cat "$home/state/task-c.meta")" "no_todo=fleet maintenance, no captain todo" "the task record does not keep the --no-todo reason"
   [ ! -e "$home/bridge-links.log" ] || fail "a spawn with --no-todo linked something"
   pass "--no-todo <reason> launches without a link and records the reason"
+}
+
+test_spawn_without_todo_adds_an_objective_update() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-auto task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{}'
+  write_todos "$home" "answer the vendor"
+  printf '%s\n' "$home/notes.md" > "$home/bridge-active"
+  out=$(spawn_ship "$case_dir" task-c) || rc=$?
+  expect_code 0 "$rc" "a spawn without --todo in a home with an active notes file failed: $out"
+  assert_equals "$home/notes.md task-c: Run the project's heavy suite for task-c. --by firstmate --task task-c" \
+    "$(cat "$home/bridge-updates.log")" "the spawn did not add its intent as firstmate's objective update"
+  assert_equals "task-c	id:1kmv58p --by firstmate" "$(cat "$home/bridge-links.log")" "the spawn did not link the created todo by id"
+  assert_contains "$(cat "$home/state/task-c.meta")" "todo=id:1kmv58p" "the task record does not name the created todo"
+  pass "a spawn without --todo adds its intent as an objective update and links the todo it makes"
+}
+
+test_failed_objective_update_is_refused() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-auto-fail task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{}'
+  printf '%s\n' "$home/notes.md" > "$home/bridge-active"
+  printf '%s\n' "no notes-keeping session took the update within 20 s; nothing was written" > "$home/bridge-update-fail"
+  out=$(spawn_ship "$case_dir" task-c) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a spawn whose objective update failed launched: $out"
+  assert_contains "$out" "no notes-keeping session took the update" "the refusal did not carry the bridge's reason"
+  assert_nothing_launched "$case_dir" task-c
+  pass "a spawn whose objective update fails refuses and launches nothing"
+}
+
+test_no_todo_with_an_active_notes_file_is_refused() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-none-active task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{}'
+  printf '%s\n' "$home/notes.md" > "$home/bridge-active"
+  out=$(run_spawn "$case_dir" "$home" "$(new_worktree "$case_dir" task-c)" task-c "$case_dir/project" \
+    --mode no-mistakes --yolo off --no-todo "fleet maintenance, no captain todo") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a spawn with --no-todo and an active notes file launched: $out"
+  assert_contains "$out" "omit --no-todo" "the refusal did not say how to get the todo made"
+  [ ! -e "$home/bridge-updates.log" ] || fail "a refused --no-todo spawn added an objective update"
+  assert_nothing_launched "$case_dir" task-c
+  pass "--no-todo is refused while a notes file is active"
 }
 
 test_unknown_or_ambiguous_todo_is_refused() {
@@ -841,6 +908,10 @@ test_capacity_deferral_releases_finished_workers_and_retries
 test_capacity_deferral_with_nothing_finished_still_defers
 test_spawn_waits_for_a_held_slot_lock
 test_todo_is_linked_at_spawn
+test_todo_with_an_id_is_linked_by_id
 test_spawn_without_todo_is_refused
 test_spawn_with_no_todo_reason_launches
 test_unknown_or_ambiguous_todo_is_refused
+test_spawn_without_todo_adds_an_objective_update
+test_failed_objective_update_is_refused
+test_no_todo_with_an_active_notes_file_is_refused
