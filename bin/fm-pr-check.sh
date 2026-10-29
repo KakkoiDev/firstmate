@@ -19,6 +19,9 @@
 # skips this refusal, because its own merge-time draft refusal is authoritative.
 # The recorded pr= also frees the task's place in a declared project capacity
 # (bin/fm-project-capacity-lib.sh).
+# Under opt-in config/pr-review-gate a GitHub ship PR is refused, recording and
+# arming nothing, until bin/fm-review-gate-lib.sh accepts the task's review
+# evidence; bin/fm-pr-merge.sh records through this script, so it refuses too.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -35,6 +38,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-review-gate-lib.sh
+. "$SCRIPT_DIR/fm-review-gate-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -159,6 +164,11 @@ fi
 
 MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+if fm_review_gate_applies "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$KIND" "$MODE" "$PROVIDER" \
+  && ! GATE_REASON=$(fm_review_gate_check "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$ID"); then
+  echo "error: $URL is not ready: the PR review gate needs review evidence: $GATE_REASON" >&2
+  exit 1
+fi
 # The gate is asked about the ready report this task's worker was told to give;
 # on a Gerrit change both publishing modes report the same published line.
 case "$PROVIDER:$MODE" in

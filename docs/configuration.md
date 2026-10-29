@@ -622,6 +622,14 @@ The optional local, gitignored `config/pipeline-spend` presence flag opts this h
 When the flag is absent, teardown skips recording and the recorder exits before reading task metadata, no-mistakes state, or the spend ledger.
 An existing ledger is left untouched while recording is disabled.
 
+## PR review gate (config/pr-review-gate)
+
+The optional local, gitignored `config/pr-review-gate` presence flag opts this home into requiring a recorded review chain before a GitHub ship pull request is ready.
+Create it with `touch "$FM_HOME/config/pr-review-gate"`; remove it to restore the default.
+With it present, `no-mistakes` and `direct-PR` ship briefs, including promoted ones, gain the review chain in their Definition of done, and `bin/fm-pr-check.sh` refuses to register such a pull request, so `bin/fm-pr-merge.sh` refuses to merge it, until the task's `data/<id>/review-gate` evidence record is valid.
+`local-only` tasks, scouts, and Gerrit, GitLab, Forgejo, and external review changes are unaffected.
+The flag is a home-local preference and is not inherited by secondmate homes; [`bin/fm-review-gate-lib.sh`](../bin/fm-review-gate-lib.sh) owns the worker steps, the evidence record format, and the check.
+
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.

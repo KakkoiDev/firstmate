@@ -759,6 +759,83 @@ test_direct_pr_unpushed_commit_refuses_registration() {
   pass "fm-pr-check refuses a direct-PR registration while a later commit is only in the copy"
 }
 
+# config/pr-review-gate makes a GitHub ship PR ready, and mergeable, only with
+# the task's recorded review evidence (bin/fm-review-gate-lib.sh owns its format).
+review_gate_case() {  # <name> <mode> [evidence line...]
+  local name=$1 mode=$2 dir
+  shift 2
+  dir=$(make_case "$name")
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" "endpoint_task_id=task-a" "worktree=$dir/wt" \
+    "project=$dir/project" "kind=ship" "mode=$mode"
+  : > "$dir/home/config/pr-review-gate"
+  mkdir -p "$dir/home/data/task-a"
+  printf 'pr-review-enhanced findings\n' > "$dir/home/data/task-a/pr-review.md"
+  [ "$#" -eq 0 ] || printf '%s\n' "$@" > "$dir/home/data/task-a/review-gate"
+  printf '%s\n' "$dir"
+}
+
+assert_review_gate_refused() {  # <dir> <expected stderr fragment>
+  local dir=$1 want=$2
+  cp "$dir/home/state/task-a.meta" "$dir/meta.before"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/9 > "$dir/stdout" 2> "$dir/stderr" \
+    && fail "$dir: a PR without valid review evidence was registered ready"
+  grep -qF "$want" "$dir/stderr" || fail "$dir: refusal did not say '$want': $(cat "$dir/stderr")"
+  grep -qF 'https://github.com/o/r/pull/9' "$dir/stderr" || fail "$dir: refusal did not name the PR"
+  cmp -s "$dir/meta.before" "$dir/home/state/task-a.meta" || fail "$dir: refusal changed the task metadata"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "$dir: refusal armed a merge poll"
+  : > "$dir/gh.log"
+  run_merge_entry "$dir" task-a https://github.com/o/r/pull/9 > "$dir/stdout" 2> "$dir/stderr" \
+    && fail "$dir: a PR without valid review evidence was merged"
+  ! grep -q '^pr merge' "$dir/gh.log" || fail "$dir: the merge command ran without valid review evidence"
+}
+
+test_review_gate_requires_recorded_evidence() {
+  local dir
+  dir=$(review_gate_case review-gate-absent no-mistakes)
+  assert_review_gate_refused "$dir" "no review evidence"
+  dir=$(review_gate_case review-gate-direct-absent direct-PR)
+  assert_review_gate_refused "$dir" "no review evidence"
+  dir=$(review_gate_case review-gate-no-artifact no-mistakes 'review=missing.md' 'round=1 clean')
+  assert_review_gate_refused "$dir" "review artifact"
+  mkdir -p "$TMP_ROOT/review-gate-outside"
+  printf 'x\n' > "$TMP_ROOT/review-gate-outside/pr-review.md"
+  dir=$(review_gate_case review-gate-escape no-mistakes \
+    "review=../../../../review-gate-outside/pr-review.md" 'round=1 clean')
+  assert_review_gate_refused "$dir" "review artifact"
+  dir=$(review_gate_case review-gate-no-rounds no-mistakes 'review=pr-review.md')
+  assert_review_gate_refused "$dir" "bot loop"
+  dir=$(review_gate_case review-gate-four-rounds no-mistakes 'review=pr-review.md' \
+    'round=1 fixed' 'round=2 fixed' 'round=3 fixed' 'round=4 clean')
+  assert_review_gate_refused "$dir" "bot loop"
+  dir=$(review_gate_case review-gate-skipped-round no-mistakes 'review=pr-review.md' 'round=2 clean')
+  assert_review_gate_refused "$dir" "bot loop"
+  dir=$(review_gate_case review-gate-bad-result no-mistakes 'review=pr-review.md' 'round=1 maybe')
+  assert_review_gate_refused "$dir" "bot loop"
+  dir=$(review_gate_case review-gate-unfinished no-mistakes 'review=pr-review.md' 'round=1 fixed')
+  assert_review_gate_refused "$dir" "bot loop"
+
+  dir=$(review_gate_case review-gate-no-answer no-mistakes 'review=pr-review.md' \
+    'round=1 fixed' 'round=2 no-answer')
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/9 > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "valid review evidence was refused: $(cat "$dir/stderr")"
+  [ -f "$dir/home/state/task-a.check.sh" ] || fail "valid review evidence did not arm the merge poll"
+  : > "$dir/gh.log"
+  run_merge_entry "$dir" task-a https://github.com/o/r/pull/9 > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "valid review evidence blocked the merge: $(cat "$dir/stderr")"
+  grep -q '^pr merge 9 ' "$dir/gh.log" || fail "valid review evidence did not reach the merge command"
+  dir=$(review_gate_case review-gate-capped direct-PR 'review=pr-review.md' \
+    'round=1 fixed' 'round=2 fixed' 'round=3 fixed')
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/9 > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a loop that used all three rounds was refused: $(cat "$dir/stderr")"
+
+  dir=$(review_gate_case review-gate-off no-mistakes)
+  rm -f "$dir/home/config/pr-review-gate"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/9 > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a home without config/pr-review-gate required review evidence: $(cat "$dir/stderr")"
+  pass "config/pr-review-gate refuses PR registration and merge until valid review evidence is recorded"
+}
+
 test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
@@ -3633,6 +3710,7 @@ test_draft_pull_request_is_not_armed
 test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
+test_review_gate_requires_recorded_evidence
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract

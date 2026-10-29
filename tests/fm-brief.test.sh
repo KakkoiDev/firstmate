@@ -1340,6 +1340,37 @@ test_home_brief_include_is_appended_last() {
   pass "fm-brief.sh: the home brief include lands last on ship and scout, verbatim, and fails closed"
 }
 
+# config/pr-review-gate adds the review chain to a PR-based ship's Definition of
+# done, naming the 3-round cap, the 10-minute no-answer rule, and the evidence
+# record; local-only, scouts, non-GitHub forges, and ungated homes stay unchanged.
+test_review_gate_dod_is_opt_in() {
+  local home brief mode
+  home="$TMP_ROOT/review-gate-home"
+  mkdir -p "$home/config"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" gate-off some-proj --mode direct-PR >/dev/null || fail "ungated ship scaffold failed"
+  assert_no_grep 'PR review gate' "$home/data/gate-off/brief.md" "an ungated home got the review gate"
+  : > "$home/config/pr-review-gate"
+  for mode in no-mistakes direct-PR; do
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "gate-$mode" some-proj --mode "$mode" >/dev/null || fail "$mode gated scaffold failed"
+    brief="$home/data/gate-$mode/brief.md"
+    assert_grep '## PR review gate' "$brief" "$mode brief lacks the review gate"
+    assert_grep 'pr-review-enhanced skill' "$brief" "$mode gate does not name the review skill"
+    assert_grep 'at most 3 rounds' "$brief" "$mode gate does not cap the loop"
+    assert_grep 'within 10 minutes' "$brief" "$mode gate lacks the no-answer rule"
+    assert_grep "$home/data/gate-$mode/review-gate" "$brief" "$mode gate does not name the evidence record"
+    [ "$(sed -n '/^# Definition of done$/,$p' "$brief" | grep -c '## PR review gate')" = 1 ] \
+      || fail "$mode gate is not inside the Definition of done"
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" gate-local some-proj --mode local-only >/dev/null || fail "local-only gated scaffold failed"
+  assert_no_grep 'PR review gate' "$home/data/gate-local/brief.md" "local-only got the review gate"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" gate-scout some-proj --scout >/dev/null || fail "scout gated scaffold failed"
+  assert_no_grep 'PR review gate' "$home/data/gate-scout/brief.md" "a scout got the review gate"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" gate-gerrit some-proj --mode direct-PR --forge gerrit --shape squash >/dev/null \
+    || fail "gerrit gated scaffold failed"
+  assert_no_grep 'PR review gate' "$home/data/gate-gerrit/brief.md" "a Gerrit change got the GitHub review gate"
+  pass "fm-brief.sh: config/pr-review-gate adds the review chain to PR-based ship briefs only"
+}
+
 # --base-branch names the branch a task starts from and a ship's PR targets. It is
 # recorded as a Base branch line under # Setup, which fm-spawn reads back, and is
 # refused where no pull request carries the work.
@@ -1682,6 +1713,7 @@ test_inbox_listing_command_is_safe_on_empty_inbox
 test_workers_wait_without_spending_turns
 test_wait_no_turns_absent_keeps_the_previous_brief
 test_home_brief_include_is_appended_last
+test_review_gate_dod_is_opt_in
 test_base_branch_is_rendered_and_bounded
 test_ship_branch_prefix_defaults_to_legacy_fm
 test_ship_branch_prefix_override_is_consistent_across_modes

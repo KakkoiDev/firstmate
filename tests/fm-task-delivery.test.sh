@@ -308,6 +308,29 @@ test_promote_refuses_a_symlinked_task_record() {
 # no-mistakes worker gets. This drives the real promotion path, then runs the delivery command it
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
+# A promoted ship in a config/pr-review-gate home receives the same review chain
+# a fresh ship brief carries (bin/fm-review-gate-lib.sh); local-only does not.
+test_promotion_carries_the_review_gate() {
+  local home mode id
+  home="$TMP_ROOT/promote-gate/home"
+  mkdir -p "$home/state" "$home/config"
+  : > "$home/config/pr-review-gate"
+  for mode in direct-PR local-only; do
+    id="promote-gate-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+    FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
+      || fail "$mode: scout brief generation should succeed"
+    fill_brief_subsections "$home/data/$id/brief.md" "Ship the change." "Keep it small."
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off >/dev/null 2>&1 \
+      || fail "$mode: promotion should succeed"
+  done
+  assert_grep '## PR review gate' "$home/data/promote-gate-direct-pr/ship-instructions.md" \
+    "a promoted direct-PR ship did not receive the review gate"
+  assert_no_grep 'PR review gate' "$home/data/promote-gate-local-only/ship-instructions.md" \
+    "a promoted local-only ship received the review gate"
+  pass "fm-promote: a gated home's promoted PR ship carries the review chain"
+}
+
 test_promotion_delivers_the_real_definition_of_done() {
   local home meta out sendroot payload mode id brief_dod delivered_dod contract
   home="$TMP_ROOT/promote-dod/home"
@@ -1705,6 +1728,7 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
+test_promotion_carries_the_review_gate
 test_promotion_delivers_the_real_definition_of_done
 test_promotion_persists_the_selected_ship_branch
 test_promotion_branch_command_is_shell_safe
