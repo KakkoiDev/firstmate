@@ -797,6 +797,40 @@ SH
   pass "a spawned task durably leases its Treehouse slot under its own id"
 }
 
+# A finished task's lease must not keep a full pool full: before asking
+# Treehouse for a slot, a fresh spawn releases every slot bin/fm-pool-reclaim.sh
+# proves lossless, here a finished scout's whose endpoint is gone.
+test_spawn_releases_a_finished_tasks_slot_first() {
+  local rec id out status old_slot
+  id='pool-reclaim-before-get-r1'
+  rec=$(make_case reclaim-before-get "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  old_slot="$CASE_DIR/slots/2/project"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$old_slot" "$INITIAL_SHA"
+  printf 'window=firstmate:fm-old-scout\nworktree=%s\nkind=scout\n' "$old_slot" > "$HOME_DIR/state/old-scout.meta"
+  printf 'done [at=1]: report written\n' > "$HOME_DIR/state/old-scout.status"
+  printf 'task=old-scout\nhome=%s\n' "$HOME_DIR" > "$CASE_DIR/slots/2/.fm-slot-owner"
+  cat > "$FAKEBIN_DIR/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$CASE_DIR/treehouse.log"
+case "\$1" in
+  status) printf '[{"name":"2","status":"leased","lease_holder":"old-scout","processes":[],"path":"%s"}]\n' "$old_slot" ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/treehouse"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn from a Treehouse slot should launch"$'\n'"$out"
+  grep -Fxq -- "return --if-lease-holder old-scout $old_slot" "$CASE_DIR/treehouse.log" \
+    || fail "spawn did not release the finished scout's slot: $(cat "$CASE_DIR/treehouse.log" 2>/dev/null)"
+  assert_grep "worktree_released=$old_slot" "$HOME_DIR/state/old-scout.meta" \
+    "the released task's record still names its slot"
+  pass "a fresh spawn releases a finished task's pool slot before asking Treehouse for one"
+}
+
 # A stateful terminal and pool stand-in for the refused-launch sequence. Each
 # window is a file recording its stable id and the path its shell sits in; a
 # `treehouse get` typed into a window moves it into the lowest slot no live
@@ -1254,5 +1288,6 @@ test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
+test_spawn_releases_a_finished_tasks_slot_first
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

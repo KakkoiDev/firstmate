@@ -5293,6 +5293,11 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # Under the project lock taken above, return the slots finished tasks hold
+  # losslessly so they can serve this get (bin/fm-pool-reclaim.sh owns the rules).
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-pool-reclaim.sh" --apply --lock-held "$PROJ_ABS" 2>/dev/null \
+    | sed -nE 's/^(released|detached) /pool slot &/p' >&2 || true
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
