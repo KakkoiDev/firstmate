@@ -737,35 +737,88 @@ SH
   printf '%s\n' "$2" > "$1/bridge-status.json"
 }
 
+# Open todos in a notes file a recent todo note names, as the plugin leaves them.
+write_todos() {  # <home> <todo-line>...
+  local home=$1
+  shift
+  printf '# Todo\n\n' > "$home/notes.md"
+  printf -- '- [ ] %s\n' "$@" >> "$home/notes.md"
+  mkdir -p "$home/state/inbox/handled"
+  printf 'id=x\n--\nnotes-keeping todo changed in %s:\n' "$home/notes.md" > "$home/state/inbox/handled/$(date +%s)-abcdef.note"
+}
+
+# Nothing reached a launch: no task record and no window.
+assert_nothing_launched() {  # <case-dir> <id>
+  [ ! -e "$1/home/state/$2.meta" ] || fail "a refused spawn left a task record"
+  if grep -q '^new-window' "$1/calls.log"; then fail "a refused spawn opened a window"; fi
+  [ ! -e "$1/home/bridge-links.log" ] || fail "a refused spawn linked a todo"
+}
+
 test_todo_is_linked_at_spawn() {
   local case_dir home out rc=0
   case_dir=$(make_case todo-link task-c)
   home="$case_dir/home"
   write_bridge "$home" '{}'
+  write_todos "$home" "Ship the parser" "write the release note"
   out=$(run_spawn "$case_dir" "$home" "$(new_worktree "$case_dir" task-c)" task-c "$case_dir/project" \
-    --mode no-mistakes --yolo off --todo "Ship the parser" --todo "write the release note") || rc=$?
+    --mode no-mistakes --yolo off --todo "ship  the PARSER" --todo "release note") || rc=$?
   expect_code 0 "$rc" "a spawn with --todo failed: $out"
   assert_equals "task-c	Ship the parser
-task-c	write the release note" "$(cat "$home/bridge-links.log")" "the spawn did not link each todo to its task"
+task-c	write the release note" "$(cat "$home/bridge-links.log")" "the spawn did not link each todo's exact text to its task"
   assert_contains "$(cat "$home/state/task-c.meta")" "todo=Ship the parser" "the task record does not name its todo"
   assert_contains "$(cat "$home/state/task-c.meta")" "todo=write the release note" "the task record lost a repeated todo"
-  pass "--todo links each todo to the new task through the bridge and records it"
+  pass "--todo links each named open todo to the new task through the bridge and records it"
 }
 
-test_spawn_without_todo_names_unowned_todos() {
+test_spawn_without_todo_is_refused() {
   local case_dir home out rc=0
-  case_dir=$(make_case todo-warn task-c)
+  case_dir=$(make_case todo-refuse task-c)
   home="$case_dir/home"
   write_bridge "$home" '{}'
-  printf '# Todo\n\n- [ ] answer the vendor\n' > "$home/notes.md"
-  mkdir -p "$home/state/inbox/handled"
-  printf 'id=x\n--\nnotes-keeping todo changed in %s:\n' "$home/notes.md" > "$home/state/inbox/handled/$(date +%s)-abcdef.note"
+  write_todos "$home" "answer the vendor"
   out=$(spawn_ship "$case_dir" task-c) || rc=$?
-  expect_code 0 "$rc" "a spawn without --todo failed: $out"
-  assert_contains "$out" "warning: task-c was spawned without --todo" "the spawn did not warn about the missing todo link"
-  assert_contains "$out" "answer the vendor" "the warning did not name the unowned todo"
-  [ ! -e "$home/bridge-links.log" ] || fail "a spawn without --todo linked something"
-  pass "a spawn without --todo names the open unowned todos"
+  [ "$rc" -ne 0 ] || fail "a spawn without --todo or --no-todo launched: $out"
+  assert_contains "$out" "task-c needs --todo" "the refusal did not say what the spawn needs"
+  assert_contains "$out" "answer the vendor" "the refusal did not name the unowned todo"
+  assert_nothing_launched "$case_dir" task-c
+  pass "a spawn without --todo or --no-todo refuses and launches nothing"
+}
+
+test_spawn_with_no_todo_reason_launches() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-none task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{}'
+  write_todos "$home" "answer the vendor"
+  out=$(run_spawn "$case_dir" "$home" "$(new_worktree "$case_dir" task-c)" task-c "$case_dir/project" \
+    --mode no-mistakes --yolo off --no-todo "fleet maintenance, no captain todo") || rc=$?
+  expect_code 0 "$rc" "a spawn with --no-todo failed: $out"
+  assert_contains "$(cat "$home/state/task-c.meta")" "no_todo=fleet maintenance, no captain todo" "the task record does not keep the --no-todo reason"
+  [ ! -e "$home/bridge-links.log" ] || fail "a spawn with --no-todo linked something"
+  pass "--no-todo <reason> launches without a link and records the reason"
+}
+
+test_unknown_or_ambiguous_todo_is_refused() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-unknown task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{}'
+  write_todos "$home" "write the release note" "write the docs"
+  out=$(run_spawn "$case_dir" "$home" "$(new_worktree "$case_dir" task-c)" task-c "$case_dir/project" \
+    --mode no-mistakes --yolo off --todo "rename the queue") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a spawn naming no open todo launched: $out"
+  assert_contains "$out" 'no open notes-keeping todo matches "rename the queue"' "the refusal did not say the todo is unknown"
+  assert_contains "$out" "write the docs" "the unknown-todo refusal did not list the open todos"
+  assert_nothing_launched "$case_dir" task-c
+  rc=0
+  out=$(run_spawn "$case_dir" "$home" "$case_dir/wt-task-c" task-c "$case_dir/project" \
+    --mode no-mistakes --yolo off --todo "write") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a spawn naming two open todos launched: $out"
+  assert_contains "$out" '"write" matches 2 open notes-keeping todos' "the refusal did not say the todo is ambiguous"
+  assert_contains "$out" "write the release note" "the ambiguous refusal did not name a candidate"
+  assert_contains "$out" "write the docs" "the ambiguous refusal did not name every candidate"
+  assert_nothing_launched "$case_dir" task-c
+  pass "a --todo naming no open todo or several refuses, names the candidates, and launches nothing"
 }
 
 test_undeclared_capacity_keeps_dispatch_uncapped
@@ -788,4 +841,6 @@ test_capacity_deferral_releases_finished_workers_and_retries
 test_capacity_deferral_with_nothing_finished_still_defers
 test_spawn_waits_for_a_held_slot_lock
 test_todo_is_linked_at_spawn
-test_spawn_without_todo_names_unowned_todos
+test_spawn_without_todo_is_refused
+test_spawn_with_no_todo_reason_launches
+test_unknown_or_ambiguous_todo_is_refused

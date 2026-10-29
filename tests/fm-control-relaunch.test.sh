@@ -446,6 +446,32 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_relaunch_keeps_recorded_todo_links() {
+  local dir out rc links_before
+  dir=$(new_case todo rl45)
+  add_ship_task "$dir" rl45 claude
+  printf 'todo=%s\n' "write the release note" >> "$dir/home/state/rl45.meta"
+  mkdir -p "$dir/home/config"
+  cat > "$dir/home/config/notes-keeping-bridge" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  status) printf '{}\n' ;;
+  link) shift; printf '%s\t%s\n' "$1" "$2" >> "$FM_HOME/bridge-links.log" ;;
+esac
+SH
+  chmod +x "$dir/home/config/notes-keeping-bridge"
+  printf '%s\n' '{"task": "rl45", "key": "write the release note", "text": "write the release note", "at": 1}' \
+    > "$dir/home/state/notes-todo-links.jsonl"
+  links_before=$(cat "$dir/home/state/notes-todo-links.jsonl")
+  out=$(run_control "$dir" rl45 relaunch --note "continue the release note"); rc=$?
+  expect_code 0 "$rc" "a relaunch of a todo-linked task should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl45 todo)" = "write the release note" ] \
+    || fail "the relaunch dropped the task's recorded todo"
+  assert_equals "$links_before" "$(cat "$dir/home/state/notes-todo-links.jsonl")" "the relaunch changed the todo links"
+  [ ! -e "$dir/home/bridge-links.log" ] || fail "the relaunch relinked a todo it already had"
+  pass "fm-control relaunch: a todo-linked task keeps its recorded todo and link without a --todo"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -3024,6 +3050,7 @@ test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_keeps_recorded_todo_links
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

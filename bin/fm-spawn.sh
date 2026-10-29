@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait] [--todo <todo text>]... <jev decisions>
-#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait] [--todo <todo text>]... <jev decisions>
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait] [--todo <todo text>... | --no-todo <reason>] <jev decisions>
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait] [--todo <todo text>... | --no-todo <reason>] <jev decisions>
 #   <jev decisions> = --concurrency <parallel|semantic-dependency|shared-external-state|migration-conflict>
 #   --decision project-match=<id|off> --decision deliverable-class=<id|off>
 #   [--decision secondmate-scope=<id|off>] [--decision surface-class=<id|off>],
@@ -10,11 +10,15 @@
 #   which are required when and what refuses, bin/fm-jev-gate-lib.sh the asks.
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --todo names a captain notes-keeping todo this task works on; repeatable.
-#   Each is recorded as a todo= line in state/<id>.meta and, after a successful
-#   launch, linked to the task through config/notes-keeping-bridge's `link` verb
-#   so the plugin can follow it to done. When that bridge exists and a fresh
-#   ship or scout gets no --todo, the spawn warns with the open todos no work
-#   owns (bin/fm-todo-guard.sh unowned). A link failure warns; the launch stands.
+#   When config/notes-keeping-bridge exists, a fresh ship or scout spawn needs
+#   --todo or --no-todo <reason> and refuses, launching nothing, without one;
+#   each --todo must resolve to exactly one open todo (bin/fm-todo-guard.sh
+#   resolve) or the spawn refuses naming the candidates, and a batch refuses
+#   --todo because one todo cannot name every pair. Each resolved todo text is
+#   recorded as a todo= line in state/<id>.meta and, after a successful launch,
+#   linked to the task through the bridge's `link` verb so the plugin can follow
+#   it to done; --no-todo is recorded as no_todo=<reason>. A relaunch keeps both
+#   lines and the links. A link failure warns; the launch stands.
 #   A spawn deferred for project capacity runs bin/fm-auto-release.sh, prints its
 #   lines, and when that cleaned anything up retries the identical spawn once.
 #   Another Treehouse slot allocation or return holding the project lock is
@@ -846,6 +850,8 @@ RELAUNCH=0
 CONCURRENCY=
 DECISIONS=()
 TODOS=()
+NO_TODO=
+NO_TODO_SET=0
 SPAWN_ARGV=("$@")
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
@@ -905,6 +911,10 @@ for a in "$@"; do
     decision) DECISIONS+=("$a") ;;
     todo)
       TODOS+=("$a")
+      ;;
+    no-todo)
+      NO_TODO=$a
+      NO_TODO_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -972,6 +982,11 @@ for a in "$@"; do
     ;;
   --todo) want_value=todo ;;
   --todo=*) TODOS+=("${a#--todo=}") ;;
+  --no-todo) want_value=no-todo ;;
+  --no-todo=*)
+    NO_TODO=${a#--no-todo=}
+    NO_TODO_SET=1
+    ;;
   --traceparent) want_value=traceparent ;;
   --traceparent=*)
     TRACEPARENT_ARG=${a#--traceparent=}
@@ -1024,6 +1039,16 @@ for todo in ${TODOS[@]+"${TODOS[@]}"}; do
     ;;
   esac
 done
+case "$NO_TODO_SET:$NO_TODO" in
+1: | 1:*$'\n'*)
+  echo "error: --no-todo requires a non-empty single-line reason" >&2
+  exit 1
+  ;;
+esac
+[ "$NO_TODO_SET" -eq 0 ] || [ "${#TODOS[@]}" -eq 0 ] || {
+  echo "error: --todo and --no-todo contradict each other; pass one" >&2
+  exit 1
+}
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || {
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
@@ -1096,6 +1121,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   [ "$UPSTREAM_CONSENT_SET" -eq 0 ] || {
     echo "error: --relaunch reuses the task's recorded upstream consent; --upstream-consent cannot override it" >&2
+    exit 1
+  }
+  [ "${#TODOS[@]}" -eq 0 ] && [ "$NO_TODO_SET" -eq 0 ] || {
+    echo "error: --relaunch reuses the task's recorded todo links; --todo/--no-todo cannot override them" >&2
     exit 1
   }
 else
@@ -1889,6 +1918,11 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   for d in "${DECISIONS[@]+"${DECISIONS[@]}"}"; do shared_args+=(--decision "$d"); done
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
+  [ "${#TODOS[@]}" -eq 0 ] || {
+    echo "error: batch dispatch cannot carry --todo, which names one task's todo; spawn each linked task on its own" >&2
+    exit 1
+  }
+  [ "$NO_TODO_SET" -eq 0 ] || shared_args+=(--no-todo "$NO_TODO")
   for pair in "${POS[@]}"; do
     case "$pair" in
     *=*) : ;;
@@ -1928,6 +1962,25 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
     echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
     exit 1
   fi
+fi
+# A fresh worker in a home with the notes-keeping bridge is linked to the todo
+# it works on, or says why it has none; each --todo becomes the one open todo
+# it names, so the bridge links the exact item text.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ -x "$CONFIG/notes-keeping-bridge" ]; then
+  if [ "${#TODOS[@]}" -eq 0 ] && [ "$NO_TODO_SET" -eq 0 ]; then
+    SPAWN_UNOWNED=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
+      "$SCRIPT_DIR/fm-todo-guard.sh" unowned 2>&1) || true
+    printf 'error: %s needs --todo "<todo text>" naming the notes-keeping todo it works on, or --no-todo "<reason>" when it works on none; nothing was launched\n%s' "$ID" "${SPAWN_UNOWNED:+$SPAWN_UNOWNED$'\n'}" >&2
+    exit 1
+  fi
+  for i in ${TODOS[@]+"${!TODOS[@]}"}; do
+    SPAWN_TODO=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
+      "$SCRIPT_DIR/fm-todo-guard.sh" resolve "${TODOS[$i]}" 2>&1) || {
+      printf 'error: --todo for %s must name exactly one open todo; nothing was launched\n%s\n' "$ID" "$SPAWN_TODO" >&2
+      exit 1
+    }
+    TODOS[i]=$SPAWN_TODO
+  done
 fi
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
@@ -6096,6 +6149,7 @@ preserve_relaunch_meta() {
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
   [ "$RELAUNCH" -eq 1 ] || for todo in ${TODOS[@]+"${TODOS[@]}"}; do echo "todo=$todo"; done
+  [ "$RELAUNCH" -eq 1 ] || [ "$NO_TODO_SET" -eq 0 ] || echo "no_todo=$NO_TODO"
   # Read by bin/fm-dod-lib.sh's ready-report gate; absent on every other forge.
   [ "$EXTERNAL_REVIEW" = 0 ] || echo "forge=external"
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_remote=$EXTERNAL_BACKUP_REMOTE"
@@ -6851,17 +6905,11 @@ SPAWN_ACCOUNT=
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
 # new endpoint now rather than at the next watcher poll; off costs one file test.
 [ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true
-# Link each --todo to this task through the notes-keeping bridge, and name the
-# open todos nothing owns when a fresh worker was given none.
+# Link each --todo to this task through the notes-keeping bridge.
 if [ -x "$CONFIG/notes-keeping-bridge" ] && [ "$KIND" != secondmate ]; then
   for todo in ${TODOS[@]+"${TODOS[@]}"}; do
     FM_HOME=$FM_HOME "$CONFIG/notes-keeping-bridge" link "$ID" "$todo" ||
       echo "warning: could not link todo '$todo' to $ID through $CONFIG/notes-keeping-bridge" >&2
   done
-  if [ "${#TODOS[@]}" -eq 0 ] && [ "$RELAUNCH" -eq 0 ]; then
-    SPAWN_UNOWNED=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
-      "$SCRIPT_DIR/fm-todo-guard.sh" unowned 2>&1) ||
-      printf 'warning: %s was spawned without --todo while these todos have no owner; link the one it works on with bin/fm-spawn.sh --todo on the next dispatch or the bridge link verb:\n%s\n' "$ID" "$SPAWN_UNOWNED" >&2
-  fi
 fi
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"

@@ -9,6 +9,7 @@
 #
 # Usage:
 #   fm-todo-guard.sh unowned [--notes <notes-file>]... [--note <inbox-note>]...
+#   fm-todo-guard.sh resolve <todo text> [--notes <notes-file>]... [--note <inbox-note>]...
 #   fm-todo-guard.sh record-outcome <task-id> [--pr <url>] [--report <path>]
 #
 # `unowned` prints an `UNOWNED TODOS` section listing every open item (`[ ]` or
@@ -25,6 +26,13 @@
 # notes, pending or handled, received in the last three days.
 # When config/notes-keeping-bridge is absent the command does nothing and exits 0.
 # A bridge that fails or prints something that is not a JSON object exits 2.
+#
+# `resolve` finds the one open item, owned or not, in the same notes files that
+# <todo text> names, and prints that item's text. It matches an item whose key
+# or label key equals the text's key; failing that, an item whose key or label
+# key contains it. An item open in several files is one item. With no match or
+# several, it prints the candidates (every open item when nothing matched) and
+# exits 1. When config/notes-keeping-bridge is absent it prints the text as given.
 #
 # `record-outcome` keeps a finished task's outcome where its todo link lives,
 # because the bridge derives an item's status from state/<task>.status and
@@ -52,7 +60,13 @@ die() { printf 'fm-todo-guard: %s\n' "$*" >&2; exit 2; }
 usage() { sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'; }
 
 cmd_unowned() {
-  local notes=() records=() status_json
+  local query='' notes=() records=() status_json='{}'
+  if [ "$1" = resolve ]; then
+    query=${2:-}
+    [ -n "$query" ] || die "resolve needs a todo text"
+    shift
+  fi
+  shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --notes) [ "$#" -ge 2 ] || die "--notes needs a file"; notes+=("$2"); shift 2 ;;
@@ -60,16 +74,20 @@ cmd_unowned() {
       *) die "unknown argument: $1" ;;
     esac
   done
-  [ -x "$BRIDGE" ] || return 0
-  status_json=$(FM_HOME="$FM_HOME" "$BRIDGE" status "${notes[0]:-.}") \
+  if [ ! -x "$BRIDGE" ]; then
+    [ -z "$query" ] || printf '%s\n' "$query"
+    return 0
+  fi
+  [ -n "$query" ] || status_json=$(FM_HOME="$FM_HOME" "$BRIDGE" status "${notes[0]:-.}") \
     || die "the bridge's status failed: $BRIDGE"
-  FM_TODO_STATUS="$status_json" python3 - "$STATE/inbox" "$SELF_DIR/fm-tasks-axi.sh" \
+  FM_TODO_STATUS="$status_json" FM_TODO_QUERY="$query" python3 - "$STATE/inbox" "$SELF_DIR/fm-tasks-axi.sh" \
     "${#notes[@]}" ${notes[@]+"${notes[@]}"} ${records[@]+"${records[@]}"} <<'PY'
 import json, os, re, subprocess, sys, time
 
 inbox, tasks_axi, count = sys.argv[1], sys.argv[2], int(sys.argv[3])
 notes = sys.argv[4:4 + count]
 records = sys.argv[4 + count:]
+query = os.environ['FM_TODO_QUERY']
 WINDOW = 3 * 86400
 CHANGED = re.compile(r'^notes-keeping todo changed in (.+):$')
 HEADING = re.compile(r'^(#+)\s+(.*?)\s*$')
@@ -156,6 +174,24 @@ def open_items(path):
             yield m.group(1), (label.group(2) if label else m.group(2)), (label.group(1) if label else None)
 
 
+if query:
+    items = {}
+    for path in dict.fromkeys(files):
+        for mark, text, label in open_items(path):
+            items.setdefault(key_of(text), (mark, text, label))
+    want = key_of(query)
+    keys = lambda item: [key_of(item[1])] + ([key_of(item[2])] if item[2] else [])
+    found = [i for i in items.values() if want in keys(i)] \
+        or [i for i in items.values() if any(want in k for k in keys(i))]
+    if len(found) == 1:
+        print(found[0][1])
+        sys.exit(0)
+    shown = found or list(items.values())
+    print(f'no open notes-keeping todo matches "{query}"' if not found
+          else f'"{query}" matches {len(found)} open notes-keeping todos; name exactly one')
+    print('\n'.join(f'- [{m}] {f"**{l}**: " if l else ""}{t}' for m, t, l in shown) or '(no open todos found)')
+    sys.exit(1)
+
 unowned, seen = [], set()
 for path in files:
     if path in seen:
@@ -228,7 +264,7 @@ PY
 }
 
 case "${1:-}" in
-  unowned) shift; cmd_unowned "$@" ;;
+  unowned|resolve) cmd_unowned "$@" ;;
   record-outcome) shift; cmd_record_outcome "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown subcommand: $1 (try --help)" ;;
