@@ -72,6 +72,9 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 . "$_FM_CLASSIFY_LIB_DIR/fm-timeout-lib.sh"
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
+# shellcheck source=bin/fm-path-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_CLASSIFY_LIB_DIR/fm-path-lib.sh"
 
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
@@ -1170,8 +1173,8 @@ EOF
 # re-derives from whatever offset actually landed on disk.
 _fm_open_decisions_cursor_path() {  # <status-file>
   local f=$1 dir base
-  dir=$(dirname "$f")
-  base=$(basename "$f")
+  fm_dirname_to dir "$f"
+  fm_basename_to base "$f"
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
@@ -1197,24 +1200,93 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # discarded and rebuilt from byte 0 under the new reading.
 FM_OPEN_DECISIONS_FOLD_VERSION=9
 
-# Portable device:inode identity for the rotation/recreation check below.
+# _fm_status_file_stat <file>: identity, size, and mtime from ONE stat exec,
+# into _FM_STAT_IDENT, _FM_STAT_SIZE, and _FM_STAT_MTIME. Process launch is the
+# dominant drain cost on hosts where it is slow, and a drain reads these for
+# every task status log several times, so each separate stat multiplied it.
+# The identity is the portable device:inode plus birth time when the platform
+# reports one, for the rotation/recreation checks below.
+# While _FM_STAT_BATCH holds a row for <file> (fm_status_stat_batch_load), the
+# row answers instead of a fresh exec.
+_fm_status_file_stat() {  # <file>
+  local f=$1 fields
+  _FM_STAT_IDENT=
+  _FM_STAT_SIZE=
+  _FM_STAT_MTIME=
+  case "$_FM_STAT_BATCH" in
+    *$'\n'"$f"$'\t'*)
+      fields=${_FM_STAT_BATCH#*$'\n'"$f"$'\t'}
+      fields=${fields%%$'\n'*}
+      _fm_status_stat_fields "$fields"
+      return
+      ;;
+  esac
+  if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
+    fields=$(LC_ALL=C /usr/bin/stat -f '%z|%m|%d:%i|%B|%FB' "$f" 2>/dev/null) || return 1
+  elif ! fields=$(LC_ALL=C stat -c '%s|%Y|%d:%i|%W|%w' "$f" 2>/dev/null); then
+    # A stat without birth-time fields still yields the weak identity.
+    fields=$(LC_ALL=C stat -c '%s|%Y|%d:%i' "$f" 2>/dev/null) || return 1
+    fields="$fields|0|"
+  fi
+  _fm_status_stat_fields "$fields"
+}
+
+# fm_status_stat_batch_load <state>: one stat exec over every task status log,
+# held in _FM_STAT_BATCH until fm_status_stat_batch_clear. A drain reads each
+# log's facts several times under the status-presentation lock, which also
+# serializes retiring and recreating a log, so the rows stay that log's
+# identity for the hold; bytes appended meanwhile are read by the next drain.
+# A log the batch could not stat keeps the per-file exec.
+fm_status_stat_batch_load() {  # <state>
+  local state=$1 out
+  _FM_STAT_BATCH=
+  set -- "$state"/*.status
+  [ -e "$1" ] || return 0
+  if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
+    out=$(LC_ALL=C /usr/bin/stat -f "%N"$'\t''%z|%m|%d:%i|%B|%FB' -- "$@" 2>/dev/null)
+  else
+    out=$(LC_ALL=C stat -c "%n"$'\t''%s|%Y|%d:%i|%W|%w' -- "$@" 2>/dev/null)
+  fi
+  _FM_STAT_BATCH=$'\n'"$out"$'\n'
+}
+
+fm_status_stat_batch_clear() {
+  _FM_STAT_BATCH=
+}
+_FM_STAT_BATCH=
+
+_fm_status_stat_fields() {  # <size|mtime|dev:ino|birth-epoch|birth>
+  local fields=$1 epoch birth ident
+  _FM_STAT_SIZE=${fields%%|*}; fields=${fields#*|}
+  _FM_STAT_MTIME=${fields%%|*}; fields=${fields#*|}
+  ident=${fields%%|*}; fields=${fields#*|}
+  epoch=${fields%%|*}
+  birth=${fields#*|}
+  [ "$epoch" != 0 ] || birth=''
+  case "$ident$birth" in *$'\t'*|*$'\n'*|*'|'*|'') return 1 ;; esac
+  if [ -n "$birth" ]; then _FM_STAT_IDENT="strong:$ident:$birth"; else _FM_STAT_IDENT="weak:$ident"; fi
+}
+
+# _fm_status_file_facts <file>: _FM_STAT_IDENT, _FM_STAT_SIZE, and
+# _FM_STAT_MTIME together, honouring the per-field test readers when either is
+# set.
+_fm_status_file_facts() {  # <file>
+  if [ -n "${FM_STATUS_IDENTITY_READER:-}${FM_STATUS_SIZE_READER:-}" ]; then
+    _FM_STAT_IDENT=$(_fm_open_decisions_file_ident "$1") || return 1
+    _FM_STAT_SIZE=$(_fm_status_file_size "$1") || return 1
+    _FM_STAT_MTIME=$(_fm_status_file_mtime "$1") || return 1
+    return 0
+  fi
+  _fm_status_file_stat "$1"
+}
+
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
-  local f=$1 epoch birth ident
   if [ -n "${FM_STATUS_IDENTITY_READER:-}" ]; then
-    "$FM_STATUS_IDENTITY_READER" "$f"
+    "$FM_STATUS_IDENTITY_READER" "$1"
     return
   fi
-  if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
-    ident=$(LC_ALL=C /usr/bin/stat -f '%d:%i' "$f" 2>/dev/null) || return 1
-    epoch=$(LC_ALL=C /usr/bin/stat -f '%B' "$f" 2>/dev/null) || epoch=0
-    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C /usr/bin/stat -f '%FB' "$f" 2>/dev/null) || birth=''; else birth=''; fi
-  else
-    ident=$(LC_ALL=C stat -c '%d:%i' "$f" 2>/dev/null) || return 1
-    epoch=$(LC_ALL=C stat -c '%W' "$f" 2>/dev/null) || epoch=0
-    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C stat -c '%w' "$f" 2>/dev/null) || birth=''; else birth=''; fi
-  fi
-  case "$ident$birth" in *$'\t'*|*$'\n'*|'') return 1 ;; esac
-  if [ -n "$birth" ]; then printf 'strong:%s:%s' "$ident" "$birth"; else printf 'weak:%s' "$ident"; fi
+  _fm_status_file_stat "$1" || return 1
+  printf '%s' "$_FM_STAT_IDENT"
 }
 
 _fm_status_file_size() {  # <status-file>
@@ -1223,6 +1295,9 @@ _fm_status_file_size() {  # <status-file>
     "$FM_STATUS_SIZE_READER" "$f"
     return
   fi
+  case "$_FM_STAT_BATCH" in
+    *$'\n'"$f"$'\t'*) _fm_status_file_stat "$f" && printf '%s' "$_FM_STAT_SIZE"; return ;;
+  esac
   if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
     LC_ALL=C /usr/bin/stat -f '%z' "$f" 2>/dev/null
   else
@@ -1321,11 +1396,10 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
   # report the already-trusted persisted set unchanged rather than risking a
   # silent invalidation that would wipe it.
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$trusted_open"; return 0; }
+  _fm_status_file_facts "$f" || { printf '%s' "$trusted_open"; return 0; }
+  cur_ident=$_FM_STAT_IDENT
   [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
-  actual_size=$(_fm_status_file_size "$f") \
-    || { printf '%s' "$trusted_open"; return 0; }
-  actual_size=${actual_size//[[:space:]]/}
+  actual_size=${_FM_STAT_SIZE//[[:space:]]/}
   case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
   if [ -n "$captured_end" ]; then
     case "$captured_end" in
@@ -1413,10 +1487,10 @@ status_presentation_snapshot() {  # <state>
     [ -e "$f" ] || continue
     [ "$f" = "$exclude" ] && continue
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
-    task=$(basename "$f"); task="${task%.status}"
-    size=$(_fm_status_file_size "$f") || return 1
-    size=${size//[[:space:]]/}
-    ident=$(_fm_open_decisions_file_ident "$f") || return 1
+    fm_basename_to task "$f"; task="${task%.status}"
+    _fm_status_file_facts "$f" || return 1
+    size=${_FM_STAT_SIZE//[[:space:]]/}
+    ident=$_FM_STAT_IDENT
     case "$size" in ''|*[!0-9]*) return 1 ;; esac
     [ -n "$ident" ] || return 1
     printf '%s\t%s\t%s\n' "$task" "$size" "$ident" || return 1
@@ -1444,10 +1518,10 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   case "$endpoint" in ''|*[!0-9]*|0) return 1 ;; esac
   [ -n "$expected_ident" ] || return 1
 
-  before_mtime=$(_fm_status_file_mtime "$f") || return 1
-  before_size=$(_fm_status_file_size "$f") || return 1
-  before_size=${before_size//[[:space:]]/}
-  before_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  _fm_status_file_facts "$f" || return 1
+  before_mtime=$_FM_STAT_MTIME
+  before_size=${_FM_STAT_SIZE//[[:space:]]/}
+  before_ident=$_FM_STAT_IDENT
   case "$before_mtime:$before_size" in *[!0-9:]*) return 1 ;; esac
   [ "$before_size" -eq "$endpoint" ] && [ "$before_ident" = "$expected_ident" ] || return 1
 
@@ -1481,10 +1555,10 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   case "$event_endpoint" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$line" ] || return 1
 
-  after_mtime=$(_fm_status_file_mtime "$f") || return 1
-  after_size=$(_fm_status_file_size "$f") || return 1
-  after_size=${after_size//[[:space:]]/}
-  after_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  _FM_STAT_BATCH='' _fm_status_file_facts "$f" || return 1
+  after_mtime=$_FM_STAT_MTIME
+  after_size=${_FM_STAT_SIZE//[[:space:]]/}
+  after_ident=$_FM_STAT_IDENT
   case "$after_mtime:$after_size" in *[!0-9:]*) return 1 ;; esac
   [ "$after_mtime" = "$before_mtime" ] \
     && [ "$after_size" -eq "$endpoint" ] \
@@ -1533,9 +1607,9 @@ EOF
     offset=0
     ident=$(_fm_open_decisions_file_ident "$f") || return 1
   fi
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || return 1
-  size=$(_fm_status_file_size "$f") || return 1
-  size=${size//[[:space:]]/}
+  _fm_status_file_facts "$f" || return 1
+  cur_ident=$_FM_STAT_IDENT
+  size=${_FM_STAT_SIZE//[[:space:]]/}
   case "$size:$offset" in *[!0-9:]*) return 1 ;; esac
   if [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then offset=0; fi
   printf '%s' "$offset"
@@ -1557,9 +1631,9 @@ status_outcome_backstop_cursor_offset() {  # <status-file>
     case "$presented:$row_backstop" in *[!0-9:]*) return 1 ;; esac
     [ -n "$presented" ] && [ -n "$ident" ] || return 1
     if [ "$row_task" = "$task" ]; then
-      current=$(_fm_open_decisions_file_ident "$f") || return 1
-      size=$(_fm_status_file_size "$f") || return 1
-      size=${size//[[:space:]]/}
+      _fm_status_file_facts "$f" || return 1
+      current=$_FM_STAT_IDENT
+      size=${_FM_STAT_SIZE//[[:space:]]/}
       case "$size" in ''|*[!0-9]*) return 1 ;; esac
       [ "$ident" = "$current" ] || { printf '0'; return 0; }
       backstop=${row_backstop:-0}
@@ -1794,7 +1868,12 @@ $fully_presented
     if [ "$safe" = false ]; then
       f="$state/$task.status"
       offset=$(status_presentation_cursor_offset "$f") || return 1
-      lines=$(status_new_lines_since_cursor "$f" "$endpoint") || return 1
+      # A cursor already at the captured endpoint has no unread span; the
+      # commit still re-checks the log's identity and size.
+      lines=
+      if [ "$offset" != "$endpoint" ]; then
+        lines=$(status_new_lines_since_cursor "$f" "$endpoint") || return 1
+      fi
       # Once any informational line in this span is presented fleet-wide, the
       # contiguous cursor may advance through the captured endpoint. Routine
       # lines remain unacknowledged only while they are the sole unread content,
@@ -1819,6 +1898,8 @@ EOF
 
 status_commit_presentation_snapshot() {  # <state> <snapshot>
   local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp backstop acknowledged_task acknowledged_endpoint
+  # The commit's identity and size checks read each log fresh.
+  local _FM_STAT_BATCH=
   tmp="$state/.status-presentation-cursor.tmp.$$"
   : > "$tmp" || return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
@@ -1827,9 +1908,9 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
     [ -n "$ident" ] || { rm -f "$tmp"; return 1; }
     f="$state/$task.status"
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || { rm -f "$tmp"; return 1; }
-    cur_ident=$(_fm_open_decisions_file_ident "$f") || { rm -f "$tmp"; return 1; }
-    size=$(_fm_status_file_size "$f") || { rm -f "$tmp"; return 1; }
-    size=${size//[[:space:]]/}
+    _fm_status_file_facts "$f" || { rm -f "$tmp"; return 1; }
+    cur_ident=$_FM_STAT_IDENT
+    size=${_FM_STAT_SIZE//[[:space:]]/}
     case "$size" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
     [ "$cur_ident" = "$ident" ] && [ "$endpoint" -le "$size" ] \
       || { rm -f "$tmp"; return 1; }
@@ -1937,10 +2018,10 @@ status_open_decisions_cursor_offset() {  # <status-file>
       return 1
     fi
   fi
-  cur_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  _fm_status_file_facts "$f" || return 1
+  cur_ident=$_FM_STAT_IDENT
   [ -n "$cur_ident" ] || return 1
-  size=$(_fm_status_file_size "$f") || return 1
-  size=${size//[[:space:]]/}
+  size=${_FM_STAT_SIZE//[[:space:]]/}
   case "$size" in ''|*[!0-9]*) return 1 ;; esac
   if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
     offset=0
@@ -2365,9 +2446,9 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
   local line verb key origins='' folded=0 rc=1 failed=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
-  ident=$(_fm_open_decisions_file_ident "$f") || return 2
-  size=$(_fm_status_file_size "$f") || return 2
-  size=${size//[[:space:]]/}
+  _fm_status_file_facts "$f" || return 2
+  ident=$_FM_STAT_IDENT
+  size=${_FM_STAT_SIZE//[[:space:]]/}
   case "$size" in ''|*[!0-9]*) return 2 ;; esac
   case "$start" in ''|*[!0-9]*) start=0 ;; esac
   [ "$start" -le "$size" ] || start=0

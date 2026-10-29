@@ -794,6 +794,7 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     fi
     return 1
   fi
+  fm_status_stat_batch_load "$STATE"
   snapshot=$(status_presentation_snapshot "$STATE") || {
     printf 'STATUS PRESENTATION INCOMPLETE: status snapshot could not be read.\n'
     rc=1
@@ -806,6 +807,7 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     fi
   fi
   if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  fm_status_stat_batch_clear
   fm_lock_release "$lock"
   return "$rc"
 }
