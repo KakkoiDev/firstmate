@@ -173,6 +173,7 @@ test_tracked_registration() {
   local entry
   entry=$(jq -c '[.hooks.Stop[].hooks[] | select(.command | contains("fm-jev-stop-check.sh"))]' "$ROOT/.claude/settings.json")
   assert_equals 1 "$(jq 'length' <<<"$entry")" "one tracked Stop entry runs the check"
+  # shellcheck disable=SC2016 # the literal command text is the expected value.
   assert_equals '[ -z "${GROK_AGENT:-}${GROK_HOOK_EVENT:-}" ] || exit 0; exec "$CLAUDE_PROJECT_DIR"/bin/fm-jev-stop-check.sh --claude' \
     "$(jq -r '.[0].command' <<<"$entry")" "the tracked command"
   pass "the tracked settings register the check on Stop"

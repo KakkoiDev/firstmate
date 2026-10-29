@@ -212,6 +212,7 @@ test_slack_send() {
 
 test_bash_gate_switch() {
   local c
+  # shellcheck disable=SC2016 # the literal command text is the expected value.
   for c in 'FM_JEV_GATE=off bin/fm-spawn.sh t1 projects/p' 'export FM_JEV_GATE=off; bin/fm-send.sh t1 hi' \
     'env FM_JEV_GATE=0 "$PWD"/bin/fm-control.sh t1 interrupt'; do
     hook "$(jq -cn --arg c "$c" '{tool_name: "Bash", tool_input: {command: $c}}')"
@@ -228,6 +229,7 @@ test_tracked_registration() {
   local entry matcher tool
   entry=$(jq -c '[.hooks.PreToolUse[] | select(any(.hooks[]; .command | contains("fm-jev-pretool-check.sh")))]' "$ROOT/.claude/settings.json")
   assert_equals 1 "$(jq 'length' <<<"$entry")" "one tracked PreToolUse group runs the guard"
+  # shellcheck disable=SC2016 # the literal command text is the expected value.
   assert_equals '[ -z "${GROK_AGENT:-}${GROK_HOOK_EVENT:-}" ] || exit 0; exec "$CLAUDE_PROJECT_DIR"/bin/fm-jev-pretool-check.sh --claude' \
     "$(jq -r '.[0].hooks[0].command' <<<"$entry")" "the tracked command"
   matcher=$(jq -r '.[0].matcher' <<<"$entry")
