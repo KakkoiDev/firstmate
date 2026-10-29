@@ -33,6 +33,11 @@
 #     matching status (the plugin writes it), or when a bridge call for it was
 #     recorded this turn: a link of that task to that todo, or for [!] a block
 #     record for the task.
+#     A todo marked [x] while its task is not done is a premature done mark:
+#     the bridge's status never excuses it, only a link of that task to that
+#     todo recorded at or after the latest "-> done" status row for the todo
+#     under the notes file's Logs heading, whose actor the block names. A task
+#     linked only by raw todo text is checked against the id in that text.
 #
 # Output:
 #   ALLOW - exit 0, no output.
@@ -67,6 +72,7 @@ ITEM_ID = re.compile(r'<!-- id:([a-z0-9]+) -->')
 HEADING = re.compile(r'^(#+)\s+(.*?)\s*$')
 ITEM = re.compile(r'^\s*[-*] \[(.)\] (.*?)\s*$')
 LABEL = re.compile(r'^\*\*(.+?)\*\*: (.*)$')
+DONE_LOG = re.compile(r'^- (\S+) \| ([^|]+?) \| status \| id:([a-z0-9]+) .*\| [^|]*-> done\s*(?:\||$)')
 MARK = {'done': 'x', 'blocked': '!', 'in-progress': '~'}
 
 
@@ -141,7 +147,7 @@ for task, r in outcomes.items():
 if not touched:
     sys.exit(0)
 
-marks = {}
+marks, done_by = {}, {}
 notes = None
 try:
     notes = json.loads(read(os.path.join(state, 'notes-keeping-active.json')) or 'null').get('file')
@@ -156,6 +162,13 @@ for line in ((read(notes) if isinstance(notes, str) else None) or '').splitlines
         elif level and len(m.group(1)) <= level:
             level = 0
         continue
+    m = DONE_LOG.match(line)
+    if m:
+        try:
+            done_by[m.group(3)] = (m.group(2), m.group(1), calendar.timegm(time.strptime(m.group(1), '%Y-%m-%dT%H:%M:%SZ')))
+        except ValueError:
+            pass
+        continue
     m = ITEM.match(line) if level else None
     if m:
         found = ITEM_ID.search(m.group(2))
@@ -167,23 +180,30 @@ bridge_status = None
 gaps = []
 for task in sorted(touched):
     expected, reason, meta = touched[task]
-    owned = [r for r in links.values() if r['task'] == task and isinstance(r.get('id'), str)]
+    owned = [(r['id'], r.get('at')) for r in links.values() if r['task'] == task and isinstance(r.get('id'), str)]
     if not owned:
+        raw = [(m.group(1), r.get('at')) for r in links.values() if r['task'] == task for m in [ITEM_ID.search(r.get('text') or '')] if m]
         if meta is None or not re.search(r'^no_todo=\S', meta, re.M):
-            raw = [m.group(1) for r in links.values() if r['task'] == task for m in [ITEM_ID.search(r.get('text') or '')] if m]
-            todo = f'id:{raw[0]}' if raw else 'id:<todo id>'
+            todo = f'id:{raw[0][0]}' if raw else 'id:<todo id>'
             gaps.append(f'{task}: no todo link and no recorded no-todo reason; link it to the todo it works on: '
                         f'{bridge} link {task} {todo} --by firstmate (bin/fm-todo-guard.sh resolve "<todo text>" finds it), '
                         f'or add no_todo=<reason> to state/{task}.meta when it works on none')
-        continue
+        owned = raw
     if expected is None:
         continue
-    for r in owned:
-        item = f"id:{r['id']}"
+    for todo, at in owned:
+        item = f'id:{todo}'
         mark = marks.get(item)
         if mark is None or mark == '-' or mark == MARK[expected]:
             continue
-        if isinstance(r.get('at'), int) and r['at'] >= start:
+        if mark == 'x':
+            actor, when, marked = done_by.get(todo, ('an unknown actor', 'an unlogged time', start))
+            if isinstance(at, int) and at >= marked:
+                continue
+            gaps.append(f'{task}: todo {todo} reads [x] but the task is still {expected}: the done mark is premature '
+                        f'(set by {actor} at {when} in # Logs); run: {bridge} link {task} {item} --by firstmate')
+            continue
+        if isinstance(at, int) and at >= start:
             continue
         if expected == 'blocked' and any(b['task'] == task and isinstance(b.get('at'), int) and b['at'] >= start for b in blocks):
             continue
@@ -200,7 +220,7 @@ for task in sorted(touched):
             continue
         command = (f'{bridge} block {task} --reason {shlex.quote(reason or "blocked")} --by firstmate' if expected == 'blocked'
                    else f'{bridge} link {task} {item} --by firstmate')
-        gaps.append(f'{task}: todo {r["id"]} reads [{mark}] but the task is {expected}, which is [{MARK[expected]}]; run: {command}')
+        gaps.append(f'{task}: todo {todo} reads [{mark}] but the task is {expected}, which is [{MARK[expected]}]; run: {command}')
 
 if gaps:
     print('[todo-status] tasks touched this turn are not reflected in the notes-keeping todo list:', file=sys.stderr)

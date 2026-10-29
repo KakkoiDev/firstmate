@@ -206,6 +206,33 @@ test_merged_not_cleaned_up() {
   pass "a task whose PR merged but is not cleaned up needs its todo at [x]"
 }
 
+test_premature_done() {
+  local marked
+  reset
+  task token-economizer fresh
+  link token-economizer "$NOW"
+  bridge_says token-economizer '"in-progress"'
+  notes x
+  marked=$(date -u -r "$((NOW + 2))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$((NOW + 2))" +%Y-%m-%dT%H:%M:%SZ)
+  printf '\n# Logs\n\n- %s | laya | status | id:0of2pk9 PR review report | in-progress -> done | finished 0.38\n' "$marked" >> "$NOTES"
+  stop
+  expect_block "a todo marked [x] while its task is in flight, though the bridge reports in-progress" "premature"
+  assert_contains "$err" "laya" "the block names the actor from the Logs row"
+  assert_contains "$err" "$BRIDGE link token-economizer id:0of2pk9 --by firstmate" "the block names the bridge command"
+  link token-economizer "$((NOW + 3))"
+  stop
+  expect_allow "a bridge call made after the done mark"
+  reset
+  task token-economizer fresh
+  printf '{"task": "token-economizer", "key": "jp/en report on pr review system <!-- id:0of2pk9 -->", "text": "JP/EN report on PR review system <!-- id:0of2pk9 -->", "at": %s}\n' "$NOW" > "$STATE/notes-todo-links.jsonl"
+  notes x
+  printf '\n# Logs\n\n- %s | laya | status | id:0of2pk9 PR review report | in-progress -> done | finished 0.38\n' "$marked" >> "$NOTES"
+  stop
+  expect_block "a raw-text link whose todo reads [x] while the task is in flight" "premature"
+  assert_contains "$err" "token-economizer: no todo link" "the raw-text link is still reported unlinked"
+  pass "a todo marked done while its task is still in flight is a premature done mark"
+}
+
 test_tracked_registration() {
   local entry
   entry=$(jq -c '[.hooks.Stop[].hooks[] | select(.command | contains("fm-todo-stop-check.sh"))]' "$ROOT/.claude/settings.json")
@@ -224,4 +251,5 @@ test_blocked_mark
 test_finished_mark
 test_raw_text_link_is_unlinked
 test_merged_not_cleaned_up
+test_premature_done
 test_tracked_registration
