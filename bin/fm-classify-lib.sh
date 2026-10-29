@@ -1213,14 +1213,10 @@ _fm_status_file_stat() {  # <file>
   _FM_STAT_IDENT=
   _FM_STAT_SIZE=
   _FM_STAT_MTIME=
-  case "$_FM_STAT_BATCH" in
-    *$'\n'"$f"$'\t'*)
-      fields=${_FM_STAT_BATCH#*$'\n'"$f"$'\t'}
-      fields=${fields%%$'\n'*}
-      _fm_status_stat_fields "$fields"
-      return
-      ;;
-  esac
+  if _fm_status_stat_batch_row "$f"; then
+    _fm_status_stat_fields "$_FM_STAT_BATCH_ROW"
+    return
+  fi
   if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
     fields=$(LC_ALL=C /usr/bin/stat -f '%z|%m|%d:%i|%B|%FB' "$f" 2>/dev/null) || return 1
   elif ! fields=$(LC_ALL=C stat -c '%s|%Y|%d:%i|%W|%w' "$f" 2>/dev/null); then
@@ -1236,10 +1232,15 @@ _fm_status_file_stat() {  # <file>
 # log's facts several times under the status-presentation lock, which also
 # serializes retiring and recreating a log, so the rows stay that log's
 # identity for the hold; bytes appended meanwhile are read by the next drain.
-# A log the batch could not stat keeps the per-file exec.
+# A log the batch could not stat keeps the per-file exec. Rows are held as
+# parallel name and field arrays, because matching a pattern against one string
+# holding every row cost seconds per lookup at fleet size. _FM_STAT_BATCH is the
+# on/off switch, so a caller blanks it to force fresh reads.
 fm_status_stat_batch_load() {  # <state>
-  local state=$1 out
+  local state=$1 out line n=0
   _FM_STAT_BATCH=
+  _FM_STAT_BATCH_NAMES=()
+  _FM_STAT_BATCH_FIELDS=()
   set -- "$state"/*.status
   [ -e "$1" ] || return 0
   if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
@@ -1247,13 +1248,41 @@ fm_status_stat_batch_load() {  # <state>
   else
     out=$(LC_ALL=C stat -c "%n"$'\t''%s|%Y|%d:%i|%W|%w' -- "$@" 2>/dev/null)
   fi
-  _FM_STAT_BATCH=$'\n'"$out"$'\n'
+  while IFS= read -r line; do
+    case "$line" in *$'\t'*) ;; *) continue ;; esac
+    _FM_STAT_BATCH_NAMES[n]=${line%%$'\t'*}
+    _FM_STAT_BATCH_FIELDS[n]=${line#*$'\t'}
+    n=$((n + 1))
+  done <<EOF
+$out
+EOF
+  _FM_STAT_BATCH=1
+}
+
+# _fm_status_stat_batch_row <file>: 0 with the batch row in _FM_STAT_BATCH_ROW
+# while a batch is loaded and holds <file>.
+_fm_status_stat_batch_row() {  # <file>
+  local i=0 n
+  [ -n "$_FM_STAT_BATCH" ] || return 1
+  n=${#_FM_STAT_BATCH_NAMES[@]}
+  while [ "$i" -lt "$n" ]; do
+    if [ "${_FM_STAT_BATCH_NAMES[i]}" = "$1" ]; then
+      _FM_STAT_BATCH_ROW=${_FM_STAT_BATCH_FIELDS[i]}
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
 }
 
 fm_status_stat_batch_clear() {
   _FM_STAT_BATCH=
+  _FM_STAT_BATCH_NAMES=()
+  _FM_STAT_BATCH_FIELDS=()
 }
 _FM_STAT_BATCH=
+_FM_STAT_BATCH_NAMES=()
+_FM_STAT_BATCH_FIELDS=()
 
 _fm_status_stat_fields() {  # <size|mtime|dev:ino|birth-epoch|birth>
   local fields=$1 epoch birth ident
@@ -1295,9 +1324,10 @@ _fm_status_file_size() {  # <status-file>
     "$FM_STATUS_SIZE_READER" "$f"
     return
   fi
-  case "$_FM_STAT_BATCH" in
-    *$'\n'"$f"$'\t'*) _fm_status_file_stat "$f" && printf '%s' "$_FM_STAT_SIZE"; return ;;
-  esac
+  if _fm_status_stat_batch_row "$f"; then
+    _fm_status_file_stat "$f" && printf '%s' "$_FM_STAT_SIZE"
+    return
+  fi
   if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
     LC_ALL=C /usr/bin/stat -f '%z' "$f" 2>/dev/null
   else

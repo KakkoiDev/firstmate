@@ -88,6 +88,40 @@ test_drain_row_reads_do_not_launch_subshells() {
   pass "drain over $TASKS tasks launches $count tab-separator subshells"
 }
 
+# The batched stat answers every per-log read during a drain, so a lookup must
+# not cost more than the stat it replaces. A home of about 150 logs under a long
+# state path is the measured live shape; 150 lookups against it once took over
+# five minutes. The bound is wall time, so it is generous: a stat exec per lookup
+# on a slow-launch host stays well inside it.
+test_stat_batch_lookup_scales_to_a_live_fleet() {
+  local dir state n=150 i start elapsed
+  dir=$(make_case batch-lookup)
+  state="$dir/state/$(printf 'long-state-path-segment-%s/' 1 2 3 4 5)"
+  mkdir -p "$state"
+  i=1
+  while [ "$i" -le "$n" ]; do
+    printf 'working [at=1700000000]: task %s\n' "$i" > "$state/fleet-task-number-$i.status"
+    i=$((i + 1))
+  done
+  start=$(date +%s)
+  # shellcheck disable=SC2016  # expanded by the child bash
+  bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    fm_status_stat_batch_load "$2"
+    i=1
+    while [ "$i" -le "$3" ]; do
+      _fm_status_file_stat "$2/fleet-task-number-$i.status" || exit 1
+      [ "$_FM_STAT_SIZE" -gt 0 ] || exit 1
+      i=$((i + 1))
+    done
+  ' _ "$ROOT" "${state%/}" "$n" || fail "batched stat lookup failed for a $n-log fleet"
+  elapsed=$(( $(date +%s) - start ))
+  [ "$elapsed" -le 10 ] \
+    || fail "$n batched stat lookups over a $n-log fleet took ${elapsed}s, above 10s"
+  pass "$n batched stat lookups over a $n-log fleet took ${elapsed}s"
+}
+
 test_drain_stat_launches_do_not_multiply_per_field
 test_quiet_drain_stat_launches_do_not_multiply_per_field
 test_drain_row_reads_do_not_launch_subshells
+test_stat_batch_lookup_scales_to_a_live_fleet
