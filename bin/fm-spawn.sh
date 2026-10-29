@@ -32,7 +32,9 @@
 #   Another Treehouse slot allocation or return holding the project lock is
 #   waited out for FM_SPAWN_PROJECT_LOCK_WAIT seconds (default 120; 0 refuses at
 #   once), and `treehouse get` gets FM_SPAWN_WORKTREE_WAIT seconds (default 180)
-#   to enter an isolated worktree before the spawn refuses.
+#   to enter an isolated worktree before the spawn refuses; a `treehouse get`
+#   that exits instead (a full pool, any error) is refused at once, quoting
+#   what it printed.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -4817,6 +4819,14 @@ spawn_current_path() { # <target>
   cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   esac
 }
+spawn_capture() { # <target> <lines>
+  case "$BACKEND" in
+  tmux) fm_backend_tmux_capture "$1" "$2" ;;
+  herdr) fm_backend_herdr_capture "$1" "$2" ;;
+  zellij) fm_backend_zellij_capture "$1" "$2" "$W" ;;
+  cmux) fm_backend_cmux_capture "$1" "$2" "$W" ;;
+  esac
+}
 spawn_send_literal() { # <target> <text>
   case "$BACKEND" in
   tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -5298,7 +5308,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-pool-reclaim.sh" --apply --lock-held "$PROJ_ABS" 2>/dev/null \
     | sed -nE 's/^(released|detached) /pool slot &/p' >&2 || true
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # A successful `treehouse get` stays in its worktree subshell, so the echo
+  # after it runs only once treehouse has exited without one - a full pool, a
+  # refused slot, any error. The empty '' splits the typed text, so the pane's
+  # echo of the command line never matches the marker the echo prints.
+  spawn_treehouse_exit_marker="fm-spawn: treehouse get exited ($ID)"
+  spawn_send_text_line "$WT_TARGET" "treehouse get; echo 'fm-spawn: treehouse get ''exited ($ID)'"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -5332,6 +5347,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # misconfiguration would need machinery this path does not want - so the
   # refusal has to be self-explaining instead: carry the last path seen and the
   # reason it was rejected, and report both at the deadline.
+  # The one terminal case told apart is treehouse having exited: its exit
+  # marker in the pane refuses at once, quoting what treehouse printed.
   candidate=""
   last_seen=""
   last_reason="the pane reported no path"
@@ -5350,6 +5367,16 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     else
       candidate=""
       [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
+      if spawn_pane=$(spawn_capture "$WT_TARGET" 60 2>/dev/null) &&
+        spawn_treehouse_said=$(printf '%s\n' "$spawn_pane" | awk -v marker="$spawn_treehouse_exit_marker" '
+          { sub(/[ \t\r]+$/, "") }
+          index($0, "treehouse get; echo") { said = ""; next }
+          $0 == marker { print said; found = 1; exit }
+          $0 != "" { said = (said == "" ? $0 : said " | " $0) }
+          END { exit !found }'); then
+        echo "error: treehouse get exited without entering a worktree (treehouse said: '${spawn_treehouse_said:-nothing}'; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
+        exit 1
+      fi
     fi
     sleep 1
   done

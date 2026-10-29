@@ -253,6 +253,91 @@ test_unborn_head_project_is_refused_at_once() {
   pass "a project with an unborn HEAD is refused at once with its cause named"
 }
 
+# make_exiting_treehouse_case <name> <id> builds a fake tmux whose pane really
+# runs the `treehouse get` line it is sent, through a shell in the project, and
+# whose capture returns what that pane printed, plus a stub treehouse that
+# exits at once with the pool-full error a live spawn met. The pane never leaves
+# the project, so only noticing the exit can end the wait early.
+make_exiting_treehouse_case() {
+  local name=$1 id=$2 case_dir home proj fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+window_file="${FM_FAKE_PANE_LOG:?FM_FAKE_PANE_LOG unset}.window"
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
+esac
+case "${1:-}" in
+  capture-pane) [ ! -f "$FM_FAKE_PANE_LOG" ] || cat "$FM_FAKE_PANE_LOG"; exit 0 ;;
+  send-keys)
+    if [ "$#" -eq 5 ] && [ "$5" = Enter ]; then
+      printf '$ %s\n' "$4" >> "$FM_FAKE_PANE_LOG"
+      case "$4" in
+        "treehouse get"*) (cd "$FM_FAKE_PANE_PATH" && bash -c "$4") >> "$FM_FAKE_PANE_LOG" 2>&1 ;;
+      esac
+    fi
+    exit 0 ;;
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) [ ! -s "$window_file" ] || cat "$window_file"; exit 0 ;;
+  new-window)
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    printf '%s\n' "$name" > "$window_file"
+    exit 0 ;;
+  kill-window) : > "$window_file"; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = get ]; then
+  echo "Error: all 24 worktrees are in use or dirty (max_trees = 24)" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tmux" "$fakebin/treehouse"
+  fm_test_spawn_home "$home" codex
+  fm_git_init_commit "$proj"
+  fm_test_spawn_brief "$home" "$id" "Exercise treehouse exit detection for $id."
+  printf '%s\n' "$case_dir|$home|$proj|$fakebin"
+}
+
+test_treehouse_get_that_exits_fails_fast_with_its_error() {
+  local rec id case_dir out status started elapsed
+  id=settle-treehouse-exits-z6
+  rec=$(make_exiting_treehouse_case settle-treehouse-exits "$id")
+  IFS='|' read -r case_dir HOME_DIR PROJ_DIR FAKEBIN_DIR <<EOF
+$rec
+EOF
+
+  started=$SECONDS
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_SPAWN_WORKTREE_WAIT=40 \
+    FM_FAKE_PANE_PATH="$PROJ_DIR" FM_FAKE_PANE_LOG="$case_dir/pane.log" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  elapsed=$((SECONDS - started))
+  [ "$status" -ne 0 ] || fail "spawn succeeded although treehouse get exited"$'\n'"$out"
+  assert_contains "$out" "all 24 worktrees are in use or dirty (max_trees = 24)" \
+    "the refusal did not quote treehouse's own error"$'\n'"$out"
+  [ "$elapsed" -lt 15 ] || fail "refusal took ${elapsed}s of a 40s wait instead of failing when treehouse exited"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "a treehouse get that exits fails the spawn at once, quoting its error"
+}
+
+test_treehouse_get_that_exits_fails_fast_with_its_error
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
