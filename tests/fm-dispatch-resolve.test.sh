@@ -27,7 +27,7 @@ mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
 for command_name in bash cat chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
 done
-unset DD_API_KEY DD_SITE
+unset DD_API_KEY DD_SITE CLAUDE_CODE_SESSION_ID FM_JEV_TRANSCRIPT
 
 cat > "$BRIEF" <<'MD'
 # Task
@@ -722,6 +722,34 @@ FM_TASK_ID=t9 TYPESAFE_API_KEY=$KEY run code out err "$SCAFFOLD_BRIEF"
 assert_not_contains "$(jq -r .state.task.brief "$LOG/body")" "The operator's words" "a resolve inside a task worker sends no primary words"
 rm -f "$HOME_DIR/state/jev-turn-words.jsonl"
 pass "the operator's verbatim words for the turn lead the task text a resolve sends"
+
+# --- the turn slice rides beside the task as state.session ---------------------
+SLICE_T="$TMP_ROOT/slice.jsonl"
+{
+  jq -cn '{type: "user", timestamp: "2026-10-29T01:00:00Z", message: {role: "user", content: "SLICE-OPERATOR-MARKER"}}'
+  jq -cn '{type: "assistant", message: {id: "m1", content: [{type: "text", text: "SLICE-FIRSTMATE-MARKER with token=qwertyuiopasdfgh1234"}]}}'
+  jq -cn '{type: "assistant", message: {id: "m2", content: [{type: "text", text: "RUNNING-CALL-MARKER"}, {type: "tool_use", id: "c2", name: "Bash", input: {command: "bin/fm-dispatch-resolve.sh brief.md"}}]}}'
+} > "$SLICE_T"
+reset_log
+FM_JEV_TRANSCRIPT=$SLICE_T TYPESAFE_API_KEY=$KEY run code out err "$SCAFFOLD_BRIEF"
+expect_code 0 "$code" "a resolve with a session transcript"
+session=$(jq -r .state.session "$LOG/body")
+assert_contains "$session" $'Operator at 2026-10-29T01:00:00Z:\nSLICE-OPERATOR-MARKER' "the session starts at the operator's latest message"
+assert_contains "$session" 'SLICE-FIRSTMATE-MARKER with token=[redacted]' "the session is redacted"
+assert_not_contains "$(cat "$LOG/body")" 'qwertyuiopasdfgh1234' "the session never carries a credential"
+assert_not_contains "$session" 'RUNNING-CALL-MARKER' "the message running the resolve stays out"
+assert_not_contains "$(jq -r .state.task.brief "$LOG/body")" 'SLICE-OPERATOR-MARKER' "the task text stays the brief alone"
+reset_curl_log
+{
+  jq -cn '{type: "user", message: {role: "user", content: [{type: "tool_result", tool_use_id: "c2", content: "LATER-RESULT-MARKER"}]}}'
+  jq -cn '{type: "assistant", message: {id: "m3", content: [{type: "tool_use", id: "c3", name: "Bash", input: {command: "bin/fm-dispatch-resolve.sh brief.md"}}]}}'
+} >> "$SLICE_T"
+FM_JEV_TRANSCRIPT=$SLICE_T TYPESAFE_API_KEY=$KEY run code out err "$SCAFFOLD_BRIEF"
+assert_absent "$LOG/body" "a request differing only in its session reuses the recent answer"
+reset_curl_log
+FM_TASK_ID=t9 FM_JEV_TRANSCRIPT=$SLICE_T TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+assert_equals null "$(jq -c .state.session "$LOG/body")" "a resolve inside a task worker sends no session"
+pass "the turn slice rides beside the task as state.session, redacted, and reuse ignores it"
 
 # --- escalate: captain approval ------------------------------------------------
 reset_log

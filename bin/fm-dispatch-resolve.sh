@@ -19,7 +19,10 @@
 #   scout brief (the whole brief when it has neither section), after the
 #   operator's words for the turn (fm_jev_turn_words in bin/fm-jev-lib.sh,
 #   then a blank line, both left out when it prints nothing), followed by the
-#   dispatch-rule standing rules (fm_jev_constraints in bin/fm-jev-lib.sh), as state and
+#   dispatch-rule standing rules (fm_jev_constraints in bin/fm-jev-lib.sh), as
+#   state.task, and the turn slice (fm_jev_turn_slice in bin/fm-jev-lib.sh,
+#   given what the task text and rules leave) as state.session when there is
+#   one, both redacted (fm_jev_redact) first, as state and
 #   ONE Choice question whose options are every rule's `when` from
 #   config/crew-dispatch.json plus one fixed generic none option. Jev returns
 #   the matched rule, a probability per option, and a confidence. Everything
@@ -74,7 +77,7 @@
 #   plus the issuing-request cost record and event (fm_jev_request_cost, issuer
 #   fm-dispatch-resolve.sh); stdout and exit status are unaffected.
 # Reuse: a request identical to one Jev answered in this home within the last
-#   REUSE_SECS (600) reuses that recorded answer, read back from its audit
+#   REUSE_SECS (600), ignoring state.session, reuses that recorded answer, read back from its audit
 #   snapshot, instead of calling again, and prints one
 #   "dispatch-resolve: reused Jev decision <id> ..." line on stderr; no new
 #   record or event is written, so a repeated resolve of one brief stays one
@@ -266,7 +269,8 @@ RESP_FILE=$(mktemp) || die "mktemp failed"
 QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
 TASK_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
 SEND_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA" "$TASK_TEXT"; die "mktemp failed"; }
-trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT"' EXIT
+SESSION_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT"; die "mktemp failed"; }
+trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT" "$SESSION_TEXT"' EXIT
 
 # One usage record per Jev call through the shared hook in bin/fm-jev-lib.sh;
 # `fm-jev.sh record-mine latest:dispatch-rule <rule>` labels it afterwards.
@@ -280,7 +284,7 @@ reuse_recent_answer() {
   since=$(( $(date +%s) - REUSE_SECS ))
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    jq -e --argjson req "$REQUEST" '(.jev_request | tojson) == ($req | tojson)' \
+    jq -e --argjson req "$REQUEST" '(.jev_request | del(.state.session) | tojson) == ($req | del(.state.session) | tojson)' \
       "$(fm_jev_audit_path "$id")" >/dev/null 2>&1 || continue
     jq -r '.jev_response' "$(fm_jev_audit_path "$id")" > "$RESP_FILE" 2>/dev/null || continue
     DECISION_ID=$id
@@ -364,13 +368,17 @@ command -v perl >/dev/null 2>&1 || never_send_off "perl not installed, so secret
 if ! { fm_jev_redact < "$TASK_TEXT" > "$RESP_FILE" && cat "$RESP_FILE" > "$TASK_TEXT" && : > "$RESP_FILE"; }; then
   die "could not redact secrets from the brief text"
 fi
-  REQUEST=$(jq -n --rawfile brief "$TASK_TEXT" --arg project "$PROJECT" --arg model "$FM_JEV_MODEL" \
+fm_jev_turn_slice $(( FM_JEV_STATE_BYTES - $(wc -c < "$TASK_TEXT") - $(wc -c < "$RULES") - 400 )) > "$SESSION_TEXT"
+if ! { fm_jev_redact < "$SESSION_TEXT" > "$RESP_FILE" && cat "$RESP_FILE" > "$SESSION_TEXT" && : > "$RESP_FILE"; }; then
+  die "could not redact secrets from the session slice"
+fi
+  REQUEST=$(jq -n --rawfile brief "$TASK_TEXT" --rawfile session "$SESSION_TEXT" --arg project "$PROJECT" --arg model "$FM_JEV_MODEL" \
     --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
     ($rules[0]) as $cfg |
     ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
     {
       model: $model,
-      state: {task: {project: $project, brief: $brief}},
+      state: ({task: {project: $project, brief: $brief}} + (if $session == "" then {} else {session: $session} end)),
       questions: {
         rule: {
           type: "choice",
