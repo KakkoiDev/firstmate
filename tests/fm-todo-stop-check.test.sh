@@ -176,6 +176,36 @@ test_finished_mark() {
   pass "a finished or torn-down task's todo must read [x] or have a bridge call this turn"
 }
 
+test_raw_text_link_is_unlinked() {
+  reset
+  task todo-blocked-status old 'todo=JP/EN report on PR review system <!-- id:0of2pk9 -->'
+  printf '{"task": "todo-blocked-status", "key": "jp/en report on pr review system <!-- id:0of2pk9 -->", "text": "JP/EN report on PR review system <!-- id:0of2pk9 -->", "at": %s}\n' "$OLD" > "$STATE/notes-todo-links.jsonl"
+  status_line todo-blocked-status "done [at=$((NOW + 1))]: PR opened"
+  stop
+  expect_block "a task linked only by raw todo text" "todo-blocked-status: no todo link"
+  assert_contains "$err" "$BRIDGE link todo-blocked-status id:0of2pk9 --by firstmate" "the block names the id link command from the raw text"
+  pass "a link by raw todo text, which the plugin cannot match to an id, counts as no link"
+}
+
+test_merged_not_cleaned_up() {
+  reset
+  task todo-blocked-status old
+  link todo-blocked-status "$OLD"
+  status_line todo-blocked-status "done [at=$OLD]: PR ready"
+  status_line todo-blocked-status "working [at=$OLD]: fixing review"
+  notes '~'
+  stop
+  expect_allow "a merged marker is absent; nothing touched this turn"
+  printf 'fm-pr-poll-merge-notified-v1\ngithub\ngithub.com\nKakkoiDev/dotfiles\n51\n' > "$STATE/todo-blocked-status.pr-poll-merge-notified"
+  stop
+  expect_block "a task whose PR merged this turn, not yet cleaned up, whose todo reads [~]" "[x]"
+  assert_contains "$err" "todo-blocked-status: todo 0of2pk9" "the block names the task and todo"
+  notes 'x'
+  stop
+  expect_allow "the todo reads [x]"
+  pass "a task whose PR merged but is not cleaned up needs its todo at [x]"
+}
+
 test_tracked_registration() {
   local entry
   entry=$(jq -c '[.hooks.Stop[].hooks[] | select(.command | contains("fm-todo-stop-check.sh"))]' "$ROOT/.claude/settings.json")
@@ -192,4 +222,6 @@ test_in_flight_mark
 test_bridge_already_reports
 test_blocked_mark
 test_finished_mark
+test_raw_text_link_is_unlinked
+test_merged_not_cleaned_up
 test_tracked_registration

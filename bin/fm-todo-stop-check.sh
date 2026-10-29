@@ -14,17 +14,20 @@
 # (bin/fm-jev-prompt-reminder.sh writes it at every prompt). A task is touched
 # this turn when state/<id>.meta was written since then (spawn), when
 # state/<id>.status has a done or blocked line stamped [at=<epoch>] since then,
-# or when state/notes-todo-links.jsonl has an outcome record for it written
-# since then (cleanup; bin/fm-todo-guard.sh record-outcome).
+# when state/<id>.pr-poll-merge-notified (its PR merged) was written since
+# then, or when state/notes-todo-links.jsonl has an outcome record for it
+# written since then (cleanup; bin/fm-todo-guard.sh record-outcome).
 #
 # For each touched task:
-#   - it needs a link in state/notes-todo-links.jsonl (the latest record per
-#     item key, an unlink dropping it, as the bridge reads them) or a
-#     no_todo=<reason> line in its meta;
+#   - it needs a link by todo id in state/notes-todo-links.jsonl (the latest
+#     record per item key, an unlink dropping it, as the bridge reads them) or
+#     a no_todo=<reason> line in its meta; a link by raw todo text does not
+#     count, since the plugin matches an item that has an id only by its id;
 #   - each linked todo found under the Todo heading of the active notes file
 #     (state/notes-keeping-active.json) must carry the task's mark: [x] once
 #     the last state line is done or the task was cleaned up with outcome done,
-#     [!] when it is blocked, [~] otherwise while its meta exists. A failed
+#     [x] once its PR merged, [!] when it is blocked, [~] otherwise while its
+#     meta exists. A failed
 #     task, a todo marked [-], and a todo not in the notes file are not checked.
 #     A lagging mark passes when the bridge's status already reports the
 #     matching status (the plugin writes it), or when a bridge call for it was
@@ -123,11 +126,14 @@ touched = {}
 for meta in glob.glob(os.path.join(state, '*.meta')):
     task = os.path.basename(meta)[:-len('.meta')]
     lines = state_lines(task)
-    fresh = os.path.getmtime(meta) >= start or any(s in ('done', 'blocked') and at is not None and at >= start for s, at, _ in lines)
+    merged = os.path.join(state, f'{task}.pr-poll-merge-notified')
+    merged = os.path.getmtime(merged) if os.path.exists(merged) else None
+    fresh = os.path.getmtime(meta) >= start or (merged is not None and merged >= start) \
+        or any(s in ('done', 'blocked') and at is not None and at >= start for s, at, _ in lines)
     if not fresh:
         continue
     last = lines[-1] if lines else ('working', None, '')
-    expected = {'done': 'done', 'blocked': 'blocked', 'failed': None}.get(last[0], 'in-progress')
+    expected = 'done' if merged is not None else {'done': 'done', 'blocked': 'blocked', 'failed': None}.get(last[0], 'in-progress')
     touched[task] = (expected, last[2] if last[0] == 'blocked' else '', read(meta) or '')
 for task, r in outcomes.items():
     if task not in touched and isinstance(r.get('at'), int) and r['at'] >= start:
@@ -161,18 +167,19 @@ bridge_status = None
 gaps = []
 for task in sorted(touched):
     expected, reason, meta = touched[task]
-    owned = [(key, r) for key, r in links.items() if r['task'] == task]
+    owned = [r for r in links.values() if r['task'] == task and isinstance(r.get('id'), str)]
     if not owned:
         if meta is None or not re.search(r'^no_todo=\S', meta, re.M):
+            raw = [m.group(1) for r in links.values() if r['task'] == task for m in [ITEM_ID.search(r.get('text') or '')] if m]
+            todo = f'id:{raw[0]}' if raw else 'id:<todo id>'
             gaps.append(f'{task}: no todo link and no recorded no-todo reason; link it to the todo it works on: '
-                        f'{bridge} link {task} id:<todo id> --by firstmate (bin/fm-todo-guard.sh resolve "<todo text>" finds it), '
+                        f'{bridge} link {task} {todo} --by firstmate (bin/fm-todo-guard.sh resolve "<todo text>" finds it), '
                         f'or add no_todo=<reason> to state/{task}.meta when it works on none')
         continue
     if expected is None:
         continue
-    for key, r in owned:
-        found = ITEM_ID.search(r.get('text') or '')
-        item = f"id:{r['id']}" if isinstance(r.get('id'), str) else (f'id:{found.group(1)}' if found else key)
+    for r in owned:
+        item = f"id:{r['id']}"
         mark = marks.get(item)
         if mark is None or mark == '-' or mark == MARK[expected]:
             continue
@@ -188,13 +195,12 @@ for task in sorted(touched):
                 sys.exit(0)
             if not isinstance(bridge_status, dict):
                 sys.exit(0)
-        entry = bridge_status.get(item) or bridge_status.get(r.get('text') or '')
+        entry = bridge_status.get(item)
         if isinstance(entry, dict) and entry.get('status') == expected:
             continue
-        todo = item[3:] if item.startswith('id:') else item
         command = (f'{bridge} block {task} --reason {shlex.quote(reason or "blocked")} --by firstmate' if expected == 'blocked'
-                   else f'{bridge} link {task} {item if item.startswith("id:") else shlex.quote(r.get("text") or item)} --by firstmate')
-        gaps.append(f'{task}: todo {todo} reads [{mark}] but the task is {expected}, which is [{MARK[expected]}]; run: {command}')
+                   else f'{bridge} link {task} {item} --by firstmate')
+        gaps.append(f'{task}: todo {r["id"]} reads [{mark}] but the task is {expected}, which is [{MARK[expected]}]; run: {command}')
 
 if gaps:
     print('[todo-status] tasks touched this turn are not reflected in the notes-keeping todo list:', file=sys.stderr)
