@@ -11,6 +11,7 @@
 #   fm-todo-guard.sh unowned [--notes <notes-file>]... [--note <inbox-note>]...
 #   fm-todo-guard.sh resolve <todo text> [--notes <notes-file>]... [--note <inbox-note>]...
 #   fm-todo-guard.sh record-outcome <task-id> [--pr <url>] [--report <path>]
+#     [--scout [--report-has-captain-call <yes|no>] [--scout-recommends-ship <yes|no>]]
 #
 # `unowned` prints an `UNOWNED TODOS` section listing every open item (`[ ]` or
 # `[~]`) under the `Todo` heading of each notes file that no work owns, then
@@ -41,8 +42,13 @@
 # {"task", "outcome", "pr", "report", "at"} line there, outcome `failed` when
 # the task's last status state is failed and `done` otherwise; with no link it
 # changes nothing. A bridge `status` that reads that line reports the item done
-# across restarts. bin/fm-teardown.sh runs it before it retires the status log,
-# and never on a --force cleanup, whose discarded work finished nothing.
+# across restarts. For a --scout, `done` holds only when both readings are `no`,
+# because the investigation was then the whole ask; a captain call, a ship
+# recommendation, or a missing reading records outcome `open` with kind `scout`,
+# which the bridge does not report done, so the todo stays open.
+# bin/fm-teardown.sh runs it before it retires the status log, passing --scout
+# and its two readings for a scout, and never on a --force cleanup, whose
+# discarded work finished nothing.
 #
 # Environment: FM_HOME, FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, FM_DATA_OVERRIDE
 # select the home, as for bin/fm-inbox.sh.
@@ -218,21 +224,25 @@ PY
 }
 
 cmd_record_outcome() {
-  local task=${1:-} pr='' report=''
-  [ -n "$task" ] || die "usage: fm-todo-guard.sh record-outcome <task-id> [--pr <url>] [--report <path>]"
+  local task=${1:-} pr='' report='' scout='' captain_call='' recommends_ship=''
+  [ -n "$task" ] || die "usage: fm-todo-guard.sh record-outcome <task-id> [--pr <url>] [--report <path>] [--scout ...]"
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --pr) [ "$#" -ge 2 ] || die "--pr needs a url"; pr=$2; shift 2 ;;
       --report) [ "$#" -ge 2 ] || die "--report needs a path"; report=$2; shift 2 ;;
+      --scout) scout=1; shift ;;
+      --report-has-captain-call) [ "$#" -ge 2 ] || die "$1 needs yes or no"; captain_call=$2; shift 2 ;;
+      --scout-recommends-ship) [ "$#" -ge 2 ] || die "$1 needs yes or no"; recommends_ship=$2; shift 2 ;;
       *) die "unknown argument: $1" ;;
     esac
   done
   [ -f "$STATE/notes-todo-links.jsonl" ] || return 0
-  python3 - "$STATE/notes-todo-links.jsonl" "$STATE/$task.status" "$task" "$pr" "$report" <<'PY'
+  python3 - "$STATE/notes-todo-links.jsonl" "$STATE/$task.status" "$task" "$pr" "$report" \
+    "$scout" "$captain_call" "$recommends_ship" <<'PY'
 import json, re, sys, time
 
-links, status, task, pr, report = sys.argv[1:6]
+links, status, task, pr, report, scout, captain_call, recommends_ship = sys.argv[1:9]
 linked = False
 with open(links, encoding='utf-8', errors='replace') as f:
     for line in f:
@@ -254,6 +264,9 @@ try:
 except OSError:
     pass
 record = {'task': task, 'outcome': 'failed' if last == 'failed' else 'done', 'at': int(time.time())}
+if scout and record['outcome'] == 'done' and (captain_call, recommends_ship) != ('no', 'no'):
+    record['outcome'] = 'open'
+    record['kind'] = 'scout'
 if pr:
     record['pr'] = pr
 if report:

@@ -3978,6 +3978,11 @@ if [ -z "$FORCE" ]; then
   TODO_OUTCOME_ARGS=()
   [ -z "$PR_URL" ] || TODO_OUTCOME_ARGS+=(--pr "$PR_URL")
   [ ! -f "$DATA/$ID/report.md" ] || TODO_OUTCOME_ARGS+=(--report "$DATA/$ID/report.md")
+  if [ "$KIND" = scout ]; then
+    TODO_OUTCOME_ARGS+=(--scout)
+    [ -z "$REPORT_CALL" ] || TODO_OUTCOME_ARGS+=(--report-has-captain-call "$REPORT_CALL")
+    [ -z "$RECOMMENDS_SHIP" ] || TODO_OUTCOME_ARGS+=(--scout-recommends-ship "$RECOMMENDS_SHIP")
+  fi
   FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
     "$SCRIPT_DIR/fm-todo-guard.sh" record-outcome "$ID" ${TODO_OUTCOME_ARGS[@]+"${TODO_OUTCOME_ARGS[@]}"} \
     || echo "warning: could not keep $ID's outcome for its linked todo; the todo may read open after cleanup" >&2

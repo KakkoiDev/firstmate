@@ -1556,7 +1556,8 @@ test_linked_todo_outcome_survives_teardown() {
   printf '%s\n' '{"task": "task-x1", "key": "ship the parser", "text": "ship the parser", "at": 1}' \
     '{"task": "other", "key": "other item", "text": "other item", "at": 1}' \
     > "$case_dir/state/notes-todo-links.jsonl"
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  run_teardown "$case_dir" --report-has-captain-call no --scout-recommends-ship no \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   expect_code 0 "$rc" "linked-todo-outcome: teardown failed: $(cat "$case_dir/stderr")"
   assert_absent "$case_dir/state/task-x1.status" "linked-todo-outcome: setup error, the status log survived"
   records=$(python3 -c 'import json,sys
@@ -1567,6 +1568,36 @@ for line in open(sys.argv[1]):
   assert_equals "task-x1 done $case_dir/data/task-x1/report.md" "$records" \
     "linked-todo-outcome: the finished task's outcome was not kept in the links file"
   pass "teardown keeps a linked task's outcome in the todo links file after its records are gone"
+}
+
+# A scout whose report carries a captain call or recommends shippable work
+# finished an investigation, not the todo, so its outcome must not read done.
+test_scout_with_open_follow_up_keeps_linked_todo_open() {
+  local label flags case_dir rc records
+  for label in captain-call recommends-ship unread; do
+    case "$label" in
+      captain-call) flags=(--report-has-captain-call yes --scout-recommends-ship no) ;;
+      recommends-ship) flags=(--report-has-captain-call no --scout-recommends-ship yes) ;;
+      unread) flags=() ;;
+    esac
+    rc=0
+    case_dir=$(make_case "scout-open-todo-$label")
+    write_meta "$case_dir" no-mistakes scout
+    prepare_scout_teardown "$case_dir"
+    printf 'done [at=2]: report written\n' > "$case_dir/state/task-x1.status"
+    printf '%s\n' '{"task": "task-x1", "key": "build the feature", "text": "build the feature", "at": 1}' \
+      > "$case_dir/state/notes-todo-links.jsonl"
+    run_teardown "$case_dir" ${flags[@]+"${flags[@]}"} > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 0 "$rc" "scout-open-todo-$label: teardown failed: $(cat "$case_dir/stderr")"
+    records=$(python3 -c 'import json,sys
+for line in open(sys.argv[1]):
+    r = json.loads(line)
+    if r.get("outcome"):
+        print(r["task"], r["outcome"], r.get("kind", ""))' "$case_dir/state/notes-todo-links.jsonl")
+    assert_equals "task-x1 open scout" "$records" \
+      "scout-open-todo-$label: a scout with work left recorded an outcome that reads its todo done"
+  done
+  pass "a scout torn down with a captain call, a ship recommendation, or no reading keeps its linked todo open"
 }
 
 test_unlinked_task_teardown_leaves_links_alone() {
@@ -5276,6 +5307,7 @@ test_tracked_edit_refusal_diagnostic
 test_mixed_refusal_diagnostic
 test_scout_nested_clone_returns_with_no_untracked_entries
 test_linked_todo_outcome_survives_teardown
+test_scout_with_open_follow_up_keeps_linked_todo_open
 test_unlinked_task_teardown_leaves_links_alone
 test_ship_nested_clone_is_refused_and_bytes_stay
 test_dirty_return_warns_which_slot_was_lost
