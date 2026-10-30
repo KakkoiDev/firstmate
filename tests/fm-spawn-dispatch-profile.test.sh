@@ -2283,6 +2283,122 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+# config/token-economizer names a TokenEconomizer clone. Evaluate the captured
+# launch under a claude stub that records what the real binary would receive:
+# the TE_TOOLPRUNE environment value and every --plugin-dir argument.
+fake_token_economizer_clone() {  # <dir>
+  mkdir -p "$1/plugin/.claude-plugin"
+  printf '{"name":"tokeneconomizer"}\n' > "$1/plugin/.claude-plugin/plugin.json"
+}
+
+fake_claude_plugin_recorder() {  # <fakebin> <record>
+  cat > "$1/claude" <<SH
+#!/usr/bin/env bash
+{
+  printf 'TE_TOOLPRUNE=%s\n' "\${TE_TOOLPRUNE-unset}"
+  while [ "\$#" -gt 0 ]; do
+    [ "\$1" != --plugin-dir ] || printf 'plugin-dir=%s\n' "\$2"
+    shift
+  done
+} > '$2'
+SH
+  chmod +x "$1/claude"
+}
+
+test_token_economizer_loads_into_claude_ship_and_scout() {
+  local kind rec id out status launch record clone clone_real
+  for kind in ship scout; do
+    id="te-$kind-z30"
+    rec=$(make_spawn_case "te-$kind" claude "$id")
+    read_case_record "$rec"
+    clone="$CASE_DIR/TokenEconomizer"
+    fake_token_economizer_clone "$clone"
+    clone_real=$(cd "$clone" && pwd -P)
+    printf '  %s\n' "$clone" > "$HOME_DIR/config/token-economizer"
+
+    if [ "$kind" = ship ]; then
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    else
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+    fi
+    status=$?
+    expect_code 0 "$status" "claude $kind spawn with config/token-economizer should succeed"$'\n'"$out"
+    launch=$(cat "$LAUNCH_LOG")
+    record="$CASE_DIR/claude-received"
+    fake_claude_plugin_recorder "$FAKEBIN_DIR" "$record"
+    fm_eval_launch "$launch" "$WT_DIR" "$FAKEBIN_DIR" >/dev/null 2>&1 \
+      || fail "claude $kind launch did not run under the recording stub"
+    [ "$(cat "$record")" = "TE_TOOLPRUNE=off"$'\n'"plugin-dir=$clone_real/plugin" ] \
+      || fail "claude $kind launch did not load TokenEconomizer with tool pruning off"$'\n'"got: $(cat "$record")"
+  done
+  pass "config/token-economizer loads the plugin with tool pruning off into claude ships and scouts"
+}
+
+test_token_economizer_absent_config_loads_nothing() {
+  local rec id out status launch record
+  id=te-absent-z31
+  rec=$(make_spawn_case te-absent claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn without config/token-economizer should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  record="$CASE_DIR/claude-received"
+  fake_claude_plugin_recorder "$FAKEBIN_DIR" "$record"
+  fm_eval_launch "$launch" "$WT_DIR" "$FAKEBIN_DIR" >/dev/null 2>&1 || fail "claude launch did not run under the recording stub"
+  [ "$(cat "$record")" = "TE_TOOLPRUNE=unset" ] \
+    || fail "absent config/token-economizer still changed the claude launch"$'\n'"got: $(cat "$record")"
+  pass "absent config/token-economizer leaves claude launches without the plugin"
+}
+
+test_token_economizer_missing_clone_refuses_before_endpoint() {
+  local rec id out status
+  id=te-missing-z32
+  rec=$(make_spawn_case te-missing claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' "$CASE_DIR/no-such-clone" > "$HOME_DIR/config/token-economizer"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a config/token-economizer path without the plugin must refuse the spawn"
+  assert_contains "$out" "config/token-economizer" "refusal must name the config file"
+  assert_contains "$out" "$CASE_DIR/no-such-clone" "refusal must name the configured path"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a missing clone must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  pass "config/token-economizer naming a missing clone refuses before any endpoint or metadata"
+}
+
+test_token_economizer_skips_codex_and_secondmate() {
+  local rec id sm out status launch
+  id=te-codex-z33
+  rec=$(make_spawn_case te-codex codex "$id")
+  read_case_record "$rec"
+  fake_token_economizer_clone "$CASE_DIR/TokenEconomizer"
+  printf '%s\n' "$CASE_DIR/TokenEconomizer" > "$HOME_DIR/config/token-economizer"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
+  status=$?
+  expect_code 0 "$status" "codex spawn with config/token-economizer should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--plugin-dir" "TokenEconomizer must not load into a codex launch"
+  assert_not_contains "$launch" "TE_TOOLPRUNE" "TokenEconomizer settings must not reach a codex launch"
+
+  id=te-secondmate-z34
+  rec=$(make_spawn_case te-secondmate claude "$id")
+  read_case_record "$rec"
+  fake_token_economizer_clone "$CASE_DIR/TokenEconomizer"
+  printf '%s\n' "$CASE_DIR/TokenEconomizer" > "$HOME_DIR/config/token-economizer"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate claude spawn with config/token-economizer should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--plugin-dir" "TokenEconomizer must not load into a secondmate launch"
+  assert_not_contains "$launch" "TE_TOOLPRUNE" "TokenEconomizer settings must not reach a secondmate launch"
+  pass "config/token-economizer changes claude ship and scout launches only"
+}
+
 test_launch_preserves_inherited_git_config
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
@@ -2346,6 +2462,10 @@ test_claude_permission_mode_auto_reaches_scout_launch
 test_claude_worker_launch_covers_task_channel_dirs
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
+test_token_economizer_loads_into_claude_ship_and_scout
+test_token_economizer_absent_config_loads_nothing
+test_token_economizer_missing_clone_refuses_before_endpoint
+test_token_economizer_skips_codex_and_secondmate
 test_non_claude_harness_ignores_config_dir
 test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority

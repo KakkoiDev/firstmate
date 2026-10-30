@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [TokenEconomizer](#tokeneconomizer-configtoken-economizer), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -988,6 +988,25 @@ The diagnostic names the accepted values; Firstmate never falls back to a permis
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the permission-mode observations and the distinct startup dialogs.
+
+## TokenEconomizer (config/token-economizer)
+
+The optional local, gitignored `config/token-economizer` loads [TokenEconomizer](https://github.com/microsoft/TokenEconomizer) into this home's Claude ship and scout workers.
+TokenEconomizer is a Claude Code plugin that learns from a repository's earlier sessions to cut model cost; its model calls run through the worker's own Claude login and what it learns stays in `~/.tokeneconomizer`.
+The file holds one absolute path to a local clone, which the captain makes once and pins to a reviewed commit, because every worker then runs that clone's hooks:
+
+```sh
+git clone https://github.com/microsoft/TokenEconomizer.git ~/TokenEconomizer
+git -C ~/TokenEconomizer checkout --detach <reviewed-commit>
+printf '%s\n' "$HOME/TokenEconomizer" > config/token-economizer
+```
+
+With the file present, each Claude ship and scout launch adds `--plugin-dir <clone>/plugin` and `TE_TOOLPRUNE=off`.
+Tool pruning stays off because it writes `.claude/settings.local.json` into the worktree and appends to the project clone's `.git/info/exclude`; the loop guard runs and micro-skills keep the plugin's own default.
+Secondmates, other harnesses, and an absent file launch unchanged, and the file is not inherited into secondmate homes.
+A path that is not absolute or lacks `plugin/.claude-plugin/plugin.json` refuses every spawn before any endpoint, worktree, or task record exists.
+The file is read on every spawn and relaunch, so updating the pinned commit reaches the next launch.
+Upstream lists Claude Code 2.1.300 to 2.1.310 as tested; check its README's supported versions before moving the pin or upgrading Claude Code.
 
 ## Worker tool exclusions (config/crew-exclude-tools)
 
