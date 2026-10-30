@@ -97,25 +97,24 @@ test_section_required() {
   since=$(cat "$PRIMARY/state/jev-turn-start")
   assert_equals 'Jev asks this turn (1)
 firstmate ask-scope: fix the login flake - jev login (0.8), mine login' "$sec" "the section holds only this turn's ask"
-  stop 'Fixed the login flake.'
-  expect_block "a final message without the section" "run bin/fm-jev.sh turn --since $since and put its output"
-  assert_contains "$err" 'firstmate ask-scope: fix the login flake - jev login (0.8), mine login' "the block prints the section"
   stop "Fixed the login flake.
 
 Jev asks this turn (1)"
-  expect_block "the header alone" "lacks 1 line(s)"
+  expect_allow "the header alone, with the right count"
+  stop 'Fixed the login flake.'
+  expect_block "a final message without the header" "lacks the line \"Jev asks this turn (1)\""
+  assert_contains "$err" "bin/fm-jev.sh turn --since $since" "the block names the command that prints the section"
   stop "Fixed the login flake.
 
 Jev asks this turn (2)
 - firstmate ask-scope: fix the login flake - jev login (0.8), mine login"
-  expect_block "a wrong count" "lacks 1 line(s)"
+  expect_block "a wrong count" "lacks the line \"Jev asks this turn (1)\""
   stop "Fixed the login flake.
 
 \`\`\`
-Jev asks this turn (1)
-  - firstmate ask-scope: fix the login flake - jev login (0.8), mine login
+  - Jev asks this turn (1)  
 \`\`\`"
-  expect_allow "the section in a code block with a bullet and padding"
+  expect_allow "the header in a code block with a bullet and padding"
   stop 'Fixed the login flake.' FM_TASK_ID=t1
   expect_allow "a task worker"
   stop 'Fixed the login flake.' FM_JEV_GATE=off
@@ -123,7 +122,7 @@ Jev asks this turn (1)
   code=0
   printf '{"hook_event_name": "Stop"}' | env_run "$CHECK" --claude 2> "$TMP_ROOT/err" || code=$?
   [ "$code" -eq 0 ] || fail "a payload without last_assistant_message must pass, got $code"
-  pass "asks made this turn block the turn end until the final message holds their section verbatim"
+  pass "asks made this turn block the turn end until the final message holds the section header with their count"
 }
 
 test_disagreement_must_be_mentioned() {
@@ -137,17 +136,30 @@ test_disagreement_must_be_mentioned() {
   stop "Fixed both flakes.
 
 $sec"
-  expect_block "an unmentioned disagreement" "firstmate disagreed with Jev this turn (ask-scope)"
+  expect_block "an unmentioned disagreement" "firstmate disagreed with Jev this turn (ask-scope (firstmate))"
+  stop "Fixed both flakes.
+
+Jev asks this turn (2)"
+  expect_block "the header alone with a disagreement" "firstmate disagreed with Jev this turn (ask-scope (firstmate))"
   stop "Fixed both flakes. I disagree with Jev on the scope of the signup ask.
 
-$sec"
-  expect_block "a mention without the type" "(ask-scope)"
+Jev asks this turn (2)"
+  expect_block "a mention without the type" "(ask-scope (firstmate))"
+  stop "Fixed both flakes. I disagree with Jev on ask-scope for the signup ask.
+
+Jev asks this turn (2)"
+  expect_block "a mention without the asker" "(ask-scope (firstmate))"
   stop "Fixed both flakes.
-Jev answered several on the ask-scope for the signup flake; I disagree, because the operator named signup alone.
+I disagree with Jev on ask-scope (firstmate): the operator named signup alone.
+
+Jev asks this turn (2)"
+  expect_allow "the header and a mention with the word, the type, and the asker"
+  stop "Fixed both flakes.
+Jev answered several on the ask-scope for the signup flake; firstmate's call differs, I disagree, because the operator named signup alone.
 
 $sec"
-  expect_allow "a mention with the word and the type outside the section"
-  pass "a [DISAGREE] ask blocks the turn end until the final message names that disagreement outside the section"
+  expect_allow "the whole section and a mention outside it"
+  pass "a [DISAGREE] ask blocks the turn end until the final message names that disagreement, its type, and its asker"
 }
 
 test_turn_close_marker() {
@@ -156,7 +168,7 @@ test_turn_close_marker() {
   turn_start
   scope_ask 'fix the login flake' login login
   stop 'Fixed the login flake.'
-  expect_block "a final message without the section" "lacks"
+  expect_block "a final message without the header" "lacks"
   assert_absent "$closed" "a blocked turn end leaves the turn open"
   stop "Fixed the login flake.
 

@@ -80,6 +80,6 @@ Every other type, templated or not, stays shadow-only.
 
 ## Turn-end section
 
-When a turn made Jev asks, the final message carries the output of `bin/fm-jev.sh turn --since <turn start>` verbatim: the `Jev asks this turn (<n>)` header and one line per ask.
-Each line marked `[DISAGREE]` also needs a line outside the section that names the disagreement with the word "disagree" and the question type.
+When a turn made Jev asks, the final message carries the `Jev asks this turn (<n>)` header that `bin/fm-jev.sh turn --since <turn start>` prints, with that count; the ask lines themselves are optional.
+Each line marked `[DISAGREE]` also needs a line that names the disagreement with the word "disagree", the question type, and the asker, such as `I disagree with Jev on <type> (<asker>)`.
 On a Claude Code primary, the Stop hook refuses a turn end that lacks either and prints the command with the turn start filled in.

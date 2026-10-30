@@ -15,11 +15,12 @@
 # output of bin/fm-jev.sh turn --since <that time>, whose header owns its
 # lines. When it lists at least one ask, the payload's last_assistant_message
 # must hold:
-#   - every section line, the "Jev asks this turn (<n>)" header included, as a
-#     line of its own (leading space, a "- " or "* " bullet, and trailing space
-#     are ignored);
-#   - for every line marked [DISAGREE], another line outside the section that
-#     contains "disagree" (any case) and that line's question type.
+#   - the section's "Jev asks this turn (<n>)" header, with this turn's count,
+#     as a line of its own (leading space, a "- " or "* " bullet, and trailing
+#     space are ignored); the ask lines themselves are not required;
+#   - for every line marked [DISAGREE], a line that is not a verbatim section
+#     line and contains "disagree" (any case), that line's question type, and
+#     its asker (the task id, or "firstmate").
 #
 # Output:
 #   ALLOW - exit 0, no output.
@@ -73,15 +74,9 @@ jq -r .last_assistant_message <<<"$PAYLOAD" \
   | sed -E 's/^[[:space:]]*([-*][[:space:]]+)?//; s/[[:space:]]+$//' > "$WORK/message"
 CMD="bin/fm-jev.sh turn --since $SINCE"
 
-missing=0
-while IFS= read -r line; do
-  grep -Fxq -- "$line" "$WORK/message" || missing=$((missing + 1))
-done < "$WORK/section"
-if [ "$missing" -gt 0 ]; then
-  {
-    printf '[jev-turn] this turn made Jev asks, and the final message lacks %s line(s) of their section; run %s and put its output, every line verbatim, in the final message:\n' "$missing" "$CMD"
-    cat "$WORK/section"
-  } >&2
+HEADER=$(sed -n 1p "$WORK/section")
+if ! grep -Fxq -- "$HEADER" "$WORK/message"; then
+  printf '[jev-turn] this turn made Jev asks, and the final message lacks the line "%s"; put that line in the final message (%s prints the section)\n' "$HEADER" "$CMD" >&2
   exit 2
 fi
 
@@ -89,12 +84,14 @@ grep -Fxv -f "$WORK/section" "$WORK/message" > "$WORK/outside" || true
 unmentioned=''
 while IFS= read -r line; do
   case "$line" in *' [DISAGREE]') ;; *) continue ;; esac
+  asker=${line%% *}
   type=${line#* }
   type=${type%%:*}
-  grep -i disagree "$WORK/outside" | grep -Fq -- "$type" || unmentioned="$unmentioned $type"
+  grep -i disagree "$WORK/outside" | grep -F -- "$type" | grep -Fq -- "$asker" \
+    || unmentioned="$unmentioned, $type ($asker)"
 done < "$WORK/section"
 if [ -n "$unmentioned" ]; then
-  printf '[jev-turn] firstmate disagreed with Jev this turn (%s), and the final message does not say so outside the Jev asks section; add a line naming each disagreement, with the word "disagree" and the question type (%s prints the section)\n' "${unmentioned# }" "$CMD" >&2
+  printf '[jev-turn] firstmate disagreed with Jev this turn (%s), and the final message does not say so; add a line naming each disagreement, with the word "disagree", the question type, and the asker, such as "I disagree with Jev on <type> (<asker>)" (%s prints the section)\n' "${unmentioned#, }" "$CMD" >&2
   exit 2
 fi
 exit 0

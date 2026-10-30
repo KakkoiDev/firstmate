@@ -138,7 +138,7 @@ def plan(body):
     if not body.get("tools"):
         return "aside", ("text", "ok")
     if "firstmate disagreed with Jev" in text:
-        return "final-mention", ("text", "Fixed the login flake.\nJev answered login on the ask-scope; I disagree, "
+        return "final-mention", ("text", "Fixed the login flake.\nJev answered login on the ask-scope (firstmate); I disagree, "
                                  "because the operator named signup.\n\n" + section(text))
     if "[jev-turn]" in text:
         return "final-section", ("text", "Fixed the login flake.\n\n" + section(text))
