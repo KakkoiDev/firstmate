@@ -836,6 +836,28 @@ test_spawn_without_todo_adds_an_objective_update() {
   pass "a spawn without --todo adds its intent as an objective update and links the todo it makes"
 }
 
+# The plugin's Laya moves any todo no task is linked to, so a todo the spawn
+# made must be linked even when a later gate stops the launch.
+test_deferred_spawn_links_the_todo_it_made() {
+  local case_dir home out rc=0 before worktrees
+  case_dir=$(make_case todo-auto-deferred task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{}'
+  printf '%s\n' "$home/notes.md" > "$home/bridge-active"
+  declare_capacity "$home" "project 1"
+  write_live "$home" live-a "$case_dir/project"
+  before=$(call_count "$case_dir")
+  worktrees=$(worktree_list "$case_dir")
+  out=$(spawn_ship "$case_dir" task-c "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a spawn beyond capacity was not deferred: $out"
+  assert_contains "$(cat "$home/bridge-updates.log")" "task-c: Run the project's heavy suite for task-c." \
+    "the deferred spawn did not add its intent as firstmate's objective update"
+  assert_equals "task-c	id:1kmv58p --by firstmate" "$(cat "$home/bridge-links.log" 2>/dev/null)" \
+    "the deferred spawn left the todo it made unlinked"
+  assert_nothing_created "$case_dir" "$home" task-c "$before" "$worktrees"
+  pass "a spawn deferred after it made its todo still links that todo to the task"
+}
+
 test_failed_objective_update_is_refused() {
   local case_dir home out rc=0
   case_dir=$(make_case todo-auto-fail task-c)
@@ -913,5 +935,6 @@ test_spawn_without_todo_is_refused
 test_spawn_with_no_todo_reason_launches
 test_unknown_or_ambiguous_todo_is_refused
 test_spawn_without_todo_adds_an_objective_update
+test_deferred_spawn_links_the_todo_it_made
 test_failed_objective_update_is_refused
 test_no_todo_with_an_active_notes_file_is_refused

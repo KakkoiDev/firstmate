@@ -23,7 +23,9 @@
 #   runs the bridge's `update <file> "<id>: <first Captain's intent line>"
 #   --by firstmate --task <id>`, which the plugin writes as firstmate's [UPDATE]
 #   and turns into a todo; that todo is recorded as todo=id:<item-id> and linked
-#   the same way. A failed update refuses, launching nothing, and --no-todo is
+#   by id at once, so a spawn a later check refuses or defers still leaves it
+#   linked, which keeps the plugin from moving it on its own while the task is
+#   unfinished. A failed update refuses, launching nothing, and --no-todo is
 #   refused while a notes file is active; --no-todo is recorded as
 #   no_todo=<reason>. A relaunch keeps both
 #   lines and the links. A link failure warns; the launch stands.
@@ -2002,7 +2004,8 @@ fi
 # out. Without --todo, while a
 # notes-keeping session is active, the first line of the brief's Captain's
 # intent becomes firstmate's [UPDATE] in that session's notes, and the todo the
-# plugin makes from it is linked by id; --no-todo is then refused.
+# plugin makes from it is linked by id before any later check can stop the
+# launch; --no-todo is then refused.
 SPAWN_TODO_LINKS=()
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ -x "$CONFIG/notes-keeping-bridge" ]; then
   SPAWN_NOTES=
@@ -2022,7 +2025,8 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ -x "$CONFIG/notes-kee
       exit 1
     }
     TODOS=("id:$SPAWN_TODO")
-    SPAWN_TODO_LINKS=("id:$SPAWN_TODO")
+    FM_HOME=$FM_HOME "$CONFIG/notes-keeping-bridge" link "$ID" "id:$SPAWN_TODO" --by firstmate ||
+      echo "warning: could not link todo 'id:$SPAWN_TODO' to $ID through $CONFIG/notes-keeping-bridge" >&2
   elif [ "${#TODOS[@]}" -eq 0 ] && [ "$NO_TODO_SET" -eq 0 ]; then
     SPAWN_UNOWNED=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
       "$SCRIPT_DIR/fm-todo-guard.sh" unowned 2>&1) || true
