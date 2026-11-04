@@ -153,17 +153,25 @@ test_blocked_mark() {
   pass "a blocked task's todo must read [!] or have a bridge block call this turn"
 }
 
-test_finished_mark() {
+test_ready_not_landed() {
   reset
-  task scout-old old
-  link scout-old "$OLD"
+  task ship-ready old
+  link ship-ready "$OLD"
   notes '~'
-  status_line scout-old "done [at=$((NOW + 1))]: report written"
+  status_line ship-ready "done [at=$((NOW + 1))]: PR ready https://github.com/KakkoiDev/dotfiles/pull/62"
   stop
-  expect_block "a task finished this turn whose todo reads [~]" "[x]"
-  notes 'x'
+  expect_allow "a task whose PR is ready but not merged, whose todo reads [~]"
+  notes ' '
   stop
-  expect_allow "the todo reads [x]"
+  expect_block "a ready, unlanded task whose todo reads [ ]" "[~]"
+  notes x
+  stop
+  expect_block "a ready, unlanded task whose todo reads [x]" "premature"
+  assert_contains "$err" "still in-progress" "the premature block names the in-progress state"
+  pass "a done line for a ready PR or branch that has not landed keeps its todo at [~]"
+}
+
+test_finished_mark() {
   reset
   link scout-gone "$OLD"
   printf '{"task": "scout-gone", "outcome": "done", "at": %s}\n' "$((NOW + 1))" >> "$STATE/notes-todo-links.jsonl"
@@ -173,7 +181,7 @@ test_finished_mark() {
   notes '-'
   stop
   expect_allow "a todo the captain declined"
-  pass "a finished or torn-down task's todo must read [x] or have a bridge call this turn"
+  pass "a torn-down task's todo must read [x] or have a bridge call this turn"
 }
 
 test_raw_text_link_is_unlinked() {
@@ -248,6 +256,7 @@ test_unlinked_task_blocks
 test_in_flight_mark
 test_bridge_already_reports
 test_blocked_mark
+test_ready_not_landed
 test_finished_mark
 test_raw_text_link_is_unlinked
 test_merged_not_cleaned_up

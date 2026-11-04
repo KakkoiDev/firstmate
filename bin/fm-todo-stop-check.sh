@@ -25,9 +25,9 @@
 #     count, since the plugin matches an item that has an id only by its id;
 #   - each linked todo found under the Todo heading of the active notes file
 #     (state/notes-keeping-active.json) must carry the task's mark: [x] once
-#     the last state line is done or the task was cleaned up with outcome done,
-#     [x] once its PR merged, [!] when it is blocked, [~] otherwise while its
-#     meta exists. A failed
+#     the task landed (its PR merged, or it was cleaned up with outcome done),
+#     [!] when it is blocked, [~] otherwise while its meta exists, including a
+#     done line for a ready PR or branch that has not landed. A failed
 #     task, a todo marked [-], and a todo not in the notes file are not checked.
 #     A lagging mark passes when the bridge's status already reports the
 #     matching status (the plugin writes it), or when a bridge call for it was
@@ -139,7 +139,7 @@ for meta in glob.glob(os.path.join(state, '*.meta')):
     if not fresh:
         continue
     last = lines[-1] if lines else ('working', None, '')
-    expected = 'done' if merged is not None else {'done': 'done', 'blocked': 'blocked', 'failed': None}.get(last[0], 'in-progress')
+    expected = 'done' if merged is not None else {'blocked': 'blocked', 'failed': None}.get(last[0], 'in-progress')
     touched[task] = (expected, last[2] if last[0] == 'blocked' else '', read(meta) or '')
 for task, r in outcomes.items():
     if task not in touched and isinstance(r.get('at'), int) and r['at'] >= start:
