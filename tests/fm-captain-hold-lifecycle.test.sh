@@ -2367,6 +2367,7 @@ SH
   show=$(tasks_in "$home" show "$id-decision-chat-choice" --full)
   assert_contains "$show" "state: done" "a chat answer left the legacy row open"
   assert_contains "$show" "Answer: go with option A" "the chat-answered row lost the captain answer"
+  assert_contains "$show" "Routed to: $id 001" "the chat-answered row does not name the inbox message it reached"
 
   : > "$home/send.log"
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
@@ -2379,6 +2380,7 @@ SH
   assert_contains "$show" "Resolution mode: answered" "the chat-answered call did not record its close path"
   assert_contains "$show" "Answer: take the second option" "the chat-answered call lost the captain answer"
   assert_contains "$show" "answer sent to $id" "the chat-answered call lost its channel provenance"
+  assert_contains "$show" "Routed to: $id 002" "the chat-answered call does not name the inbox message it reached"
 
   : > "$home/send.log"
   set +e
@@ -4629,6 +4631,165 @@ SH
   pass "marked hold reasons round-trip through public reads, fleet, startup, and return without changing other fields"
 }
 
+# A follow-up task that executed a held call closes it, or narrows it, on
+# evidence naming that task, without a board request; the call must have been
+# executed by a different, finished task, and the record never reads as the
+# captain's own words.
+test_executed_follow_up_closes_or_narrows_a_held_call() {
+  local home show out rc
+  home=$(make_home executed-follow-up)
+  tasks_in "$home" add sample-post-call "Captain call: post the drafts?" --repo sample >/dev/null
+  tasks_in "$home" add sample-plan-call "Captain call: the nine plan calls" --repo sample >/dev/null
+  tasks_in "$home" add sample-pending-review "Post the drafts as a pending review" --kind ship --repo sample >/dev/null
+  tasks_in "$home" add sample-unfinished "Still running" --kind ship --repo sample --start >/dev/null
+  run_captain "$home" hold sample-post-call --reason "post the drafts as a pending review?" >/dev/null \
+    || fail "could not hold the post call"
+  run_captain "$home" hold sample-plan-call --reason "nine plan calls" >/dev/null \
+    || fail "could not hold the plan call"
+  tasks_in "$home" "done" sample-pending-review >/dev/null || fail "could not finish the follow-up"
+  printf 'sample-pending-review posted the drafts as a pending review.\n' > "$home/evidence.txt"
+  printf 'The drafts were posted somewhere.\n' > "$home/unnamed.txt"
+  printf 'Calls 2 and 5 were done by sample-pending-review; 1, 7, 8 remain.\n' > "$home/narrow.txt"
+
+  set +e
+  out=$(run_captain "$home" reconcile close sample-post-call --evidence-file "$home/evidence.txt" \
+    --executed-by sample-unfinished 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unfinished follow-up closed the held call"
+  assert_contains "$out" "not done" "the unfinished refusal did not say why: $out"
+  if run_captain "$home" reconcile close sample-post-call --evidence-file "$home/evidence.txt" \
+    --executed-by sample-nowhere >/dev/null 2>&1; then
+    fail "a follow-up that does not exist closed the held call"
+  fi
+  if run_captain "$home" reconcile close sample-post-call --evidence-file "$home/evidence.txt" \
+    --executed-by sample-post-call >/dev/null 2>&1; then
+    fail "a held call was closed as its own follow-up"
+  fi
+  set +e
+  out=$(run_captain "$home" reconcile close sample-post-call --evidence-file "$home/unnamed.txt" \
+    --executed-by sample-pending-review 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "evidence that does not name the follow-up closed the held call"
+  assert_contains "$out" "name" "the unnamed-evidence refusal did not say why: $out"
+  show=$(tasks_in "$home" show sample-post-call --full)
+  assert_contains "$show" "held: yes" "a refused follow-up close released the call"
+
+  run_captain "$home" reconcile close sample-post-call --evidence-file "$home/evidence.txt" \
+    --executed-by sample-pending-review >/dev/null \
+    || fail "the executed follow-up could not close the held call"
+  show=$(tasks_in "$home" show sample-post-call --full)
+  assert_contains "$show" "state: done" "the executed call did not close"
+  assert_contains "$show" "Resolution mode: reconciled" "the executed call did not record how it closed"
+  assert_contains "$show" "Executed by: sample-pending-review" "the record does not name the follow-up"
+  assert_contains "$show" "Reconciliation evidence:" "the executed call lost its evidence label"
+  assert_not_contains "$show" "Captain decision:" "an executed close was recorded as the captain's words"
+  run_captain "$home" reconcile close sample-post-call --evidence-file "$home/evidence.txt" \
+    --executed-by sample-pending-review >/dev/null \
+    || fail "an exact retry of the executed close was not idempotent"
+
+  run_captain "$home" reconcile note sample-plan-call --note-file "$home/narrow.txt" \
+    --executed-by sample-pending-review >/dev/null \
+    || fail "the executed follow-up could not narrow the held call"
+  show=$(tasks_in "$home" show sample-plan-call --full)
+  assert_contains "$show" "held: yes" "narrowing released the call"
+  assert_contains "$show" "Executed by: sample-pending-review" "the narrowing does not name the follow-up"
+  assert_contains "$show" "1, 7, 8 remain" "the narrowing lost what remains"
+  pass "a finished follow-up closes or narrows the held call it executed, on evidence naming it"
+}
+
+# One origin and one report carry one captain call: a second hold for the same
+# pair is refused before any row is created, while the call itself re-holds.
+test_hold_refuses_a_duplicate_call_for_one_origin_report() {
+  local home origin out rc
+  home=$(make_home duplicate-hold)
+  origin=sample-notion-stale
+  mkdir -p "$home/data/$origin"
+  printf '# Notion stale rows\n' > "$home/data/$origin/report.md"
+  tasks_in "$home" add "$origin" "Investigate stale rows" --kind scout --repo sample >/dev/null
+  run_captain "$home" hold sample-notion-fix --title "Fix the stale rows?" --reason "fix rows?" \
+    --repo sample --origin "$origin" --report "data/$origin/report.md" >/dev/null \
+    || fail "could not hold the first call"
+  set +e
+  out=$(run_captain "$home" hold sample-notion-approve --title "Approve the stale rows?" --reason "approve?" \
+    --repo sample --origin "$origin" --report "data/$origin/report.md" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a second call for the same origin and report was held"
+  assert_contains "$out" "sample-notion-fix" "the duplicate refusal did not name the existing call: $out"
+  if tasks_in "$home" show sample-notion-approve >/dev/null 2>&1; then
+    fail "the refused duplicate still created a row"
+  fi
+  run_captain "$home" hold sample-notion-fix --reason "fix rows?" \
+    --origin "$origin" --report "data/$origin/report.md" >/dev/null \
+    || fail "re-holding the same call was refused as its own duplicate"
+  run_captain "$home" hold sample-notion-other --title "Another report's call" --reason "other?" \
+    --repo sample --origin "$origin" --report "data/$origin/other.md" >/dev/null \
+    || fail "a call for a different report of the same origin was refused"
+  printf 'Fix them.\n' > "$home/answer.txt"
+  run_captain "$home" answer sample-notion-fix --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not answer the first call"
+  run_captain "$home" hold sample-notion-approve --title "Approve the stale rows?" --reason "approve?" \
+    --repo sample --origin "$origin" --report "data/$origin/report.md" >/dev/null \
+    || fail "a closed call still blocked a new call for its report"
+  pass "one origin and report hold one open captain call"
+}
+
+# A hold records its question and options as their own body lines, replaced on
+# re-hold, so a reader shows them without parsing the reason prose.
+test_hold_records_question_and_option_lines() {
+  local home show out rc
+  home=$(make_home question-lines)
+  run_captain "$home" hold sample-card-call --title "AILAB-790 scope" --reason "send the proposal?" \
+    --repo sample --question "Send the cut-scope proposal to Masuda-san?" \
+    --option "Store-only batch 1 (recommended)" --option "Measure first only" >/dev/null \
+    || fail "could not hold with a question and options"
+  show=$(tasks_in "$home" show sample-card-call --full)
+  assert_contains "$show" "Question: Send the cut-scope proposal to Masuda-san?" "the question line is missing"
+  assert_contains "$show" "Options: Store-only batch 1 (recommended)" "the first option line is missing"
+  assert_contains "$show" "Options: Measure first only" "the second option line is missing"
+  run_captain "$home" hold sample-card-call --reason "send the proposal?" \
+    --question "Send the one-week proposal?" --option "Send" >/dev/null \
+    || fail "could not re-hold with a new question"
+  show=$(tasks_in "$home" show sample-card-call --full)
+  assert_contains "$show" "Question: Send the one-week proposal?" "the new question line is missing"
+  assert_not_contains "$show" "Question: Send the cut-scope" "the old question survived the re-hold"
+  assert_not_contains "$show" "Options: Measure first only" "an old option survived the re-hold"
+  set +e
+  out=$(run_captain "$home" hold sample-card-call --reason "x" --option "orphan" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an option without a question was accepted"
+  assert_contains "$out" "--question" "the orphan-option refusal did not name --question: $out"
+  pass "a hold records its question and options as their own lines"
+}
+
+# An answer that reached a worker inbox records which task and message it
+# reached, through both the direct answer and the keyed intake.
+test_answer_records_the_worker_message_it_reached() {
+  local home show
+  home=$(make_home routed-answer)
+  run_captain "$home" hold sample-routed-call --title "Routed call" --reason "pick?" --repo sample >/dev/null
+  run_captain "$home" hold sample-keyed-call --title "Keyed call" --reason "pick?" --repo sample >/dev/null
+  printf 'Option one.\n' > "$home/answer.txt"
+  if run_captain "$home" answer sample-routed-call --decision-file "$home/answer.txt" \
+    --routed-to sample-worker abc >/dev/null 2>&1; then
+    fail "a non-numeric inbox message number was accepted"
+  fi
+  run_captain "$home" answer sample-routed-call --decision-file "$home/answer.txt" \
+    --routed-to sample-worker 002 >/dev/null \
+    || fail "could not record a routed answer"
+  show=$(tasks_in "$home" show sample-routed-call --full)
+  assert_contains "$show" "Routed to: sample-worker 002" "the answer does not name the worker message it reached"
+  printf 'sample-keyed-call\toption two\t\n' \
+    | run_captain "$home" answers --source "a firstmate answer" --routed-to sample-worker 003 >/dev/null \
+    || fail "the keyed intake refused a routed answer"
+  show=$(tasks_in "$home" show sample-keyed-call --full)
+  assert_contains "$show" "Routed to: sample-worker 003" "the keyed answer does not name the worker message it reached"
+  pass "an answer records the worker message it reached"
+}
+
 test_hold_reason_round_trips_awkward_characters
 test_hold_origins_precede_backend_holds
 test_historical_self_inventory_has_workable_repair
@@ -4690,3 +4851,7 @@ test_verify_names_the_unresolvable_legacy_id_once
 test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
 test_captain_hold_mutations_address_the_beads_backend
 test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type
+test_executed_follow_up_closes_or_narrows_a_held_call
+test_hold_refuses_a_duplicate_call_for_one_origin_report
+test_hold_records_question_and_option_lines
+test_answer_records_the_worker_message_it_reached

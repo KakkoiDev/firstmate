@@ -292,7 +292,8 @@ The binding-checked `reconcile-requests` command is that internal intake rather 
 ### Verifying and retiring a request
 
 Verification retires a request through one of two outcomes.
-Each outcome requires both the pending board-created request and the operator input that supports its claim:
+Each outcome requires both the pending board-created request and the operator input that supports its claim.
+The one alternative to the board request is `--executed-by <task-id>`, for a call a different, Done follow-up task executed: the evidence or note must name that task, and the record names it on an `Executed by:` line, so firstmate can close a moot call, or narrow one executed in part, without the captain re-selecting it:
 
 - `reconcile close <task-id> --evidence-file <path>` is the moot outcome.
   It writes a resolution record whose mode is `reconciled` and whose body is the supplied EVIDENCE under a `Reconciliation evidence:` label, then closes the task.

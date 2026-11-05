@@ -21,9 +21,10 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
-#   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
-#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
+#     [--title <title>] [--repo <repo>] [--origin <origin-id> [--report <path>]] [--until YYYY-MM-DD] \
+#     [--question <text> [--option <text>]...]
+#   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release] [--routed-to <task-id> <NNN>]
+#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance> [--routed-to <task-id> <NNN>]   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
 #   fm-captain-hold.sh unbind <source-id>
@@ -33,8 +34,8 @@
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
-#   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
-#   fm-captain-hold.sh reconcile note <task-id> --note-file <path>
+#   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path> [--executed-by <task-id>]
+#   fm-captain-hold.sh reconcile note <task-id> --note-file <path> [--executed-by <task-id>]
 #
 # `hold` places an existing task under an active captain hold, or creates the
 # task first when no work item exists to hold (--title required to create; the
@@ -56,6 +57,14 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+# `--report` records the origin report the call comes from on a `Captain hold
+# report:` body line and requires `--origin`; a hold is refused, before any row
+# is created, while another open captain-held task carries the same origin and
+# report, because one report's questions are one call. `--question` records a
+# `Question:` line and each `--option` one `Options:` line, so a reader shows
+# the call without parsing the reason. These lines sit in the body header under
+# the stamp and origin; a new `--report` or `--question` replaces the previous
+# lines above the newest resolution record.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -68,6 +77,10 @@
 # ordering. An exact retry also completes unfinished ordering normalization and
 # is idempotent only when its requested close mode
 # matches the newest record; a changed decision or a mode mismatch is rejected.
+# `--routed-to <task-id> <NNN>` adds a `Routed to: <task-id> <NNN>` line under
+# `Resolution mode:` naming the worker inbox message (state/<task-id>.inbox/
+# <NNN>.msg) the answer reached; `answers` passes it to every answer it records,
+# and bin/fm-send.sh supplies it when an answer rides a local inbox.
 # A re-held task may record a new answer on top. On a task already closed outside this script,
 # `answer` records the missing resolution block (the old `repair` path) only
 # when the task still carries the captain-hold provenance tasks-axi preserves
@@ -113,6 +126,11 @@
 # captain's words, and closes the task. `note` is the still-active outcome: it
 # appends one dated `Captain hold reconciled:` note and leaves the hold in
 # place. A normal answer also retires the request because the call is settled.
+# `--executed-by <task-id>` replaces the board request for both outcomes when
+# a different, Done follow-up task executed the call: the evidence or note must
+# name that task, `close` records an `Executed by: <task-id>` line at the top of
+# the evidence, and `note` records it in its marker, which narrows a call the
+# follow-up executed only in part.
 # `list` is the read-only enumeration.
 # docs/captain-hold-lifecycle.md owns the semantics.
 #
@@ -515,11 +533,22 @@ closed_answer_replay_mode_compatible() {  # <mode> <task-body>
 # The record's label is what keeps an evidence-backed reconciliation from
 # reading as the captain's own words. `reconciled` closes a call that went moot
 # and carries verified evidence; every other mode carries what the captain said.
+ROUTED_TO=''
 resolution_block() {  # <mode>
-  local label='Captain decision:'
+  local label='Captain decision:' routed=''
   [ "$1" != reconciled ] || label='Reconciliation evidence:'
-  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\n%s\n%s\n' \
-    "$DECISION_DIGEST" "$1" "$label" "$DECISION_TEXT"
+  [ -z "$ROUTED_TO" ] || routed=$(printf '\nRouted to: %s' "$ROUTED_TO")
+  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s%s\n\n%s\n%s\n' \
+    "$DECISION_DIGEST" "$1" "$routed" "$label" "$DECISION_TEXT"
+}
+
+# `Routed to: <task-id> <NNN>` names the worker inbox message an answer reached.
+set_routed_to() {  # <task-id> <NNN>
+  validate_slug routed-task-id "${1:-}"
+  case "${2:-}" in
+    ''|*[!0-9]*) fail "--routed-to needs an inbox message number of digits only: ${2:-}" ;;
+  esac
+  ROUTED_TO="$1 $2"
 }
 
 # Durable state of one captain call: an active captain hold (annotations
@@ -851,6 +880,69 @@ write_hold_origin() {  # <task-id> <shown-body> <origin-or-empty>
   rm -f -- "$tmp"
 }
 
+# The call lines a reader shows without parsing the reason: `Captain hold
+# report:`, `Question:`, and one `Options:` line per option. They sit in the
+# header under the stamp and origin; a new value replaces the old lines above
+# the newest resolution record, so recorded answers below it stay byte-exact.
+write_hold_call_lines() {  # <task-id> <shown-body> <report-or-empty> <question-or-empty> [option...]
+  local id=$1 body=$2 report=$3 question=$4 head='' rest='' stamp new_body tmp option line
+  shift 4
+  body=$(decode_shown_value "$body") || fail "could not decode the existing body for $id"
+  stamp=$(printf '%s\n' "$body" | sed -n 1p)
+  head=$stamp
+  rest=$(printf '%s\n' "$body" | sed 1d | awk -v report="$report" -v question="$question" '
+    /^Resolution recorded by fm-(captain|decision)-hold\.$/ { below = 1 }
+    !below && report != "" && /^Captain hold report: / { next }
+    !below && question != "" && (/^Question: / || /^Options: /) { next }
+    { print }
+  ')
+  line=$(printf '%s\n' "$rest" | sed -n 1p)
+  case "$line" in
+    "Captain hold origin: "*)
+      head=$(printf '%s\n%s' "$head" "$line")
+      rest=$(printf '%s\n' "$rest" | sed 1d)
+      ;;
+  esac
+  [ -z "$report" ] || head=$(printf '%s\nCaptain hold report: %s' "$head" "$report")
+  if [ -n "$question" ]; then
+    head=$(printf '%s\nQuestion: %s' "$head" "$question")
+    for option in "$@"; do
+      head=$(printf '%s\nOptions: %s' "$head" "$option")
+    done
+  fi
+  rest=$(printf '%s\n' "$rest" | awk 'NF || started { started = 1; print }')
+  new_body=$head
+  [ -z "$rest" ] || new_body=$(printf '%s\n\n%s' "$head" "$rest")
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-call.XXXXXX") \
+    || fail "cannot stage the call lines"
+  if ! printf '%s\n' "$new_body" > "$tmp"; then
+    rm -f -- "$tmp"
+    fail "cannot stage the call lines for $id"
+  fi
+  if ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
+    rm -f -- "$tmp"
+    fail "could not record the call lines on $id"
+  fi
+  rm -f -- "$tmp"
+}
+
+# The other open captain-held task, if any, already carrying the call for this
+# origin and report: one origin's report is one captain call.
+open_hold_for_origin_report() {  # <task-id> <origin-identity> <report>
+  local id=$1 origin=$2 report=$3 other ids body
+  ids=$(open_task_ids) || fail "could not list this home's open tasks"
+  for other in $ids; do
+    [ "$other" != "$id" ] || continue
+    task_show "$other" || continue
+    [ "$(show_field_value "$TASK_SHOW_OUTPUT" hold_kind)" = captain ] || continue
+    body=$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)") || continue
+    [ "$(body_hold_origin "$body")" = "$origin" ] || continue
+    printf '%s\n' "$body" | grep -qxF "Captain hold report: $report" || continue
+    printf '%s' "$other"
+    return 0
+  done
+}
+
 refuse_self_inventory() {
   local origin=$1 entry=$2 meta="$STATE/$1.meta"
   if list_has_key "$(meta_value "$meta" decision_keys)" "$entry"; then
@@ -904,6 +996,8 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0
+  local report='' question='' option duplicate
+  local -a options=()
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -913,12 +1007,22 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --report) shift; report=${1:-} ;;
+      --question) shift; question=${1:-} ;;
+      --option) shift; options+=("${1:-}") ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
   done
   validate_slug task-id "$id"
   [ -n "$reason" ] || fail "reason must not be empty"
+  [ -z "$report" ] || validate_one_line report "$report"
+  [ -z "$question" ] || validate_one_line question "$question"
+  [ "${#options[@]}" -eq 0 ] || [ -n "$question" ] || fail "--option needs a --question"
+  for option in "${options[@]+"${options[@]}"}"; do
+    validate_one_line option "$option"
+  done
+  [ -z "$report" ] || [ -n "$origin" ] || fail "--report needs the --origin whose report it is"
   # bin/fm-hold-reason-lib.sh owns the storage constraint and reversible encoding.
   stored_reason=$(fm_hold_reason_encode "$reason") || fail "could not encode the hold reason"
   if [ -n "$origin" ]; then
@@ -937,6 +1041,12 @@ command_hold() {
   esac
   acquire_task_control_lock "$id"
   require_tasks_axi
+  if [ -n "$report" ]; then
+    duplicate=$(task_identity "$origin") || exit $?
+    duplicate=$(open_hold_for_origin_report "$id" "$duplicate" "$report") || exit $?
+    [ -z "$duplicate" ] \
+      || fail "captain-held task $duplicate already carries the call for origin $origin and report $report; re-hold or answer it instead of holding $id"
+  fi
   if task_show "$id"; then
     show=$TASK_SHOW_OUTPUT
     state=$(show_field "$show" state)
@@ -1008,6 +1118,10 @@ command_hold() {
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
+  if [ -n "$report" ] || [ -n "$question" ]; then
+    write_hold_call_lines "$id" "$(show_field "$show" body)" "$report" "$question" \
+      "${options[@]+"${options[@]}"}"
+  fi
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   printf '%s\n' "$id"
 }
@@ -1114,6 +1228,7 @@ command_answer() {
     case "$1" in
       --decision-file) shift; decision_file=${1:-} ;;
       --release) release=1 ;;
+      --routed-to) [ "$#" -ge 3 ] || { usage >&2; exit 2; }; set_routed_to "$2" "$3"; shift 2 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -1324,6 +1439,7 @@ command_answers() {
     case "$1" in
       --source) shift; source=${1:-} ;;
       --any-origin) origin=$BINDING_ANY ;;
+      --routed-to) [ "$#" -ge 3 ] || { usage >&2; exit 2; }; set_routed_to "$2" "$3"; shift 2 ;;
       --*) usage >&2; exit 2 ;;
       *)
         [ -z "$origin" ] || { usage >&2; exit 2; }
@@ -1442,7 +1558,8 @@ command_answers() {
       continue
     fi
     # shellcheck disable=SC2086  # release_flag is empty or a single literal flag.
-    if "$0" answer "$id" --decision-file "$tmp" $release_flag </dev/null >/dev/null 2>"$err"; then
+    if "$0" answer "$id" --decision-file "$tmp" $release_flag \
+      ${ROUTED_TO:+--routed-to ${ROUTED_TO% *} ${ROUTED_TO#* }} </dev/null >/dev/null 2>"$err"; then
       # A parent-channel delivery problem is reported on stderr by the answer
       # path even when the close succeeded; keep it visible.
       [ ! -s "$err" ] || cat "$err" >&2
@@ -1608,15 +1725,31 @@ reconcile_list() {
   printf 'reconcile-requests: %s\n' "$count"
 }
 
+# A held call that a different, finished follow-up task executed. The evidence
+# must name that task, so the record can never point at work it does not cite.
+require_executed_by() {  # <held-task-id> <follow-up-task-id> <evidence-text>
+  local id=$1 by=$2 text=$3
+  validate_slug executed-by "$by"
+  [ "$by" != "$id" ] || fail "task $id cannot be its own follow-up"
+  task_show "$by" || fail "follow-up task $by is absent from this home's configured backlog (data directory $DATA)"
+  [ "$(show_field "$TASK_SHOW_OUTPUT" state)" = "done" ] \
+    || fail "follow-up task $by is not done; only finished work executes a captain call"
+  case "$text" in
+    *"$by"*) : ;;
+    *) fail "the evidence must name follow-up task $by" ;;
+  esac
+}
+
 # The moot outcome. The evidence is what closes the call, and the `reconciled`
 # resolution mode is what keeps the record from claiming the captain answered.
 reconcile_close() {
-  local id=${1:-} evidence_file='' show state hold_kind body occurrence recorded_mode
+  local id=${1:-} evidence_file='' executed_by='' show state hold_kind body occurrence recorded_mode
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --evidence-file) shift; evidence_file=${1:-} ;;
+      --executed-by) shift; executed_by=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -1625,9 +1758,16 @@ reconcile_close() {
   [ -n "$evidence_file" ] || fail "--evidence-file is required; a moot call closes on evidence, never on assertion"
   load_decision "$evidence_file"
   acquire_task_control_lock "$id"
-  reconcile_request_read "$id" \
-    || fail "task $id has no pending board-created reconcile request"
-  require_tasks_axi
+  if [ -n "$executed_by" ]; then
+    require_tasks_axi
+    require_executed_by "$id" "$executed_by" "$DECISION_TEXT"
+    DECISION_TEXT=$(printf 'Executed by: %s\n%s' "$executed_by" "$DECISION_TEXT")
+    DECISION_DIGEST=$(sha256_text "$DECISION_TEXT")
+  else
+    reconcile_request_read "$id" \
+      || fail "task $id has no pending board-created reconcile request"
+    require_tasks_axi
+  fi
   task_show_or_fail "$id" "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
@@ -1677,12 +1817,13 @@ reconcile_close() {
 # The still-active outcome. The hold survives, so the call stays the captain's
 # and stays on Captain's Call, now carrying what the re-check found.
 reconcile_note() {
-  local id=${1:-} note_file='' note show body stamp tmp note_digest marker
+  local id=${1:-} note_file='' executed_by='' note show body stamp tmp note_digest marker
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --note-file) shift; note_file=${1:-} ;;
+      --executed-by) shift; executed_by=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -1695,16 +1836,25 @@ reconcile_note() {
   [ "$(printf '%s' "$note" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
     || fail "note file exceeds 8192 bytes"
   acquire_task_control_lock "$id"
-  reconcile_request_read "$id" \
-    || fail "task $id has no pending board-created reconcile request"
-  require_tasks_axi
+  if [ -n "$executed_by" ]; then
+    require_tasks_axi
+    require_executed_by "$id" "$executed_by" "$note"
+  else
+    reconcile_request_read "$id" \
+      || fail "task $id has no pending board-created reconcile request"
+    require_tasks_axi
+  fi
   command_open "$id" \
     || fail "task $id is not an open captain call; a note cannot keep a closed call open"
   task_show_or_fail "$id" "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
   body=$(decode_shown_value "$(show_field "$show" body)") \
     || fail "could not decode the existing body for $id"
   note_digest=$(sha256_text "$note")
-  marker="Reconcile request: $RECONCILE_REQUESTED | $RECONCILE_SOURCE | note digest: $note_digest"
+  if [ -n "$executed_by" ]; then
+    marker="Executed by: $executed_by | note digest: $note_digest"
+  else
+    marker="Reconcile request: $RECONCILE_REQUESTED | $RECONCILE_SOURCE | note digest: $note_digest"
+  fi
   case "$body" in
     *"$marker"*)
       reconcile_request_retire "$id" \

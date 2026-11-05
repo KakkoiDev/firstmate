@@ -788,15 +788,23 @@ fm_send_close_resolved_keys() { # <answer-text>
 # lines, exactly the way every other channel does. fm-send decides nothing here:
 # it does not build a decision record or choose a close path; the keys were
 # already resolved to task ids above, so the intake needs no legacy origin.
-fm_send_feed_resolved_holds() { # <answer-text>
-  local note=$1 k lines=''
+# A local inbox record names the message the answer reached, which the intake
+# records as `Routed to: <task-id> <NNN>`.
+fm_send_feed_resolved_holds() { # <answer-text> [inbox-record]
+  local note=$1 record=${2:-} k lines='' seq=''
+  local -a routed=()
   [ -n "$RESOLVE_HOLD_KEYS" ] || return 0
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_HOLD_KEYS; do
     lines="${lines}${k}"$'\t'"${note}"$'\t'$'\n'
   done
+  if [ -n "$record" ]; then
+    seq=${record##*/}
+    seq=${seq%.msg}
+    routed=(--routed-to "$RESOLVE_TASK_ID" "$seq")
+  fi
   if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-captain-hold.sh" answers \
-    --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
+    --source "a firstmate answer sent to $RESOLVE_TASK_ID" "${routed[@]+"${routed[@]}"}" >/dev/null 2>&1; then
     echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
     return 1
   fi
@@ -1135,7 +1143,7 @@ else
     # (answerer-closes; see the header contract).
     if [ -n "$RESOLVE_KEYS" ]; then
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
-      fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+      fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" "$INBOX_RECORD" || exit 1
     fi
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher owns loss detection from here, either through its
