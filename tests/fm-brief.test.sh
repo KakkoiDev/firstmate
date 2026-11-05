@@ -1753,6 +1753,28 @@ test_ship_egm_decision_is_recorded() {
   pass "fm-brief.sh: the EGM design-review decision is recorded in the ship brief"
 }
 
+# Report summaries are read from the report head only, so scout and ship
+# briefs both name the two lines a report starts with.
+# shellcheck disable=SC2016  # the backticks are literal brief text.
+test_scout_and_ship_briefs_require_the_report_head() {
+  local home brief head='opens with its `# ` title, then an `Outcome: {one-line result}` line and a `Needs: {what firstmate or the captain must do next}` line'
+  home="$TMP_ROOT/report-head-home"
+  mkdir -p "$home/data"
+  write_registry "$home"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" sample-head-scout sample --scout >/dev/null 2>&1 \
+    || fail "scout scaffold failed"
+  brief="$home/data/sample-head-scout/brief.md"
+  assert_grep "$head" "$brief" "scout brief does not name the report head lines"
+  assert_grep '`Needs: nothing`' "$brief" "scout brief does not allow Needs: nothing"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --no-egm test-fixture sample-head-ship some-proj \
+    --mode local-only >/dev/null 2>&1 || fail "ship scaffold failed"
+  brief="$home/data/sample-head-ship/brief.md"
+  assert_grep "$head" "$brief" "ship brief does not name the report head lines"
+  assert_grep '`Needs: nothing`' "$brief" "ship brief does not allow Needs: nothing"
+  pass "fm-brief.sh: scout and ship briefs require the Outcome and Needs report head"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_ship_egm_decision_is_required_and_validated
@@ -1797,3 +1819,4 @@ test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
 test_brief_forbids_rm_recursive
+test_scout_and_ship_briefs_require_the_report_head

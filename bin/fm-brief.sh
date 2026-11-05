@@ -816,6 +816,7 @@ $WAIT_BLOCK$INBOX_SECTION
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
+The report opens with its \`# \` title, then an \`Outcome: {one-line result}\` line and a \`Needs: {what firstmate or the captain must do next}\` line (\`Needs: nothing\` when nothing is needed), because every summary of it is read from those two lines alone.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 $LAVISH_LINE
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
@@ -871,6 +872,7 @@ $RULE1
 2. Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
    Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
    Leave the worktree clean before reporting done.
+   If you write a report to \`$DATA/$ID/report.md\`, it opens with its \`# \` title, then an \`Outcome: {one-line result}\` line and a \`Needs: {what firstmate or the captain must do next}\` line (\`Needs: nothing\` when nothing is needed), because every summary of it is read from those two lines alone.
 3. $FORGE_RULE_LINE
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
