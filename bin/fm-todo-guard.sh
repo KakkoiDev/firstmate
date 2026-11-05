@@ -71,6 +71,10 @@
 # `(AI-generated) <task-id>: <text>`, which marks a task firstmate started on
 # its own initiative where the plugin shows objectives; without it,
 # `<task-id>: <text>`. A failed update exits 1 with the bridge's reason.
+# Without --ai-generated the task serves a captain ask, whose todo belongs on
+# the captain's list: while `unowned --notes <notes-file>` lists any open item,
+# it queues nothing and exits 1 with that list, so the existing item is linked
+# with --todo instead of duplicated.
 #
 # `link-task` makes sure <task-id> ends up linked to a todo, and refuses when
 # it cannot. Each --todo is resolved as `resolve` does and linked, by id when
@@ -331,6 +335,15 @@ cmd_objective() {  # <task-id> <notes-file> <text> [--ai-generated]
     --ai-generated) mark='(AI-generated) ' ;;
     *) die "unknown argument: $4" ;;
   esac
+  if [ -z "$mark" ]; then
+    local open rc=0
+    open=$(cmd_unowned unowned --notes "$file") || rc=$?
+    [ "$rc" -eq 0 ] || {
+      printf "fm-todo-guard: %s serves a captain ask; link the captain's existing todo with --todo \"<todo text>\" instead of queuing a duplicate objective\n%s\n" \
+        "$task" "$open" >&2
+      return 1
+    }
+  fi
   id=$(bridge update "$file" "$mark$task: $text" --by firstmate --task "$task" 2>&1) || {
     printf '%s\n' "$id" >&2
     return 1

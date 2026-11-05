@@ -826,6 +826,7 @@ test_spawn_without_todo_adds_an_objective_update() {
   home="$case_dir/home"
   write_bridge "$home" '{}'
   write_todos "$home" "answer the vendor"
+  printf '{"answer the vendor": {"status": "in-progress", "task": "vendor-1"}}\n' > "$home/bridge-status.json"
   printf '%s\n' "$home/notes.md" > "$home/bridge-active"
   out=$(spawn_ship "$case_dir" task-c) || rc=$?
   expect_code 0 "$rc" "a spawn without --todo in a home with an active notes file failed: $out"
@@ -834,6 +835,21 @@ test_spawn_without_todo_adds_an_objective_update() {
   assert_equals "task-c	id:1kmv58p --by firstmate" "$(cat "$home/bridge-links.log")" "the spawn did not link the created todo by id"
   assert_contains "$(cat "$home/state/task-c.meta")" "todo=id:1kmv58p" "the task record does not name the created todo"
   pass "a spawn without --todo adds its intent as an objective update and links the todo it makes"
+}
+
+test_spawn_without_todo_refuses_to_duplicate_an_open_todo() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-dup task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{}'
+  write_todos "$home" "answer the vendor"
+  printf '%s\n' "$home/notes.md" > "$home/bridge-active"
+  out=$(spawn_ship "$case_dir" task-c 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a spawn queued an objective while the captain's list had an unowned todo: $out"
+  assert_contains "$out" "answer the vendor" "the refusal did not list the captain's open todo"
+  [ ! -e "$home/bridge-updates.log" ] || fail "a refused spawn still queued an objective update"
+  assert_nothing_launched "$case_dir" task-c
+  pass "a spawn without --todo refuses to duplicate an unowned todo on the captain's list"
 }
 
 test_ai_generated_spawn_marks_its_objective() {
@@ -968,6 +984,7 @@ test_spawn_without_todo_is_refused
 test_spawn_with_no_todo_reason_launches
 test_unknown_or_ambiguous_todo_is_refused
 test_spawn_without_todo_adds_an_objective_update
+test_spawn_without_todo_refuses_to_duplicate_an_open_todo
 test_ai_generated_spawn_marks_its_objective
 test_ai_generated_spawn_without_a_session_is_refused
 test_deferred_spawn_links_the_todo_it_made

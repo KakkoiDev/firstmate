@@ -325,7 +325,19 @@ assert_equals "$home/notes.md (AI-generated) sweep-1: Sweep stale branches --by 
 assert_equals "sweep-1	id:0aigen1 --by firstmate" "$(cat "$home/bridge-links.log")" "the objective's todo was not linked by id"
 pass "objective --ai-generated marks the objective AI-generated and links its todo"
 
+# A captain ask whose todo is already on the plugin's list links that item;
+# an objective for it would queue a duplicate, so it is refused.
+home=$(link_home objective-duplicate)
+rc=0
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" objective fix-1 "$home/notes.md" "Fix the login" 2>&1) || rc=$?
+expect_code 1 "$rc" "an objective was queued while the captain's list has an unowned todo: $out"
+assert_contains "$out" "write the release note" "the refusal did not list the captain's open todos"
+assert_contains "$out" "--todo" "the refusal did not say to link the existing todo"
+[ ! -e "$home/bridge-updates.log" ] || fail "a refused objective still queued an update"
+pass "objective without --ai-generated refuses to duplicate an unowned todo on the captain's list"
+
 home=$(link_home objective-captain)
+printf '# Todo\n\n- [x] old finished item\n' > "$home/notes.md"
 run_home "$home" "$ROOT/bin/fm-todo-guard.sh" objective fix-1 "$home/notes.md" "Fix the login" >/dev/null \
   || fail "objective failed"
 assert_equals "$home/notes.md fix-1: Fix the login --by firstmate --task fix-1" \
