@@ -210,6 +210,28 @@ require_branch_eligible_rows() {
 # last drain printed. Read BEFORE an ack re-claims, so a row that arrived since
 # presentation is never named as "the current wake" the caller may acknowledge
 # unseen. 0 when nothing is on record.
+# A captain inbox note gets exactly one wake (bin/fm-inbox.sh announce_note),
+# so consuming an inbox:<id> row while state/inbox/<id>.note is still pending
+# would leave that note with nothing that ever wakes firstmate for it again.
+# Refuse the whole acknowledgement, before any mutation, naming each such note.
+refuse_pending_inbox_notes_locked() { # <rows-file> <cutoff>
+  local pending
+  pending=$(awk -F '\t' -v cutoff="$2" -v seqs="$1" '
+    BEGIN { while ((getline line < seqs) > 0) owned[line] = 1 }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff && ($2 in owned) && $3 == "check" \
+      && $4 ~ /^inbox:[A-Za-z0-9._-]+$/ { print substr($4, 7) }
+  ' "$FM_WAKE_QUEUE" | while IFS= read -r id; do
+    [ ! -f "$STATE/inbox/$id.note" ] || printf '%s\n' "$id"
+  done) || return 1
+  [ -n "$pending" ] || return 0
+  printf 'wake drain: refusing to acknowledge through %s: captain inbox note(s) still pending, and their wake is the only one they get:\n' "$2" >&2
+  printf '%s\n' "$pending" | while IFS= read -r id; do
+    printf '  %s: handle it, then run bin/fm-inbox.sh drain --ack %s\n' "$id" "$id" >&2
+  done
+  printf 'wake drain: then re-run the same --ack-through command\n' >&2
+  return 1
+}
+
 presented_max_row() { # <rows-file>
   if rows_file_valid "$1" 2>/dev/null; then
     awk '$1 ~ /^[0-9]+$/ && $1 > max { max=$1 } END { print max + 0 }' "$1"
@@ -876,6 +898,12 @@ if [ -n "$ACK_THROUGH" ]; then
     # would hand every later away-session wake back to main. A live branch
     # grant remains excluded by claim_main_rows_locked.
     claim_main_rows_locked "$ACK_THROUGH" || exit 1
+  fi
+  # The away daemon escalates every check row durably before it acknowledges,
+  # and cannot handle a note itself, so refusing it would only re-escalate the
+  # same rows on every cycle.
+  if [ "$ACTOR" = main ] && ! fm_afk_daemon_owns_supervision "$STATE"; then
+    refuse_pending_inbox_notes_locked "$MAIN_ROWS_FILE" "$ACK_THROUGH" || exit 1
   fi
   if [ "$ACTOR" = branch ]; then
     # An away-posture grant can name check-kind rows - the attended
