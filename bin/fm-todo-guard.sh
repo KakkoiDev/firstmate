@@ -12,6 +12,7 @@
 #   fm-todo-guard.sh resolve <todo text> [--notes <notes-file>]... [--note <inbox-note>]...
 #   fm-todo-guard.sh record-outcome <task-id> [--pr <url>] [--report <path>]
 #     [--scout [--report-has-captain-call <yes|no>] [--scout-recommends-ship <yes|no>]]
+#   fm-todo-guard.sh record-close <task-id>
 #
 # `unowned` prints an `UNOWNED TODOS` section listing every open item (`[ ]` or
 # `[~]`) under the `Todo` heading of each notes file that no work owns, then
@@ -50,6 +51,16 @@
 # and its two readings for a scout, and never on a --force cleanup, whose
 # discarded work finished nothing.
 #
+# `record-close` keeps the outcome of a backlog task closed with no worker and
+# so no cleanup, such as a captain hold. bin/fm-tasks-axi.sh runs it after a
+# successful `done` and bin/fm-captain-hold.sh after an answer closes its task.
+# With state/<task-id>.meta present it changes nothing, because cleanup records
+# that task. Otherwise it appends a `done` outcome for <task-id> when an item is
+# linked to it and has no outcome as new as its latest link, and a `done` outcome, with kind
+# `scout` and `followup` <task-id>, for every scout whose latest outcome is
+# `open` and whose report the task links (a `report:` link, relative to the
+# backlog root), so the scout's todos close with the work its report left.
+#
 # Environment: FM_HOME, FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, FM_DATA_OVERRIDE
 # select the home, as for bin/fm-inbox.sh.
 set -euo pipefail
@@ -59,6 +70,7 @@ FM_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 BRIDGE="$CONFIG/notes-keeping-bridge"
 
 die() { printf 'fm-todo-guard: %s\n' "$*" >&2; exit 2; }
@@ -276,9 +288,55 @@ with open(links, 'a', encoding='utf-8') as f:
 PY
 }
 
+cmd_record_close() {
+  local task=${1:-} show
+  [ -n "$task" ] && [ "$#" -eq 1 ] || die "usage: fm-todo-guard.sh record-close <task-id>"
+  [ -f "$STATE/notes-todo-links.jsonl" ] || return 0
+  [ ! -e "$STATE/$task.meta" ] || return 0
+  show=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SELF_DIR/fm-tasks-axi.sh" show "$task" --full) \
+    || die "cannot read task $task from the backlog"
+  FM_TODO_SHOW="$show" python3 - "$STATE/notes-todo-links.jsonl" "$task" "$(dirname "$DATA")" <<'PY'
+import json, os, re, sys, time
+
+links, task, root = sys.argv[1:4]
+records = []
+with open(links, encoding='utf-8', errors='replace') as f:
+    for line in f:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and isinstance(record.get('task'), str):
+            records.append(record)
+linked, latest = {}, {}
+for r in records:
+    if isinstance(r.get('key'), str):
+        linked[r['task']] = r.get('at', 0)
+    elif isinstance(r.get('outcome'), str):
+        latest[r['task']] = r
+m = re.search(r'^\s*links: "(.*)"\s*$', os.environ['FM_TODO_SHOW'], re.M)
+reports = set()
+for link in (m.group(1).split(',') if m else []):
+    if link.startswith('report:') and link[7:]:
+        reports.add(os.path.realpath(os.path.join(root, link[7:])))
+now = int(time.time())
+out = []
+if task in linked and (task not in latest or latest[task].get('at', 0) < linked[task]):
+    out.append({'task': task, 'outcome': 'done', 'at': now, 'kind': 'closed'})
+for scout, r in latest.items():
+    if scout != task and r['outcome'] == 'open' and isinstance(r.get('report'), str) \
+            and os.path.realpath(os.path.join(root, r['report'])) in reports:
+        out.append({'task': scout, 'outcome': 'done', 'at': now, 'kind': 'scout', 'followup': task})
+if out:
+    with open(links, 'a', encoding='utf-8') as f:
+        f.write(''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in out))
+PY
+}
+
 case "${1:-}" in
   unowned|resolve) cmd_unowned "$@" ;;
   record-outcome) shift; cmd_record_outcome "$@" ;;
+  record-close) shift; cmd_record_close "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown subcommand: $1 (try --help)" ;;
 esac

@@ -223,3 +223,72 @@ out=$(PATH="$fakebin:$PATH" run_home "$home" "$ROOT/bin/fm-wake-drain.sh" 2>/dev
 assert_contains "$out" "AUTO-RELEASE" "a heartbeat drain did not run the cleanup sweep"
 assert_contains "$out" "finished-scout (report done)" "the heartbeat sweep did not act on the finished scout"
 pass "a heartbeat drain cleans up finished workers and reports each in one line"
+
+# --- a task closed with no worker ------------------------------------------
+
+# The ChatGPT chain: a scout whose report left work records outcome `open`,
+# firstmate holds the follow-up that report asked for (linked to the report),
+# and the captain's answer closes that follow-up with no worker and no cleanup.
+if command -v tasks-axi >/dev/null 2>&1; then
+  closed_home() {  # <name> -> home with a real markdown backlog and the chain's links
+    local home
+    home=$(make_home "$1")
+    fm_test_tasks_toml "$home/.tasks.toml"
+    printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+    mkdir -p "$home/data/chatgpt-it-reply"
+    printf '# report\n' > "$home/data/chatgpt-it-reply/report.md"
+    cat > "$home/state/notes-todo-links.jsonl" <<JSON
+{"task": "chatgpt-it-reply", "key": "id:1kupnl3", "id": "1kupnl3", "by": "firstmate", "at": 100}
+{"task": "chatgpt-it-reply", "outcome": "open", "at": 200, "kind": "scout", "report": "$home/data/chatgpt-it-reply/report.md"}
+{"task": "chatgpt-login-retry", "key": "id:06ie42j", "id": "06ie42j", "by": "firstmate", "at": 300}
+JSON
+    run_home "$home" "$ROOT/bin/fm-tasks-axi.sh" add chatgpt-login-retry "retry ChatGPT login" \
+      --report data/chatgpt-it-reply/report.md >/dev/null || fail "could not add the follow-up"
+    run_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold chatgpt-login-retry --reason "captain retries login" >/dev/null \
+      || fail "could not hold the follow-up"
+    printf 'I successfully logged in ChatGPT\n' > "$home/decision.txt"
+    printf '%s\n' "$home"
+  }
+
+  latest_outcome() {  # <home> <task> -> the task's latest outcome
+    python3 - "$1/state/notes-todo-links.jsonl" "$2" <<'PY'
+import json, sys
+last = ''
+for line in open(sys.argv[1]):
+    r = json.loads(line)
+    if r.get('task') == sys.argv[2] and 'key' not in r and 'outcome' in r:
+        last = r['outcome']
+print(last)
+PY
+  }
+
+  home=$(closed_home closed-release)
+  run_home "$home" "$ROOT/bin/fm-captain-hold.sh" answer chatgpt-login-retry --decision-file "$home/decision.txt" --release >/dev/null \
+    || fail "the release answer failed"
+  run_home "$home" "$ROOT/bin/fm-tasks-axi.sh" "done" chatgpt-login-retry >/dev/null || fail "done failed"
+  assert_equals "done" "$(latest_outcome "$home" chatgpt-login-retry)" "a follow-up closed with no worker kept no done outcome"
+  assert_equals "done" "$(latest_outcome "$home" chatgpt-it-reply)" "the scout's todo did not follow its finished follow-up"
+  pass "a released hold marked done records its outcome and its scout's todo follows it"
+
+  home=$(closed_home closed-answer)
+  run_home "$home" "$ROOT/bin/fm-captain-hold.sh" answer chatgpt-login-retry --decision-file "$home/decision.txt" >/dev/null \
+    || fail "the closing answer failed"
+  assert_equals "done" "$(latest_outcome "$home" chatgpt-login-retry)" "a hold closed by its answer kept no done outcome"
+  assert_equals "done" "$(latest_outcome "$home" chatgpt-it-reply)" "the scout's todo did not follow the answered follow-up"
+  pass "a hold closed by the captain's answer records its outcome and its scout's todo follows it"
+
+  home=$(closed_home closed-scout-itself)
+  run_home "$home" "$ROOT/bin/fm-tasks-axi.sh" add chatgpt-it-reply "read the IT reply" >/dev/null || fail "could not add the scout row"
+  run_home "$home" "$ROOT/bin/fm-tasks-axi.sh" "done" chatgpt-it-reply >/dev/null || fail "done failed"
+  assert_equals open "$(latest_outcome "$home" chatgpt-it-reply)" "closing a cleaned-up scout's row overwrote its open outcome"
+  pass "closing a row whose cleanup already recorded an outcome leaves that outcome"
+
+  home=$(closed_home closed-live)
+  fm_write_meta "$home/state/chatgpt-login-retry.meta" "kind=ship" "window=fake:fm-x"
+  run_home "$home" "$ROOT/bin/fm-tasks-axi.sh" "done" chatgpt-login-retry >/dev/null || fail "done failed"
+  assert_equals '' "$(latest_outcome "$home" chatgpt-login-retry)" "a task with a live worker got an outcome before its cleanup"
+  assert_equals open "$(latest_outcome "$home" chatgpt-it-reply)" "a scout's todo followed a follow-up whose worker is still live"
+  pass "a task with a live worker leaves its outcome to cleanup"
+else
+  echo "skip: tasks-axi not found (the worker-less close cases need a real backlog)"
+fi

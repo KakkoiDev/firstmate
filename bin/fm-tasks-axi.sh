@@ -18,6 +18,10 @@
 # through bin/fm-hold-reason-lib.sh, which owns the field-only decoding contract.
 # Decoded reasons use quoted strings so embedded line breaks remain intact.
 #
+# A successful `done` (or `close`) then runs bin/fm-todo-guard.sh record-close
+# on the task, which owns keeping a worker-less close's outcome for its linked
+# notes-keeping todos; a failure there only warns.
+#
 # Why it exists: a bare `tasks-axi` resolves the tracked `.tasks.toml` paths
 # against its working directory, so from the code root it forks the queue
 # whenever the home lives elsewhere; docs/configuration.md ("Backlog backend")
@@ -149,6 +153,12 @@ case "${1:-}" in
     set -o pipefail
     tasks-axi ${ARGS[@]+"${ARGS[@]}"} | fm_hold_reason_decode_stream
     exit $?
+    ;;
+  done|close)
+    tasks-axi ${ARGS[@]+"${ARGS[@]}"} || exit $?
+    [ -z "${2:-}" ] || FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-todo-guard.sh" record-close "$2" \
+      || printf 'fm-tasks-axi: warning: could not keep %s outcome for its linked todos; they may read open\n' "$2" >&2
+    exit 0
     ;;
 esac
 exec tasks-axi ${ARGS[@]+"${ARGS[@]}"}
