@@ -630,6 +630,15 @@ With it present, `no-mistakes` and `direct-PR` ship briefs, including promoted o
 `local-only` tasks, scouts, and Gerrit, GitLab, Forgejo, and external review changes are unaffected.
 The flag is a home-local preference and is not inherited by secondmate homes; [`bin/fm-review-gate-lib.sh`](../bin/fm-review-gate-lib.sh) owns the worker steps, the evidence record format, and the check.
 
+## Post-merge command (config/post-merge/\<project\>)
+
+The optional local, gitignored `config/post-merge/<project>` file names one command that `bin/fm-pr-merge.sh` runs once after it proves a task's merge landed.
+`<project>` is the basename of the task's recorded project directory, for example `config/post-merge/dotfiles` for a task in `projects/dotfiles`.
+The first non-blank line that does not start with `#` is the command, run under `bash -c` with stdin closed; the rest of the file is ignored.
+A queued, refused, or unconfirmed merge runs nothing, and an absent file runs nothing.
+The command's output and a one-line success or failure notice are printed for firstmate to relay, and a failing command never changes the merge's exit status or its recorded outcome.
+The file is a home-local preference and is not inherited by secondmate homes; [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s header owns the exact behavior.
+
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.

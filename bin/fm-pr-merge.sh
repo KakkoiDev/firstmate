@@ -186,6 +186,14 @@
 # destination, normal-case deduplication, and at-least-once recovery.
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
+# After a landed merge (never a queued or unconfirmed one), the optional
+# post-merge command for the task's project runs once: the first non-blank,
+# non-# line of config/post-merge/<project>, where <project> is the basename of
+# the task's recorded project= path (schema: docs/configuration.md "Post-merge
+# command"). It runs under bash with stdin closed; its combined output is
+# printed, then one "notice: post-merge command for <project> succeeded|failed
+# (exit N)" line for firstmate to relay. Its result never changes this
+# script's exit status or the recorded merge outcome.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1852,3 +1860,31 @@ case "$outcome_rc" in
     printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
 esac
+
+run_post_merge_command() {
+  local project name file line cmd='' output rc=0
+  project=$(grep '^project=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  name=${project%/}
+  name=${name##*/}
+  case "$name" in ''|.|..) return 0 ;; esac
+  file="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/post-merge/$name"
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    [ -n "${line//[[:space:]]/}" ] || continue
+    cmd=$line
+    break
+  done < "$file"
+  [ -n "$cmd" ] || return 0
+  output=$(bash -c "$cmd" </dev/null 2>&1) || rc=$?
+  [ -z "$output" ] || printf '%s\n' "$output"
+  if [ "$rc" -eq 0 ]; then
+    printf 'notice: post-merge command for %s succeeded (exit 0)\n' "$name"
+  else
+    printf 'notice: post-merge command for %s failed (exit %s); the merge of %s still landed\n' \
+      "$name" "$rc" "$URL"
+  fi
+}
+run_post_merge_command || true

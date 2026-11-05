@@ -2989,6 +2989,75 @@ test_forgejo_rejected_merge_is_never_trusted_by_exit_status
 test_forgejo_transient_confirm_read_failure_still_persists_authority
 test_forgejo_merge_method_and_extra_args
 
+# A landed merge runs the project's optional post-merge command from
+# config/post-merge/<project>, where <project> is the basename of the task's
+# recorded project= path; make_case records "$case_dir/project".
+run_post_merge_case() {
+  local case_dir=$1 number=$2
+  set +e
+  run_pr_merge "$case_dir" task-x1 "https://github.com/example/repo/pull/$number" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  POST_MERGE_RC=$?
+  set -e
+}
+
+test_post_merge_command_runs_once_after_landed_merge() {
+  local case_dir
+  case_dir=$(make_case post-merge-runs)
+  add_gh_mocks "$case_dir" 7171717171717171717171717171717171717171
+  : > "$case_dir/gh-axi.log"
+  mkdir -p "$case_dir/home/config/post-merge"
+  printf '%s\n' "echo post-merge-ran >> '$case_dir/hook.log'; echo restart with claude --continue" \
+    > "$case_dir/home/config/post-merge/project"
+
+  run_post_merge_case "$case_dir" 71
+
+  expect_code 0 "$POST_MERGE_RC" "post-merge-runs: the merge should succeed"
+  [ "$(grep -c post-merge-ran "$case_dir/hook.log" 2>/dev/null)" = 1 ] \
+    || fail "post-merge-runs: the post-merge command did not run exactly once"
+  assert_grep 'restart with claude --continue' "$case_dir/stdout" \
+    "post-merge-runs: the command's own output was not printed for relay"
+  assert_grep 'notice: post-merge command for project succeeded' "$case_dir/stdout" \
+    "post-merge-runs: no one-line notice named the post-merge result"
+  pass "fm-pr-merge runs the configured post-merge command once after a landed merge"
+}
+
+test_post_merge_absent_config_runs_nothing() {
+  local case_dir
+  case_dir=$(make_case post-merge-absent)
+  add_gh_mocks "$case_dir" 7272727272727272727272727272727272727272
+  : > "$case_dir/gh-axi.log"
+
+  run_post_merge_case "$case_dir" 72
+
+  expect_code 0 "$POST_MERGE_RC" "post-merge-absent: the merge should succeed"
+  assert_grep 'verified: https://github.com/example/repo/pull/72 is merged' "$case_dir/stdout" \
+    "post-merge-absent: the merge was not reported as landed"
+  assert_no_grep 'notice: post-merge command' "$case_dir/stdout" \
+    "post-merge-absent: a post-merge notice appeared without any config"
+  pass "fm-pr-merge runs nothing after a merge when no post-merge command is configured"
+}
+
+test_post_merge_failure_leaves_merge_landed() {
+  local case_dir
+  case_dir=$(make_case post-merge-fails)
+  add_gh_mocks "$case_dir" 7373737373737373737373737373737373737373
+  : > "$case_dir/gh-axi.log"
+  mkdir -p "$case_dir/home/config/post-merge"
+  printf '%s\n' 'echo refusing on divergence; exit 7' > "$case_dir/home/config/post-merge/project"
+
+  run_post_merge_case "$case_dir" 73
+
+  expect_code 0 "$POST_MERGE_RC" "post-merge-fails: a failing post-merge command must not fail the landed merge"
+  assert_grep 'verified: https://github.com/example/repo/pull/73 is merged' "$case_dir/stdout" \
+    "post-merge-fails: the landed merge was not reported as merged"
+  assert_grep 'refusing on divergence' "$case_dir/stdout" \
+    "post-merge-fails: the failing command's output was not printed for relay"
+  assert_grep 'notice: post-merge command for project failed (exit 7)' "$case_dir/stdout" \
+    "post-merge-fails: the failure notice did not name the exit status"
+  pass "fm-pr-merge keeps a merge reported landed when its post-merge command fails"
+}
+
 # The merge gate asks whether the task is still held for the captain. A home
 # that carries no backlog records no captain calls at all, so nothing can be
 # held and the merge must proceed; a backlog that EXISTS but cannot be read may
@@ -4620,3 +4689,6 @@ test_allow_red_refused_on_forgejo
 test_allow_missing_refused_on_forgejo
 test_allow_no_pipeline_merges_only_a_null_head_pipeline
 test_allow_no_pipeline_is_attended_only_and_gitlab_only
+test_post_merge_command_runs_once_after_landed_merge
+test_post_merge_absent_config_runs_nothing
+test_post_merge_failure_leaves_merge_landed
