@@ -836,6 +836,39 @@ test_spawn_without_todo_adds_an_objective_update() {
   pass "a spawn without --todo adds its intent as an objective update and links the todo it makes"
 }
 
+test_ai_generated_spawn_marks_its_objective() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-ai task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{}'
+  printf '%s\n' "$home/notes.md" > "$home/bridge-active"
+  out=$(run_spawn "$case_dir" "$home" "$(new_worktree "$case_dir" task-c)" task-c "$case_dir/project" \
+    --mode no-mistakes --yolo off --ai-generated) || rc=$?
+  expect_code 0 "$rc" "an --ai-generated spawn failed: $out"
+  assert_equals "$home/notes.md (AI-generated) task-c: Run the project's heavy suite for task-c. --by firstmate --task task-c" \
+    "$(cat "$home/bridge-updates.log")" "the AI-generated spawn's objective is not marked"
+  assert_equals "task-c	id:1kmv58p --by firstmate" "$(cat "$home/bridge-links.log")" "the marked objective's todo was not linked"
+  pass "--ai-generated marks the spawn's objective AI-generated and links its todo"
+}
+
+test_ai_generated_spawn_without_a_session_is_refused() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-ai-nosession task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{}'
+  out=$(run_spawn "$case_dir" "$home" "$(new_worktree "$case_dir" task-c)" task-c "$case_dir/project" \
+    --mode no-mistakes --yolo off --ai-generated) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an --ai-generated spawn with no notes session launched: $out"
+  assert_contains "$out" "--ai-generated needs an active notes-keeping session" "the refusal did not say why"
+  assert_nothing_launched "$case_dir" task-c
+  rc=0
+  out=$(run_spawn "$case_dir" "$home" "$(new_worktree "$case_dir" task-c)" task-c "$case_dir/project" \
+    --mode no-mistakes --yolo off --ai-generated --todo "x") || rc=$?
+  [ "$rc" -ne 0 ] || fail "--ai-generated with --todo launched: $out"
+  assert_contains "$out" "contradicts --todo and --no-todo" "the contradiction was not named"
+  pass "--ai-generated refuses without a notes session and with --todo"
+}
+
 # The plugin's Laya moves any todo no task is linked to, so a todo the spawn
 # made must be linked even when a later gate stops the launch.
 test_deferred_spawn_links_the_todo_it_made() {
@@ -935,6 +968,8 @@ test_spawn_without_todo_is_refused
 test_spawn_with_no_todo_reason_launches
 test_unknown_or_ambiguous_todo_is_refused
 test_spawn_without_todo_adds_an_objective_update
+test_ai_generated_spawn_marks_its_objective
+test_ai_generated_spawn_without_a_session_is_refused
 test_deferred_spawn_links_the_todo_it_made
 test_failed_objective_update_is_refused
 test_no_todo_with_an_active_notes_file_is_refused

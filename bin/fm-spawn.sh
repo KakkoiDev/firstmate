@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait] [--todo <todo text>... | --no-todo <reason>] <jev decisions>
-#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait] [--todo <todo text>... | --no-todo <reason>] <jev decisions>
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait] [--todo <todo text>... | --no-todo <reason> | --ai-generated] <jev decisions>
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait] [--todo <todo text>... | --no-todo <reason> | --ai-generated] <jev decisions>
 #   <jev decisions> = --concurrency <parallel|semantic-dependency|shared-external-state|migration-conflict>
 #   --decision project-match=<id|off> --decision deliverable-class=<id|off>
 #   [--decision secondmate-scope=<id|off>] [--decision surface-class=<id|off>],
@@ -20,9 +20,13 @@
 #   it to done; an item whose line ends in the plugin's `<!-- id:<id> -->` is
 #   recorded without that comment and linked as id:<id> --by firstmate.
 #   Without --todo, while the bridge's `active` names a notes file, the spawn
-#   runs the bridge's `update <file> "<id>: <first Captain's intent line>"
-#   --by firstmate --task <id>`, which the plugin writes as firstmate's [UPDATE]
-#   and turns into a todo; that todo is recorded as todo=id:<item-id> and linked
+#   adds the first Captain's intent line as the task's objective
+#   (bin/fm-todo-guard.sh objective, which owns its wording), which the plugin
+#   writes as firstmate's [UPDATE] and turns into a todo; --ai-generated, for a
+#   task firstmate started on its own initiative rather than from a captain
+#   ask, marks that objective AI-generated, contradicts --todo and --no-todo,
+#   and refuses while no notes file is active; that todo is recorded as
+#   todo=id:<item-id> and linked
 #   by id at once, so a spawn a later check refuses or defers still leaves it
 #   linked, which keeps the plugin from moving it on its own while the task is
 #   unfinished. A failed update refuses, launching nothing, and --no-todo is
@@ -886,6 +890,7 @@ DECISIONS=()
 TODOS=()
 NO_TODO=
 NO_TODO_SET=0
+AI_GENERATED=0
 SPAWN_ARGV=("$@")
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
@@ -1016,6 +1021,7 @@ for a in "$@"; do
     ;;
   --todo) want_value=todo ;;
   --todo=*) TODOS+=("${a#--todo=}") ;;
+  --ai-generated) AI_GENERATED=1 ;;
   --no-todo) want_value=no-todo ;;
   --no-todo=*)
     NO_TODO=${a#--no-todo=}
@@ -1081,6 +1087,10 @@ case "$NO_TODO_SET:$NO_TODO" in
 esac
 [ "$NO_TODO_SET" -eq 0 ] || [ "${#TODOS[@]}" -eq 0 ] || {
   echo "error: --todo and --no-todo contradict each other; pass one" >&2
+  exit 1
+}
+[ "$AI_GENERATED" -eq 0 ] || { [ "${#TODOS[@]}" -eq 0 ] && [ "$NO_TODO_SET" -eq 0 ]; } || {
+  echo "error: --ai-generated marks the objective the spawn adds; it contradicts --todo and --no-todo" >&2
   exit 1
 }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || {
@@ -1157,8 +1167,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch reuses the task's recorded upstream consent; --upstream-consent cannot override it" >&2
     exit 1
   }
-  [ "${#TODOS[@]}" -eq 0 ] && [ "$NO_TODO_SET" -eq 0 ] || {
-    echo "error: --relaunch reuses the task's recorded todo links; --todo/--no-todo cannot override them" >&2
+  [ "${#TODOS[@]}" -eq 0 ] && [ "$NO_TODO_SET" -eq 0 ] && [ "$AI_GENERATED" -eq 0 ] || {
+    echo "error: --relaunch reuses the task's recorded todo links; --todo/--no-todo/--ai-generated cannot override them" >&2
     exit 1
   }
 else
@@ -1957,6 +1967,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
     exit 1
   }
   [ "$NO_TODO_SET" -eq 0 ] || shared_args+=(--no-todo "$NO_TODO")
+  [ "$AI_GENERATED" -eq 0 ] || shared_args+=(--ai-generated)
   for pair in "${POS[@]}"; do
     case "$pair" in
     *=*) : ;;
@@ -2020,13 +2031,17 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ -x "$CONFIG/notes-kee
       printf "error: %s: no Captain's intent in %s to add as its notes-keeping objective; nothing was launched\n" "$ID" "$DATA/$ID/brief.md" >&2
       exit 1
     }
-    SPAWN_TODO=$(FM_HOME=$FM_HOME "$CONFIG/notes-keeping-bridge" update "$SPAWN_NOTES" "$ID: $SPAWN_INTENT" --by firstmate --task "$ID" 2>&1) || {
+    SPAWN_AI=()
+    [ "$AI_GENERATED" -eq 0 ] || SPAWN_AI=(--ai-generated)
+    SPAWN_TODO=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
+      "$SCRIPT_DIR/fm-todo-guard.sh" objective "$ID" "$SPAWN_NOTES" "$SPAWN_INTENT" ${SPAWN_AI[@]+"${SPAWN_AI[@]}"} 2>&1) || {
       printf 'error: %s: could not add its notes-keeping objective update; nothing was launched\n%s\n' "$ID" "$SPAWN_TODO" >&2
       exit 1
     }
     TODOS=("id:$SPAWN_TODO")
-    FM_HOME=$FM_HOME "$CONFIG/notes-keeping-bridge" link "$ID" "id:$SPAWN_TODO" --by firstmate ||
-      echo "warning: could not link todo 'id:$SPAWN_TODO' to $ID through $CONFIG/notes-keeping-bridge" >&2
+  elif [ "$AI_GENERATED" -eq 1 ]; then
+    printf 'error: %s: --ai-generated needs an active notes-keeping session to mark its objective in; pass --no-todo "<reason>" while none is open; nothing was launched\n' "$ID" >&2
+    exit 1
   elif [ "${#TODOS[@]}" -eq 0 ] && [ "$NO_TODO_SET" -eq 0 ]; then
     SPAWN_UNOWNED=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
       "$SCRIPT_DIR/fm-todo-guard.sh" unowned 2>&1) || true

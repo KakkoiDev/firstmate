@@ -242,6 +242,8 @@ if command -v tasks-axi >/dev/null 2>&1; then
 {"task": "chatgpt-it-reply", "outcome": "open", "at": 200, "kind": "scout", "report": "$home/data/chatgpt-it-reply/report.md"}
 {"task": "chatgpt-login-retry", "key": "id:06ie42j", "id": "06ie42j", "by": "firstmate", "at": 300}
 JSON
+    printf '{"id:1kupnl3": {"status": null, "task": "chatgpt-it-reply", "id": "1kupnl3"}, "id:06ie42j": {"status": "in-progress", "task": "chatgpt-login-retry", "id": "06ie42j"}}\n' \
+      > "$home/bridge-status.json"
     run_home "$home" "$ROOT/bin/fm-tasks-axi.sh" add chatgpt-login-retry "retry ChatGPT login" \
       --report data/chatgpt-it-reply/report.md >/dev/null || fail "could not add the follow-up"
     run_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold chatgpt-login-retry --reason "captain retries login" >/dev/null \
@@ -292,3 +294,176 @@ PY
 else
   echo "skip: tasks-axi not found (the worker-less close cases need a real backlog)"
 fi
+
+# --- every task firstmate creates is linked to a todo ---------------------
+
+# A stand-in bridge that also answers `active` and `update` the way the
+# bridge's verb contract does: update prints the id of the todo it makes.
+link_home() {  # <name> -> home with status, link, active and update
+  local home
+  home=$(make_home "$1")
+  cat > "$home/config/notes-keeping-bridge" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  status) cat "$FM_HOME/bridge-status.json" ;;
+  link) shift; printf '%s\t%s\n' "$1" "${*:2}" >> "$FM_HOME/bridge-links.log" ;;
+  active) [ -e "$FM_HOME/bridge-active" ] || exit 1; cat "$FM_HOME/bridge-active" ;;
+  update) shift; printf '%s\n' "$*" >> "$FM_HOME/bridge-updates.log"; echo 0aigen1 ;;
+  *) exit 2 ;;
+esac
+SH
+  printf '{}\n' > "$home/bridge-status.json"
+  printf '%s\n' "$home"
+}
+
+home=$(link_home objective-ai)
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" objective sweep-1 "$home/notes.md" "Sweep stale branches" --ai-generated) \
+  || fail "objective --ai-generated failed: $out"
+assert_equals "0aigen1" "$out" "objective did not print the todo id"
+assert_equals "$home/notes.md (AI-generated) sweep-1: Sweep stale branches --by firstmate --task sweep-1" \
+  "$(cat "$home/bridge-updates.log")" "an AI-generated objective is not marked as one"
+assert_equals "sweep-1	id:0aigen1 --by firstmate" "$(cat "$home/bridge-links.log")" "the objective's todo was not linked by id"
+pass "objective --ai-generated marks the objective AI-generated and links its todo"
+
+home=$(link_home objective-captain)
+run_home "$home" "$ROOT/bin/fm-todo-guard.sh" objective fix-1 "$home/notes.md" "Fix the login" >/dev/null \
+  || fail "objective failed"
+assert_equals "$home/notes.md fix-1: Fix the login --by firstmate --task fix-1" \
+  "$(cat "$home/bridge-updates.log")" "an objective from a captain ask was marked or changed"
+pass "objective without --ai-generated writes <task>: <text>"
+
+home=$(link_home link-refuse)
+rc=0
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" link-task held-1 2>&1) || rc=$?
+expect_code 1 "$rc" "link-task with nothing to link did not refuse: $out"
+assert_contains "$out" "held-1 has no notes-keeping todo linked" "the refusal did not say the task is unlinked"
+assert_contains "$out" "--ai-generated" "the refusal did not name the AI-generated way"
+[ ! -e "$home/bridge-links.log" ] || fail "a refused link-task linked something"
+pass "link-task refuses a task it cannot link, naming what to pass"
+
+home=$(link_home link-todo)
+todo_note "$home" "$(now_id hhhhhh)"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" link-task held-2 --todo "release note") || fail "link-task --todo failed: $out"
+assert_equals "held-2	write the release note --by firstmate" "$(cat "$home/bridge-links.log")" "--todo did not link the resolved todo"
+pass "link-task --todo links the one open todo it names"
+
+home=$(link_home link-already)
+printf '{"id:0abc": {"status": null, "task": "held-3", "id": "0abc"}}\n' > "$home/bridge-status.json"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" link-task held-3) || fail "an already linked task was refused: $out"
+assert_contains "$out" "linked held-3: id:0abc" "link-task did not report the existing link"
+[ ! -e "$home/bridge-links.log" ] || fail "an already linked task was linked again"
+pass "link-task passes a task the bridge already links"
+
+# The ChatGPT chain: a scout's report left work, so its todos stay open with
+# the scout gone; the follow-up held from it must carry those todos.
+home=$(link_home link-origin)
+printf '{"id:0yv2jqx": {"status": null, "task": "chatgpt-login", "id": "0yv2jqx"}, "id:1kupnl3": {"status": "in-progress", "task": "other-live", "id": "1kupnl3"}}\n' \
+  > "$home/bridge-status.json"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" link-task chatgpt-login-retry --origin chatgpt-login) \
+  || fail "link-task --origin failed: $out"
+assert_equals "chatgpt-login-retry	id:0yv2jqx --by firstmate" "$(cat "$home/bridge-links.log")" \
+  "the follow-up did not take the todo its ended origin left open"
+pass "link-task --origin moves an ended origin's open todo to the follow-up"
+
+home=$(link_home link-origin-live)
+printf '{"id:0live": {"status": "in-progress", "task": "ship-a", "id": "0live"}}\n' > "$home/bridge-status.json"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" link-task ship-a-question --origin ship-a) \
+  || fail "a hold from a live origin was refused: $out"
+assert_contains "$out" "covered ship-a-question: id:0live (its origin ship-a still owns it)" "the live origin's cover was not reported"
+[ ! -e "$home/bridge-links.log" ] || fail "a live origin's todo was moved away from it"
+pass "link-task --origin leaves a live origin's todo with it and passes"
+
+home=$(link_home link-objective)
+printf '%s\n' "$home/notes.md" > "$home/bridge-active"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" link-task sweep-2 --objective "Sweep stale branches" --ai-generated) \
+  || fail "link-task --objective failed: $out"
+assert_contains "$(cat "$home/bridge-updates.log")" "(AI-generated) sweep-2: Sweep stale branches" "the objective was not marked AI-generated"
+assert_equals "sweep-2	id:0aigen1 --by firstmate" "$(cat "$home/bridge-links.log")" "the objective's todo was not linked"
+pass "link-task --objective --ai-generated adds a marked objective and links it"
+
+home=$(link_home link-no-todo)
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" link-task maint-1 --no-todo "fleet maintenance") || fail "--no-todo without a session was refused: $out"
+assert_contains "$out" "no todo maint-1: fleet maintenance" "--no-todo was not reported"
+printf '%s\n' "$home/notes.md" > "$home/bridge-active"
+rc=0
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" link-task maint-2 --no-todo "fleet maintenance" 2>&1) || rc=$?
+expect_code 1 "$rc" "--no-todo was accepted while a notes session is active: $out"
+pass "link-task --no-todo passes only while no notes-keeping session is active"
+
+home=$(link_home link-contradict)
+rc=0
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" link-task x --ai-generated 2>&1) || rc=$?
+expect_code 2 "$rc" "--ai-generated without --objective was accepted: $out"
+pass "link-task --ai-generated needs an --objective"
+
+home=$(link_home link-no-bridge)
+rm "$home/config/notes-keeping-bridge"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" link-task x) || fail "link-task without a bridge refused: $out"
+assert_equals "" "$out" "link-task without a bridge printed something"
+pass "link-task does nothing when config/notes-keeping-bridge is absent"
+
+# --- captain holds are linked before they are held -------------------------
+
+if command -v tasks-axi >/dev/null 2>&1; then
+  hold_home() {  # <name>
+    local home
+    home=$(link_home "$1")
+    fm_test_tasks_toml "$home/.tasks.toml"
+    printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+    printf '%s\n' "$home"
+  }
+  hold() {  # <home> <args...>
+    local home=$1
+    shift
+    run_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold "$@"
+  }
+
+  home=$(hold_home hold-refuse)
+  rc=0
+  out=$(hold "$home" call-1 --title "Pick the route" --reason "captain must decide" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unlinked hold was created: $out"
+  assert_contains "$out" "call-1 has no notes-keeping todo linked" "the hold refusal did not say why"
+  if (cd "$home" && tasks-axi show call-1 >/dev/null 2>&1); then fail "a refused hold created its task"; fi
+  pass "hold refuses, creating nothing, when the task links no todo"
+
+  home=$(hold_home hold-origin)
+  printf '{"id:0yv2jqx": {"status": null, "task": "chatgpt-login", "id": "0yv2jqx"}}\n' > "$home/bridge-status.json"
+  out=$(hold "$home" chatgpt-login-retry --title "Log in to ChatGPT" --reason "captain must log in" --origin chatgpt-login) \
+    || fail "a hold from an ended scout was refused: $out"
+  assert_equals "chatgpt-login-retry	id:0yv2jqx --by firstmate" "$(cat "$home/bridge-links.log")" \
+    "the held follow-up did not take its scout's open todo"
+  pass "hold --origin moves the ended scout's open todo to the held follow-up"
+
+  home=$(hold_home hold-ai)
+  printf '%s\n' "$home/notes.md" > "$home/bridge-active"
+  out=$(hold "$home" sweep-call --title "Sweep stale branches?" --reason "captain must approve" \
+    --objective "Sweep stale branches?" --ai-generated) || fail "an AI-generated hold was refused: $out"
+  assert_contains "$(cat "$home/bridge-updates.log")" "(AI-generated) sweep-call: Sweep stale branches?" \
+    "the AI-generated hold's objective is not marked"
+  (cd "$home" && tasks-axi show sweep-call >/dev/null 2>&1) || fail "the linked hold was not created"
+  pass "hold --objective --ai-generated marks the objective and holds the task"
+else
+  echo "skip: tasks-axi not found; captain hold link cases not run"
+fi
+
+# --- related todos are named when a task's outcome is recorded -------------
+
+home=$(link_home related)
+cat > "$home/state/notes-todo-links.jsonl" <<'EOF'
+{"task": "chatgpt-login", "key": "id:0yv2jqx", "id": "0yv2jqx", "at": 1}
+{"task": "chatgpt-login-retry", "key": "id:0yv2jqx", "id": "0yv2jqx", "at": 2}
+{"task": "pr-fix", "key": "id:0pr", "id": "0pr", "at": 3}
+{"task": "pr-rereview", "outcome": "done", "at": 4, "pr": "https://github.com/o/r/pull/7"}
+EOF
+printf 'pr=https://github.com/o/r/pull/7\n' > "$home/state/pr-fix.meta"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" related chatgpt-login) || fail "related failed: $out"
+assert_contains "$out" "RELATED TODOS" "related printed no section"
+assert_contains "$out" "- chatgpt-login-retry: shares todo id:0yv2jqx (now linked to it)" "a follow-up sharing the todo was not named"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" related pr-fix) || fail "related failed: $out"
+assert_contains "$out" "- pr-rereview: records the same PR https://github.com/o/r/pull/7" "a task on the same PR was not named"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" related lonely) || fail "related failed: $out"
+assert_equals "" "$out" "related named something for a task with no relations"
+printf 'done [at=5]: ok\n' > "$home/state/chatgpt-login-retry.status"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" record-outcome chatgpt-login-retry) || fail "record-outcome failed: $out"
+assert_contains "$out" "- chatgpt-login: shares todo id:0yv2jqx" "record-outcome did not name the related task"
+pass "related names tasks sharing a todo or a PR, and record-outcome prints it"

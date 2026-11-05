@@ -13,6 +13,10 @@
 #   fm-todo-guard.sh record-outcome <task-id> [--pr <url>] [--report <path>]
 #     [--scout [--report-has-captain-call <yes|no>] [--scout-recommends-ship <yes|no>]]
 #   fm-todo-guard.sh record-close <task-id>
+#   fm-todo-guard.sh objective <task-id> <notes-file> <text> [--ai-generated]
+#   fm-todo-guard.sh link-task <task-id> [--todo <todo text>]... [--origin <task-id>]
+#     [--objective <text> [--ai-generated]] [--no-todo <reason>]
+#   fm-todo-guard.sh related <task-id>
 #
 # `unowned` prints an `UNOWNED TODOS` section listing every open item (`[ ]` or
 # `[~]`) under the `Todo` heading of each notes file that no work owns, then
@@ -60,6 +64,33 @@
 # `scout` and `followup` <task-id>, for every scout whose latest outcome is
 # `open` and whose report the task links (a `report:` link, relative to the
 # backlog root), so the scout's todos close with the work its report left.
+#
+# `objective` queues <text> as firstmate's [UPDATE] in <notes-file> through the
+# bridge's `update` verb, links the todo the plugin makes from it to <task-id>
+# by id, and prints that id. With --ai-generated the text is written as
+# `(AI-generated) <task-id>: <text>`, which marks a task firstmate started on
+# its own initiative where the plugin shows objectives; without it,
+# `<task-id>: <text>`. A failed update exits 1 with the bridge's reason.
+#
+# `link-task` makes sure <task-id> ends up linked to a todo, and refuses when
+# it cannot. Each --todo is resolved as `resolve` does and linked, by id when
+# its line ends in the plugin's `<!-- id:<id> -->` comment. A task the bridge
+# already links passes. With --origin, an item linked to that origin passes the
+# task when the bridge reports it in-progress (the origin still owns it), and
+# moves to the task when the bridge reports it null or blocked (the origin ended
+# without landing it, such as a scout whose report left work). Still unlinked,
+# --objective runs `objective` against the notes file the bridge's `active`
+# names. Still unlinked, --no-todo <reason> passes only while no notes-keeping
+# session is active. Anything else exits 1 naming what to pass. It prints one
+# line per link it makes or relies on. --todo contradicts --objective and
+# --no-todo, and --ai-generated needs --objective.
+#
+# `related` prints a RELATED TODOS section naming work whose todos may need to
+# change with <task-id>'s: tasks an item linked to <task-id> was linked to
+# before or after, and tasks that record the same PR, from the outcome records
+# and state/*.meta `pr=` lines. It changes nothing: the bridge already derives
+# every item's status from its latest link, so no other change is mechanical.
+# `record-outcome` prints it after the outcome it records.
 #
 # Environment: FM_HOME, FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, FM_DATA_OVERRIDE
 # select the home, as for bin/fm-inbox.sh.
@@ -286,6 +317,160 @@ if report:
 with open(links, 'a', encoding='utf-8') as f:
     f.write(json.dumps(record, ensure_ascii=False) + '\n')
 PY
+  cmd_related "$task"
+}
+
+bridge() { FM_HOME="$FM_HOME" "$BRIDGE" "$@"; }
+
+cmd_objective() {  # <task-id> <notes-file> <text> [--ai-generated]
+  local task=${1:-} file=${2:-} text=${3:-} mark='' id
+  [ -n "$task" ] && [ -n "$file" ] && [ -n "$text" ] \
+    || die "usage: fm-todo-guard.sh objective <task-id> <notes-file> <text> [--ai-generated]"
+  case "${4:-}" in
+    '') ;;
+    --ai-generated) mark='(AI-generated) ' ;;
+    *) die "unknown argument: $4" ;;
+  esac
+  id=$(bridge update "$file" "$mark$task: $text" --by firstmate --task "$task" 2>&1) || {
+    printf '%s\n' "$id" >&2
+    return 1
+  }
+  bridge link "$task" "id:$id" --by firstmate \
+    || printf 'fm-todo-guard: warning: could not link todo id:%s to %s through %s\n' "$id" "$task" "$BRIDGE" >&2
+  printf '%s\n' "$id"
+}
+
+# Prints "<status>\t<key>" for each item the bridge links to <task-id>.
+linked_to() {  # <status-json> <task-id>
+  python3 -c '
+import json, sys
+for key, entry in json.loads(sys.argv[1]).items():
+    if isinstance(entry, dict) and entry.get("task") == sys.argv[2]:
+        print((entry.get("status") or "null") + "\t" + key)
+' "$1" "$2"
+}
+
+cmd_link_task() {
+  local task=${1:-} origin='' objective='' ai='' no_todo='' no_todo_set=0 todo item status status_json rows session made=0
+  local todos=()
+  [ -n "$task" ] || die "usage: fm-todo-guard.sh link-task <task-id> [--todo <text>]... [--origin <task-id>] [--objective <text> [--ai-generated]] [--no-todo <reason>]"
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --todo) { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "--todo needs a todo text"; todos+=("$2"); shift 2 ;;
+      --origin) { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "--origin needs a task id"; origin=$2; shift 2 ;;
+      --objective) { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "--objective needs a text"; objective=$2; shift 2 ;;
+      --ai-generated) ai=--ai-generated; shift ;;
+      --no-todo) { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "--no-todo needs a reason"; no_todo=$2; no_todo_set=1; shift 2 ;;
+      *) die "unknown argument: $1" ;;
+    esac
+  done
+  [ "${#todos[@]}" -eq 0 ] || { [ -z "$objective" ] && [ "$no_todo_set" -eq 0 ]; } \
+    || die "--todo names a captain todo; it contradicts --objective and --no-todo"
+  [ -z "$ai" ] || [ -n "$objective" ] || die "--ai-generated marks an --objective; pass one"
+  [ -z "$objective" ] || [ "$no_todo_set" -eq 0 ] || die "--objective and --no-todo contradict each other; pass one"
+  [ -x "$BRIDGE" ] || return 0
+  for todo in ${todos[@]+"${todos[@]}"}; do
+    item=$(cmd_unowned resolve "$todo") || {
+      printf 'fm-todo-guard: --todo for %s must name exactly one open todo; nothing was linked\n%s\n' "$task" "$item" >&2
+      return 1
+    }
+    if [[ $item =~ ^(.*[^[:space:]])[[:space:]]*'<!-- id:'([a-z0-9]+)' -->'$ ]]; then
+      item=id:${BASH_REMATCH[2]}
+    fi
+    bridge link "$task" "$item" --by firstmate || die "the bridge could not link '$item' to $task"
+    printf 'linked %s: %s\n' "$task" "$item"
+    made=1
+  done
+  [ "$made" -eq 0 ] || return 0
+  status_json=$(bridge status .) || die "the bridge's status failed: $BRIDGE"
+  rows=$(linked_to "$status_json" "$task") || die "the bridge status is not a JSON object"
+  if [ -n "$rows" ]; then
+    while IFS=$'\t' read -r _ item; do printf 'linked %s: %s\n' "$task" "$item"; done <<< "$rows"
+    return 0
+  fi
+  if [ -n "$origin" ]; then
+    rows=$(linked_to "$status_json" "$origin") || die "the bridge status is not a JSON object"
+    while IFS=$'\t' read -r status item; do
+      case "$status" in
+        in-progress) printf 'covered %s: %s (its origin %s still owns it)\n' "$task" "$item" "$origin"; made=1 ;;
+        null|blocked)
+          bridge link "$task" "$item" --by firstmate || die "the bridge could not link '$item' to $task"
+          printf 'linked %s: %s (moved from its origin %s)\n' "$task" "$item" "$origin"
+          made=1
+          ;;
+      esac
+    done <<< "$rows"
+    [ "$made" -eq 0 ] || return 0
+  fi
+  session=$(bridge active 2>/dev/null) || session=
+  if [ -n "$objective" ]; then
+    [ -n "$session" ] || {
+      printf 'fm-todo-guard: no notes-keeping session is active to take the objective for %s; pass --todo "<todo text>", or --no-todo "<reason>"\n' "$task" >&2
+      return 1
+    }
+    item=$(cmd_objective "$task" "$session" "$objective" $ai) || {
+      printf 'fm-todo-guard: %s: could not add its notes-keeping objective update\n' "$task" >&2
+      return 1
+    }
+    printf 'linked %s: id:%s (objective%s)\n' "$task" "$item" "${ai:+, AI-generated}"
+    return 0
+  fi
+  if [ "$no_todo_set" -eq 1 ] && [ -z "$session" ]; then
+    printf 'no todo %s: %s\n' "$task" "$no_todo"
+    return 0
+  fi
+  printf 'fm-todo-guard: %s has no notes-keeping todo linked; pass --todo "<todo text>" naming the captain todo it serves, --objective "<text>" (with --ai-generated when firstmate started it on its own initiative), or --no-todo "<reason>" while no notes-keeping session is active\n' "$task" >&2
+  cmd_unowned unowned >&2 || true
+  return 1
+}
+
+cmd_related() {  # <task-id>
+  local task=${1:-}
+  [ -n "$task" ] || die "usage: fm-todo-guard.sh related <task-id>"
+  [ -f "$STATE/notes-todo-links.jsonl" ] || return 0
+  python3 - "$STATE" "$task" <<'PY'
+import glob, json, os, sys
+
+state, task = sys.argv[1:3]
+history, prs = {}, {}
+with open(os.path.join(state, 'notes-todo-links.jsonl'), encoding='utf-8', errors='replace') as f:
+    for line in f:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(r, dict) or not isinstance(r.get('task'), str):
+            continue
+        if isinstance(r.get('key'), str) and not r.get('unlink'):
+            tasks = history.setdefault(r['key'], [])
+            if not tasks or tasks[-1] != r['task']:
+                tasks.append(r['task'])
+        if isinstance(r.get('pr'), str) and r['pr']:
+            prs.setdefault(r['pr'], set()).add(r['task'])
+for meta in glob.glob(os.path.join(state, '*.meta')):
+    try:
+        with open(meta, encoding='utf-8', errors='replace') as f:
+            for line in f:
+                if line.startswith('pr=') and line[3:].strip():
+                    prs.setdefault(line[3:].strip(), set()).add(os.path.basename(meta)[:-len('.meta')])
+    except OSError:
+        continue
+out = []
+for key, tasks in history.items():
+    if task not in tasks:
+        continue
+    for other in dict.fromkeys(tasks):
+        if other != task:
+            now = 'now linked to it' if tasks[-1] == other else f'now linked to {tasks[-1]}'
+            out.append(f'- {other}: shares todo {key} ({now})')
+for url, tasks in prs.items():
+    if task in tasks:
+        out.extend(f'- {other}: records the same PR {url}' for other in sorted(tasks - {task}))
+if out:
+    print(f"RELATED TODOS (work whose todos may need to change with {task}'s; check each, nothing was changed):")
+    print('\n'.join(dict.fromkeys(out)))
+PY
 }
 
 cmd_record_close() {
@@ -337,6 +522,9 @@ case "${1:-}" in
   unowned|resolve) cmd_unowned "$@" ;;
   record-outcome) shift; cmd_record_outcome "$@" ;;
   record-close) shift; cmd_record_close "$@" ;;
+  objective) shift; cmd_objective "$@" ;;
+  link-task) shift; cmd_link_task "$@" ;;
+  related) shift; cmd_related "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown subcommand: $1 (try --help)" ;;
 esac

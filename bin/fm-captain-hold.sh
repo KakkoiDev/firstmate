@@ -22,7 +22,8 @@
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id> [--report <path>]] [--until YYYY-MM-DD] \
-#     [--question <text> [--option <text>]...]
+#     [--question <text> [--option <text>]...] \
+#     [--todo <todo text>]... [--objective <text> [--ai-generated]] [--no-todo <reason>]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release] [--routed-to <task-id> <NNN>]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance> [--routed-to <task-id> <NNN>]   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
@@ -65,6 +66,11 @@
 # the call without parsing the reason. These lines sit in the body header under
 # the stamp and origin; a new `--report` or `--question` replaces the previous
 # lines above the newest resolution record.
+# When config/notes-keeping-bridge exists, `hold` first makes sure the task is
+# linked to a notes-keeping todo through `bin/fm-todo-guard.sh link-task`,
+# which owns the rules, passing --origin and the todo options through, and
+# refuses, creating and holding nothing, when it cannot; --ai-generated marks
+# an --objective for a call firstmate raised on its own initiative.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -237,6 +243,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
@@ -993,11 +1000,22 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
   printf '%s %s %s\n' "$id" "$how" "$origin_state"
 }
 
+hold_todo_link() {  # <task-id> <origin-or-empty> [link-task options...]
+  local id=$1 origin=$2
+  shift 2
+  [ -x "$CONFIG/notes-keeping-bridge" ] || return 0
+  [ -z "$origin" ] || set -- --origin "$origin" "$@"
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
+    "$SCRIPT_DIR/fm-todo-guard.sh" link-task "$id" "$@" \
+    || fail "task $id is not linked to a notes-keeping todo; nothing was held"
+}
+
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0
   local report='' question='' option duplicate
   local -a options=()
+  local todo_args=()
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1010,6 +1028,8 @@ command_hold() {
       --report) shift; report=${1:-} ;;
       --question) shift; question=${1:-} ;;
       --option) shift; options+=("${1:-}") ;;
+      --todo|--objective|--no-todo) todo_args+=("$1" "${2:-}"); shift ;;
+      --ai-generated) todo_args+=("$1") ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -1052,6 +1072,7 @@ command_hold() {
     state=$(show_field "$show" state)
     [ "$state" != "done" ] \
       || fail "task $id is already closed; a new captain call needs its own task"
+    hold_todo_link "$id" "$origin" ${todo_args[@]+"${todo_args[@]}"}
     existing_hold_kind=$(show_field_value "$show" hold_kind)
     existing_held=$(show_field_value "$show" held)
     if [ "$existing_hold_kind" = captain ] && [ "$existing_held" = yes ]; then
@@ -1071,6 +1092,7 @@ command_hold() {
     fi
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
+    hold_todo_link "$id" "$origin" ${todo_args[@]+"${todo_args[@]}"}
     [ -z "$origin" ] || body=$(printf 'Origin: %s' "$origin")
     # tasks-axi add never passes --due. Beads due.required would refuse this
     # create, and captain holds have no due semantics, so waive it for this
