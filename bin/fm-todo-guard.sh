@@ -70,7 +70,8 @@
 # linked to it and has no outcome as new as its latest link, and a `done` outcome, with kind
 # `scout` and `followup` <task-id>, for every scout whose latest outcome is
 # `open` and whose report the task links (a `report:` link, relative to the
-# backlog root) or names on a `Captain hold report:` body line, so the scout's
+# backlog root) or names on a `Captain hold report:` or `Captain hold earlier
+# report:` body line, so the scout's
 # todos close with the work its report left.
 #
 # `objective` queues <text> as firstmate's [UPDATE] in <notes-file> through the
@@ -565,8 +566,9 @@ for link in (m.group(1).split(',') if m else []):
 m = re.search(r'^\s*body: (.*?)\s*$', os.environ['FM_TODO_SHOW'], re.M)
 body = (json.loads(m.group(1)) if m.group(1).startswith('"') else m.group(1)) if m else ''
 for line in body.split('\n'):
-    if line.startswith('Captain hold report: ') and line[21:].strip():
-        reports.add(os.path.realpath(os.path.join(root, line[21:].strip())))
+    m = re.match(r'Captain hold (?:earlier )?report: (.+)$', line)
+    if m and m.group(1).strip():
+        reports.add(os.path.realpath(os.path.join(root, m.group(1).strip())))
 now = int(time.time())
 out = []
 if task in linked and (task not in latest or latest[task].get('at', 0) < linked[task]):

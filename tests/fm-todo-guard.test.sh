@@ -313,6 +313,45 @@ PY
     || fail "the closing answer failed"
   assert_equals "done" "$(latest_outcome "$home" rbac-migrate)" "the scout's todo stayed blocked after the answer closed its call"
   pass "an answer that closes a scout's call records the scout's todo done"
+
+  # The promo chain: one captain call re-held from scout A's report to scout
+  # B's, both scouts cleaned up with outcome `open`, then answered once.
+  home=$(make_home closed-rehold-report)
+  fm_test_tasks_toml "$home/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  mkdir -p "$home/data/promo-a" "$home/data/promo-b"
+  printf '# report\n' > "$home/data/promo-a/report.md"
+  printf '# report\n' > "$home/data/promo-b/report.md"
+  cat > "$home/state/notes-todo-links.jsonl" <<'JSON'
+{"task": "promo-a", "key": "id:aaaaaaa", "id": "aaaaaaa", "by": "firstmate", "at": 100}
+{"task": "promo-b", "key": "id:bbbbbbb", "id": "bbbbbbb", "by": "firstmate", "at": 100}
+JSON
+  printf '{"id:aaaaaaa": {"status": "in-progress", "task": "promo-a", "id": "aaaaaaa"}, "id:bbbbbbb": {"status": "in-progress", "task": "promo-b", "id": "bbbbbbb"}}\n' \
+    > "$home/bridge-status.json"
+  run_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold promo-goals --title "Which goals can you answer?" \
+    --reason "answer the open goal items" --origin promo-a --report "$home/data/promo-a/report.md" >/dev/null \
+    || fail "could not hold scout A's call"
+  printf '{"task": "promo-a", "outcome": "open", "at": 200, "kind": "scout", "report": "%s"}\n' \
+    "$home/data/promo-a/report.md" >> "$home/state/notes-todo-links.jsonl"
+  run_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold promo-goals --title "Which goals can you answer?" \
+    --reason "answer the open goal items" --origin promo-b --report "$home/data/promo-b/report.md" >/dev/null \
+    || fail "could not re-hold the call for scout B"
+  printf '{"task": "promo-b", "outcome": "open", "at": 300, "kind": "scout", "report": "%s"}\n' \
+    "$home/data/promo-b/report.md" >> "$home/state/notes-todo-links.jsonl"
+  run_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold promo-goals --title "Which goals can you answer?" \
+    --reason "answer the open goal items" --origin promo-b --report "$home/data/promo-b/report.md" >/dev/null \
+    || fail "could not repeat the re-hold for scout B"
+  body=$(run_home "$home" "$ROOT/bin/fm-tasks-axi.sh" show promo-goals --full) || fail "could not show the re-held call"
+  assert_equals 1 "$(printf '%s\n' "$body" | grep -o 'Captain hold earlier report: [^\\]*promo-a/report.md' | wc -l | tr -d ' ')" \
+    "a repeated re-hold did not keep scout A's report exactly once"
+  assert_equals 0 "$(printf '%s\n' "$body" | grep -o 'Captain hold earlier report: [^\\]*promo-b/report.md' | wc -l | tr -d ' ')" \
+    "the current report was also kept as an earlier one"
+  printf 'goals 1 and 2\n' > "$home/decision.txt"
+  run_home "$home" "$ROOT/bin/fm-captain-hold.sh" answer promo-goals --decision-file "$home/decision.txt" >/dev/null \
+    || fail "the closing answer failed"
+  assert_equals "done" "$(latest_outcome "$home" promo-b)" "the latest scout's todo stayed blocked after the answer"
+  assert_equals "done" "$(latest_outcome "$home" promo-a)" "an earlier scout's todo stayed blocked after a re-held call was answered"
+  pass "an answer to a re-held call records every scout whose report it carried done"
 else
   echo "skip: tasks-axi not found (the worker-less close cases need a real backlog)"
 fi

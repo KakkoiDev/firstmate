@@ -65,7 +65,9 @@
 # `Question:` line and each `--option` one `Options:` line, so a reader shows
 # the call without parsing the reason. These lines sit in the body header under
 # the stamp and origin; a new `--report` or `--question` replaces the previous
-# lines above the newest resolution record.
+# lines above the newest resolution record, except that each different report
+# it replaces stays on a `Captain hold earlier report:` line, so the answer
+# still closes every scout whose report the call carried.
 # When config/notes-keeping-bridge exists, `hold` first makes sure the task is
 # linked to a notes-keeping todo through `bin/fm-todo-guard.sh link-task`,
 # which owns the rules, passing --origin and the todo options through, and
@@ -892,14 +894,14 @@ write_hold_origin() {  # <task-id> <shown-body> <origin-or-empty>
 # header under the stamp and origin; a new value replaces the old lines above
 # the newest resolution record, so recorded answers below it stay byte-exact.
 write_hold_call_lines() {  # <task-id> <shown-body> <report-or-empty> <question-or-empty> [option...]
-  local id=$1 body=$2 report=$3 question=$4 head='' rest='' stamp new_body tmp option line
+  local id=$1 body=$2 report=$3 question=$4 head='' rest='' earlier stamp new_body tmp option line
   shift 4
   body=$(decode_shown_value "$body") || fail "could not decode the existing body for $id"
   stamp=$(printf '%s\n' "$body" | sed -n 1p)
   head=$stamp
   rest=$(printf '%s\n' "$body" | sed 1d | awk -v report="$report" -v question="$question" '
     /^Resolution recorded by fm-(captain|decision)-hold\.$/ { below = 1 }
-    !below && report != "" && /^Captain hold report: / { next }
+    !below && report != "" && /^Captain hold (earlier )?report: / { next }
     !below && question != "" && (/^Question: / || /^Options: /) { next }
     { print }
   ')
@@ -910,7 +912,16 @@ write_hold_call_lines() {  # <task-id> <shown-body> <report-or-empty> <question-
       rest=$(printf '%s\n' "$rest" | sed 1d)
       ;;
   esac
-  [ -z "$report" ] || head=$(printf '%s\nCaptain hold report: %s' "$head" "$report")
+  if [ -n "$report" ]; then
+    head=$(printf '%s\nCaptain hold report: %s' "$head" "$report")
+    earlier=$(printf '%s\n' "$body" | sed 1d | awk -v report="$report" '
+      /^Resolution recorded by fm-(captain|decision)-hold\.$/ { exit }
+      sub(/^Captain hold (earlier )?report: /, "") && $0 != report && !seen[$0]++ {
+        print "Captain hold earlier report: " $0
+      }
+    ')
+    [ -z "$earlier" ] || head=$(printf '%s\n%s' "$head" "$earlier")
+  fi
   if [ -n "$question" ]; then
     head=$(printf '%s\nQuestion: %s' "$head" "$question")
     for option in "$@"; do
