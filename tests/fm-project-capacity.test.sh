@@ -842,14 +842,59 @@ test_spawn_without_todo_refuses_to_duplicate_an_open_todo() {
   case_dir=$(make_case todo-dup task-c)
   home="$case_dir/home"
   write_bridge "$home" '{}'
-  write_todos "$home" "answer the vendor"
+  write_todos "$home" "run the heavy suite for task-c" "answer the vendor"
   printf '%s\n' "$home/notes.md" > "$home/bridge-active"
   out=$(spawn_ship "$case_dir" task-c 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "a spawn queued an objective while the captain's list had an unowned todo: $out"
-  assert_contains "$out" "answer the vendor" "the refusal did not list the captain's open todo"
+  [ "$rc" -ne 0 ] || fail "a spawn queued an objective while the captain's list had an unowned todo for it: $out"
+  assert_contains "$out" "run the heavy suite for task-c" "the refusal did not list the captain's matching todo"
+  assert_not_contains "$out" "answer the vendor" "the refusal listed an unrelated todo"
   [ ! -e "$home/bridge-updates.log" ] || fail "a refused spawn still queued an objective update"
   assert_nothing_launched "$case_dir" task-c
-  pass "a spawn without --todo refuses to duplicate an unowned todo on the captain's list"
+  pass "a spawn without --todo refuses to duplicate an unowned todo that is this ask"
+}
+
+test_spawn_without_todo_ignores_unrelated_unowned_todos() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-unrelated task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{}'
+  write_todos "$home" "answer the vendor" "write the release note"
+  printf '%s\n' "$home/notes.md" > "$home/bridge-active"
+  out=$(spawn_ship "$case_dir" task-c 2>&1) || rc=$?
+  expect_code 0 "$rc" "unrelated unowned todos refused a captain ask's spawn: $out"
+  assert_equals "$home/notes.md task-c: Run the project's heavy suite for task-c. --by firstmate --task task-c" \
+    "$(cat "$home/bridge-updates.log")" "the spawn did not add its intent as firstmate's objective update"
+  assert_equals "task-c	id:1kmv58p --by firstmate" "$(cat "$home/bridge-links.log")" "the spawn did not link the created todo by id"
+  pass "a spawn without --todo adds its objective despite unowned todos unrelated to the ask"
+}
+
+test_todo_blocked_by_an_answered_hold_is_linked_at_spawn() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-blocked task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{"id:0promo": {"status": null, "task": "task-c", "id": "0promo"}}'
+  write_todos "$home" "answer the vendor"
+  printf -- '- [!] promo plan for H1 2027 <!-- id:0promo -->\n' >> "$home/notes.md"
+  out=$(run_spawn "$case_dir" "$home" "$(new_worktree "$case_dir" task-c)" task-c "$case_dir/project" \
+    --mode no-mistakes --yolo off --todo "promo plan") || rc=$?
+  expect_code 0 "$rc" "--todo refused the blocked todo already linked to this task: $out"
+  assert_equals "task-c	id:0promo --by firstmate" "$(cat "$home/bridge-links.log")" "the spawn did not link the blocked todo by its id"
+  assert_contains "$(cat "$home/state/task-c.meta")" "todo=promo plan for H1 2027" "the task record does not name its todo"
+  pass "--todo links a todo left blocked by an answered hold on the same task"
+}
+
+test_todo_blocked_for_another_task_is_refused() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-blocked-other task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{"id:0promo": {"status": null, "task": "promo-other", "id": "0promo"}}'
+  write_todos "$home" "answer the vendor"
+  printf -- '- [!] promo plan for H1 2027 <!-- id:0promo -->\n' >> "$home/notes.md"
+  out=$(run_spawn "$case_dir" "$home" "$(new_worktree "$case_dir" task-c)" task-c "$case_dir/project" \
+    --mode no-mistakes --yolo off --todo "promo plan" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "--todo took a blocked todo linked to another task: $out"
+  assert_nothing_launched "$case_dir" task-c
+  pass "--todo still refuses a blocked todo linked to another task"
 }
 
 test_ai_generated_spawn_marks_its_objective() {
@@ -985,6 +1030,9 @@ test_spawn_with_no_todo_reason_launches
 test_unknown_or_ambiguous_todo_is_refused
 test_spawn_without_todo_adds_an_objective_update
 test_spawn_without_todo_refuses_to_duplicate_an_open_todo
+test_spawn_without_todo_ignores_unrelated_unowned_todos
+test_todo_blocked_by_an_answered_hold_is_linked_at_spawn
+test_todo_blocked_for_another_task_is_refused
 test_ai_generated_spawn_marks_its_objective
 test_ai_generated_spawn_without_a_session_is_refused
 test_deferred_spawn_links_the_todo_it_made

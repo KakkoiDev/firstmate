@@ -8,8 +8,8 @@
 # owner and nothing ever says so. This command prints that gap.
 #
 # Usage:
-#   fm-todo-guard.sh unowned [--notes <notes-file>]... [--note <inbox-note>]...
-#   fm-todo-guard.sh resolve <todo text> [--notes <notes-file>]... [--note <inbox-note>]...
+#   fm-todo-guard.sh unowned [--notes <notes-file>]... [--note <inbox-note>]... [--like <text>]
+#   fm-todo-guard.sh resolve <todo text> [--notes <notes-file>]... [--note <inbox-note>]... [--task <task-id>]
 #   fm-todo-guard.sh record-outcome <task-id> [--pr <url>] [--report <path>]
 #     [--scout [--report-has-captain-call <yes|no>] [--scout-recommends-ship <yes|no>]]
 #   fm-todo-guard.sh record-close <task-id>
@@ -21,6 +21,10 @@
 # `unowned` prints an `UNOWNED TODOS` section listing every open item (`[ ]` or
 # `[~]`) under the `Todo` heading of each notes file that no work owns, then
 # exits 1; it prints nothing and exits 0 when every open item is owned.
+# With --like it lists only the unowned items that plausibly are <text>: the
+# item's key or label key and <text>'s key, as word sequences, contain one the
+# other, or at least two significant words (three letters or more, common
+# words aside) are shared and they make up at least half of the item's.
 # An item is owned when the bridge's `status` links it to a task it reports
 # in-progress or done, or to a task this home's backlog still has
 # (bin/fm-tasks-axi.sh show), which covers a queued item, a captain hold, and
@@ -38,7 +42,10 @@
 # or label key equals the text's key; failing that, an item whose key or label
 # key contains it. An item open in several files is one item. With no match or
 # several, it prints the candidates (every open item when nothing matched) and
-# exits 1. When config/notes-keeping-bridge is absent it prints the text as given.
+# exits 1. With --task, a blocked item (`[!]`) the bridge's `status` links to
+# <task-id> also counts as open, because an answered or released captain hold
+# can leave the item blocked while the task it held still owns it.
+# When config/notes-keeping-bridge is absent it prints the text as given.
 #
 # `record-outcome` keeps a finished task's outcome where its todo link lives,
 # because the bridge derives an item's status from state/<task>.status and
@@ -72,9 +79,10 @@
 # its own initiative where the plugin shows objectives; without it,
 # `<task-id>: <text>`. A failed update exits 1 with the bridge's reason.
 # Without --ai-generated the task serves a captain ask, whose todo belongs on
-# the captain's list: while `unowned --notes <notes-file>` lists any open item,
-# it queues nothing and exits 1 with that list, so the existing item is linked
-# with --todo instead of duplicated.
+# the captain's list: while `unowned --notes <notes-file> --like <text>` lists
+# an open item that plausibly is this ask, it queues nothing and exits 1 with
+# that list, so the existing item is linked with --todo instead of duplicated;
+# unowned items unrelated to the ask do not stop it.
 #
 # `link-task` makes sure <task-id> ends up linked to a todo, and refuses when
 # it cannot. Each --todo is resolved as `resolve` does and linked, by id when
@@ -113,7 +121,7 @@ die() { printf 'fm-todo-guard: %s\n' "$*" >&2; exit 2; }
 usage() { sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'; }
 
 cmd_unowned() {
-  local query='' notes=() records=() status_json='{}'
+  local query='' like='' task='' notes=() records=() status_json='{}'
   if [ "$1" = resolve ]; then
     query=${2:-}
     [ -n "$query" ] || die "resolve needs a todo text"
@@ -124,6 +132,8 @@ cmd_unowned() {
     case "$1" in
       --notes) [ "$#" -ge 2 ] || die "--notes needs a file"; notes+=("$2"); shift 2 ;;
       --note) [ "$#" -ge 2 ] || die "--note needs an inbox record"; records+=("$2"); shift 2 ;;
+      --like) [ -z "$query" ] || die "--like filters unowned"; { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "--like needs a text"; like=$2; shift 2 ;;
+      --task) [ -n "$query" ] || die "--task belongs to resolve"; { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "--task needs a task id"; task=$2; shift 2 ;;
       *) die "unknown argument: $1" ;;
     esac
   done
@@ -131,9 +141,9 @@ cmd_unowned() {
     [ -z "$query" ] || printf '%s\n' "$query"
     return 0
   fi
-  [ -n "$query" ] || status_json=$(FM_HOME="$FM_HOME" "$BRIDGE" status "${notes[0]:-.}") \
+  { [ -n "$query" ] && [ -z "$task" ]; } || status_json=$(FM_HOME="$FM_HOME" "$BRIDGE" status "${notes[0]:-.}") \
     || die "the bridge's status failed: $BRIDGE"
-  FM_TODO_STATUS="$status_json" FM_TODO_QUERY="$query" python3 - "$STATE/inbox" "$SELF_DIR/fm-tasks-axi.sh" \
+  FM_TODO_STATUS="$status_json" FM_TODO_QUERY="$query" FM_TODO_LIKE="$like" FM_TODO_TASK="$task" python3 - "$STATE/inbox" "$SELF_DIR/fm-tasks-axi.sh" \
     "${#notes[@]}" ${notes[@]+"${notes[@]}"} ${records[@]+"${records[@]}"} <<'PY'
 import json, os, re, subprocess, sys, time
 
@@ -141,10 +151,16 @@ inbox, tasks_axi, count = sys.argv[1], sys.argv[2], int(sys.argv[3])
 notes = sys.argv[4:4 + count]
 records = sys.argv[4 + count:]
 query = os.environ['FM_TODO_QUERY']
+like = os.environ['FM_TODO_LIKE']
+task = os.environ['FM_TODO_TASK']
 WINDOW = 3 * 86400
 CHANGED = re.compile(r'^notes-keeping todo changed in (.+):$')
 HEADING = re.compile(r'^(#+)\s+(.*?)\s*$')
-ITEM = re.compile(r'^\s*[-*] \[([ ~])\] (.*?)\s*$')
+ITEM = re.compile(r'^\s*[-*] \[([ ~!])\] (.*?)\s*$')
+ITEM_ID = re.compile(r'<!-- id:([a-z0-9]+) -->$')
+COMMON = {'the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'onto', 'our', 'your', 'you', 'are', 'was',
+          'were', 'has', 'have', 'had', 'not', 'but', 'all', 'can', 'its', 'out', 'off', 'about', 'please', 'need',
+          'needs', 'want', 'should', 'would', 'could', 'will', 'just', 'then', 'them', 'they', 'what', 'when'}
 LABEL = re.compile(r'^\*\*(.+?)\*\*: (.*)$')
 
 try:
@@ -206,6 +222,30 @@ def in_backlog(task):
     return backlog[task]
 
 
+def owned_by_task(text):
+    m = ITEM_ID.search(text)
+    entry = links.get(f'id:{m.group(1)}') if m else None
+    entry = entry or links.get(key_of(ITEM_ID.sub('', text)))
+    return bool(task) and isinstance(entry, dict) and entry.get('task') == task
+
+
+def words(text):
+    return {w for w in re.findall(r'[a-z0-9]+', ITEM_ID.sub('', text).lower()) if len(w) >= 3 and w not in COMMON}
+
+
+def plausibly(text, label):
+    want, want_words = f' {key_of(ITEM_ID.sub("", like))} ', words(like)
+    for candidate in [text] + ([label] if label else []):
+        key = f' {key_of(ITEM_ID.sub("", candidate))} '
+        if key.strip() and (key in want or want in key):
+            return True
+        have = words(candidate)
+        shared = len(have & want_words)
+        if shared >= 2 and 2 * shared >= len(have):
+            return True
+    return False
+
+
 def open_items(path):
     try:
         with open(path, encoding='utf-8', errors='replace') as f:
@@ -224,7 +264,9 @@ def open_items(path):
         m = ITEM.match(line) if level else None
         if m:
             label = LABEL.match(m.group(2))
-            yield m.group(1), (label.group(2) if label else m.group(2)), (label.group(1) if label else None)
+            text = label.group(2) if label else m.group(2)
+            if m.group(1) != '!' or owned_by_task(text):
+                yield m.group(1), text, (label.group(1) if label else None)
 
 
 if query:
@@ -251,6 +293,8 @@ for path in files:
         continue
     seen.add(path)
     for mark, text, label in open_items(path):
+        if like and not plausibly(text, label):
+            continue
         link = links.get(key_of(text))
         if link:
             if link.get('status') in ('in-progress', 'done'):
@@ -337,7 +381,7 @@ cmd_objective() {  # <task-id> <notes-file> <text> [--ai-generated]
   esac
   if [ -z "$mark" ]; then
     local open rc=0
-    open=$(cmd_unowned unowned --notes "$file") || rc=$?
+    open=$(cmd_unowned unowned --notes "$file" --like "$text") || rc=$?
     [ "$rc" -eq 0 ] || {
       printf "fm-todo-guard: %s serves a captain ask; link the captain's existing todo with --todo \"<todo text>\" instead of queuing a duplicate objective\n%s\n" \
         "$task" "$open" >&2

@@ -330,11 +330,21 @@ pass "objective --ai-generated marks the objective AI-generated and links its to
 home=$(link_home objective-duplicate)
 rc=0
 out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" objective fix-1 "$home/notes.md" "Fix the login" 2>&1) || rc=$?
-expect_code 1 "$rc" "an objective was queued while the captain's list has an unowned todo: $out"
-assert_contains "$out" "write the release note" "the refusal did not list the captain's open todos"
+expect_code 1 "$rc" "an objective was queued while the captain's list has an unowned todo for it: $out"
+assert_contains "$out" "- [~] Fix login" "the refusal did not list the captain's matching todo"
+assert_not_contains "$out" "write the release note" "the refusal listed an unrelated todo"
 assert_contains "$out" "--todo" "the refusal did not say to link the existing todo"
 [ ! -e "$home/bridge-updates.log" ] || fail "a refused objective still queued an update"
-pass "objective without --ai-generated refuses to duplicate an unowned todo on the captain's list"
+pass "objective without --ai-generated refuses to duplicate an unowned todo that is this ask"
+
+# Todos left unowned by unrelated work do not stop a new captain ask's todo.
+home=$(link_home objective-unrelated)
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" objective nk-queue-split "$home/notes.md" "Split the NK queue into two lanes" 2>&1) \
+  || fail "unrelated unowned todos refused a captain ask's objective: $out"
+assert_equals "0aigen1" "$out" "objective did not print the todo id"
+assert_equals "$home/notes.md nk-queue-split: Split the NK queue into two lanes --by firstmate --task nk-queue-split" \
+  "$(cat "$home/bridge-updates.log")" "the captain ask's objective was not queued"
+pass "objective without --ai-generated ignores unowned todos unrelated to the ask"
 
 home=$(link_home objective-captain)
 printf '# Todo\n\n- [x] old finished item\n' > "$home/notes.md"
@@ -343,6 +353,22 @@ run_home "$home" "$ROOT/bin/fm-todo-guard.sh" objective fix-1 "$home/notes.md" "
 assert_equals "$home/notes.md fix-1: Fix the login --by firstmate --task fix-1" \
   "$(cat "$home/bridge-updates.log")" "an objective from a captain ask was marked or changed"
 pass "objective without --ai-generated writes <task>: <text>"
+
+# A captain hold blocked the todo linked to a task; once the hold is answered
+# the todo can stay [!], and the task's own spawn must still resolve it.
+home=$(link_home resolve-blocked)
+printf '# Todo\n\n- [!] promo plan for H1 2027 <!-- id:0promo -->\n- [ ] answer the vendor\n' > "$home/notes.md"
+printf '{"id:0promo": {"status": null, "task": "promo-h1-2027", "id": "0promo"}}\n' > "$home/bridge-status.json"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" resolve "promo plan" --task promo-h1-2027 --notes "$home/notes.md") \
+  || fail "a blocked todo linked to the task did not resolve for it: $out"
+assert_equals "promo plan for H1 2027 <!-- id:0promo -->" "$out" "resolve did not print the blocked todo linked to the task"
+rc=0
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" resolve "promo plan" --task other-task --notes "$home/notes.md") || rc=$?
+expect_code 1 "$rc" "a blocked todo linked to another task resolved: $out"
+rc=0
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" resolve "promo plan" --notes "$home/notes.md") || rc=$?
+expect_code 1 "$rc" "a blocked todo resolved without a task: $out"
+pass "resolve --task accepts a blocked todo only when it is linked to that task"
 
 home=$(link_home link-refuse)
 rc=0

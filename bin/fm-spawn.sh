@@ -13,7 +13,8 @@
 #   When config/notes-keeping-bridge exists, a fresh ship or scout spawn needs
 #   --todo or --no-todo <reason> and refuses, launching nothing, without one;
 #   each --todo must resolve to exactly one open todo (bin/fm-todo-guard.sh
-#   resolve) or the spawn refuses naming the candidates, and a batch refuses
+#   resolve --task, which also takes a blocked todo already linked to this
+#   task) or the spawn refuses naming the candidates, and a batch refuses
 #   --todo because one todo cannot name every pair. Each resolved todo text is
 #   recorded as a todo= line in state/<id>.meta and, after a successful launch,
 #   linked to the task through the bridge's `link` verb so the plugin can follow
@@ -2050,7 +2051,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ -x "$CONFIG/notes-kee
   fi
   [ -n "$SPAWN_NOTES" ] || for i in ${TODOS[@]+"${!TODOS[@]}"}; do
     SPAWN_TODO=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
-      "$SCRIPT_DIR/fm-todo-guard.sh" resolve "${TODOS[$i]}" 2>&1) || {
+      "$SCRIPT_DIR/fm-todo-guard.sh" resolve "${TODOS[$i]}" --task "$ID" 2>&1) || {
       printf 'error: --todo for %s must name exactly one open todo; nothing was launched\n%s\n' "$ID" "$SPAWN_TODO" >&2
       exit 1
     }
