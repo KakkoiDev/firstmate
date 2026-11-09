@@ -291,6 +291,28 @@ PY
   assert_equals '' "$(latest_outcome "$home" chatgpt-login-retry)" "a task with a live worker got an outcome before its cleanup"
   assert_equals open "$(latest_outcome "$home" chatgpt-it-reply)" "a scout's todo followed a follow-up whose worker is still live"
   pass "a task with a live worker leaves its outcome to cleanup"
+
+  # The RBAC chain: the scout's report raised a captain call, held with
+  # --origin and --report while the scout still owned its todo, so the todo
+  # stays linked to the scout and the hold carries no `report:` link.
+  home=$(make_home closed-hold-report)
+  fm_test_tasks_toml "$home/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  mkdir -p "$home/data/rbac-migrate"
+  printf '# report\n' > "$home/data/rbac-migrate/report.md"
+  printf '{"task": "rbac-migrate", "key": "id:0xkvvot", "id": "0xkvvot", "by": "firstmate", "at": 100}\n' \
+    > "$home/state/notes-todo-links.jsonl"
+  printf '{"id:0xkvvot": {"status": "in-progress", "task": "rbac-migrate", "id": "0xkvvot"}}\n' > "$home/bridge-status.json"
+  run_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold rbac-migrate-archive --title "Archive the old page?" \
+    --reason "archive, keep, or point to the audit page?" --origin rbac-migrate \
+    --report "$home/data/rbac-migrate/report.md" >/dev/null || fail "could not hold the scout's call"
+  printf '{"task": "rbac-migrate", "outcome": "open", "at": 200, "kind": "scout", "report": "%s"}\n' \
+    "$home/data/rbac-migrate/report.md" >> "$home/state/notes-todo-links.jsonl"
+  printf 'keep it\n' > "$home/decision.txt"
+  run_home "$home" "$ROOT/bin/fm-captain-hold.sh" answer rbac-migrate-archive --decision-file "$home/decision.txt" >/dev/null \
+    || fail "the closing answer failed"
+  assert_equals "done" "$(latest_outcome "$home" rbac-migrate)" "the scout's todo stayed blocked after the answer closed its call"
+  pass "an answer that closes a scout's call records the scout's todo done"
 else
   echo "skip: tasks-axi not found (the worker-less close cases need a real backlog)"
 fi
