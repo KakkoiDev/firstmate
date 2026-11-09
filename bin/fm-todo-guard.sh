@@ -9,7 +9,7 @@
 #
 # Usage:
 #   fm-todo-guard.sh unowned [--notes <notes-file>]... [--note <inbox-note>]... [--like <text>]
-#   fm-todo-guard.sh resolve <todo text> [--notes <notes-file>]... [--note <inbox-note>]... [--task <task-id>]
+#   fm-todo-guard.sh resolve <todo text> [--notes <notes-file>]... [--note <inbox-note>]... [--start]
 #   fm-todo-guard.sh record-outcome <task-id> [--pr <url>] [--report <path>]
 #     [--scout [--report-has-captain-call <yes|no>] [--scout-recommends-ship <yes|no>]]
 #   fm-todo-guard.sh record-close <task-id>
@@ -24,7 +24,8 @@
 # With --like it lists only the unowned items that plausibly are <text>: the
 # item's key or label key and <text>'s key, as word sequences, contain one the
 # other, or at least two significant words (three letters or more, common
-# words aside) are shared and they make up at least half of the item's.
+# words aside) are shared and they make up at least half of the item's and
+# at least half of <text>'s.
 # An item is owned when the bridge's `status` links it to a task it reports
 # in-progress or done, or to a task this home's backlog still has
 # (bin/fm-tasks-axi.sh show), which covers a queued item, a captain hold, and
@@ -42,9 +43,10 @@
 # or label key equals the text's key; failing that, an item whose key or label
 # key contains it. An item open in several files is one item. With no match or
 # several, it prints the candidates (every open item when nothing matched) and
-# exits 1. With --task, a blocked item (`[!]`) the bridge's `status` links to
-# <task-id> also counts as open, because an answered or released captain hold
-# can leave the item blocked while the task it held still owns it.
+# exits 1. With --start, a blocked (`[!]`) or paused (`[/]`) item also counts
+# as open, whichever task it is linked to, because the caller names it to
+# start it: an answered or released captain hold can leave the item blocked.
+# A paused item's `<!-- paused:<reason> -->` comment is not part of its text.
 # When config/notes-keeping-bridge is absent it prints the text as given.
 #
 # `record-outcome` keeps a finished task's outcome where its todo link lives,
@@ -83,7 +85,8 @@
 # Without --ai-generated the task serves a captain ask, whose todo belongs on
 # the captain's list: while `unowned --notes <notes-file> --like <text>` lists
 # an open item that plausibly is this ask, it queues nothing and exits 1 with
-# that list, so the existing item is linked with --todo instead of duplicated;
+# that list as the todo it matched, so the existing item is linked with --todo
+# instead of duplicated;
 # unowned items unrelated to the ask do not stop it.
 #
 # `link-task` makes sure <task-id> ends up linked to a todo, and refuses when
@@ -123,7 +126,7 @@ die() { printf 'fm-todo-guard: %s\n' "$*" >&2; exit 2; }
 usage() { sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'; }
 
 cmd_unowned() {
-  local query='' like='' task='' notes=() records=() status_json='{}'
+  local query='' like='' start='' notes=() records=() status_json='{}'
   if [ "$1" = resolve ]; then
     query=${2:-}
     [ -n "$query" ] || die "resolve needs a todo text"
@@ -135,7 +138,7 @@ cmd_unowned() {
       --notes) [ "$#" -ge 2 ] || die "--notes needs a file"; notes+=("$2"); shift 2 ;;
       --note) [ "$#" -ge 2 ] || die "--note needs an inbox record"; records+=("$2"); shift 2 ;;
       --like) [ -z "$query" ] || die "--like filters unowned"; { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "--like needs a text"; like=$2; shift 2 ;;
-      --task) [ -n "$query" ] || die "--task belongs to resolve"; { [ "$#" -ge 2 ] && [ -n "$2" ]; } || die "--task needs a task id"; task=$2; shift 2 ;;
+      --start) [ -n "$query" ] || die "--start belongs to resolve"; start=1; shift ;;
       *) die "unknown argument: $1" ;;
     esac
   done
@@ -143,9 +146,9 @@ cmd_unowned() {
     [ -z "$query" ] || printf '%s\n' "$query"
     return 0
   fi
-  { [ -n "$query" ] && [ -z "$task" ]; } || status_json=$(FM_HOME="$FM_HOME" "$BRIDGE" status "${notes[0]:-.}") \
+  [ -n "$query" ] || status_json=$(FM_HOME="$FM_HOME" "$BRIDGE" status "${notes[0]:-.}") \
     || die "the bridge's status failed: $BRIDGE"
-  FM_TODO_STATUS="$status_json" FM_TODO_QUERY="$query" FM_TODO_LIKE="$like" FM_TODO_TASK="$task" python3 - "$STATE/inbox" "$SELF_DIR/fm-tasks-axi.sh" \
+  FM_TODO_STATUS="$status_json" FM_TODO_QUERY="$query" FM_TODO_LIKE="$like" FM_TODO_START="$start" python3 - "$STATE/inbox" "$SELF_DIR/fm-tasks-axi.sh" \
     "${#notes[@]}" ${notes[@]+"${notes[@]}"} ${records[@]+"${records[@]}"} <<'PY'
 import json, os, re, subprocess, sys, time
 
@@ -154,11 +157,12 @@ notes = sys.argv[4:4 + count]
 records = sys.argv[4 + count:]
 query = os.environ['FM_TODO_QUERY']
 like = os.environ['FM_TODO_LIKE']
-task = os.environ['FM_TODO_TASK']
+start = bool(os.environ['FM_TODO_START'])
 WINDOW = 3 * 86400
 CHANGED = re.compile(r'^notes-keeping todo changed in (.+):$')
 HEADING = re.compile(r'^(#+)\s+(.*?)\s*$')
-ITEM = re.compile(r'^\s*[-*] \[([ ~!])\] (.*?)\s*$')
+ITEM = re.compile(r'^\s*[-*] \[([ ~!/])\] (.*?)\s*$')
+PAUSED = re.compile(r'\s*<!-- paused:.*? -->')
 ITEM_ID = re.compile(r'<!-- id:([a-z0-9]+) -->$')
 COMMON = {'the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'onto', 'our', 'your', 'you', 'are', 'was',
           'were', 'has', 'have', 'had', 'not', 'but', 'all', 'can', 'its', 'out', 'off', 'about', 'please', 'need',
@@ -224,13 +228,6 @@ def in_backlog(task):
     return backlog[task]
 
 
-def owned_by_task(text):
-    m = ITEM_ID.search(text)
-    entry = links.get(f'id:{m.group(1)}') if m else None
-    entry = entry or links.get(key_of(ITEM_ID.sub('', text)))
-    return bool(task) and isinstance(entry, dict) and entry.get('task') == task
-
-
 def words(text):
     return {w for w in re.findall(r'[a-z0-9]+', ITEM_ID.sub('', text).lower()) if len(w) >= 3 and w not in COMMON}
 
@@ -243,7 +240,7 @@ def plausibly(text, label):
             return True
         have = words(candidate)
         shared = len(have & want_words)
-        if shared >= 2 and 2 * shared >= len(have):
+        if shared >= 2 and 2 * shared >= len(have) and 2 * shared >= len(want_words):
             return True
     return False
 
@@ -266,8 +263,8 @@ def open_items(path):
         m = ITEM.match(line) if level else None
         if m:
             label = LABEL.match(m.group(2))
-            text = label.group(2) if label else m.group(2)
-            if m.group(1) != '!' or owned_by_task(text):
+            text = PAUSED.sub('', label.group(2) if label else m.group(2))
+            if m.group(1) in ' ~' or start:
                 yield m.group(1), text, (label.group(1) if label else None)
 
 
@@ -385,7 +382,7 @@ cmd_objective() {  # <task-id> <notes-file> <text> [--ai-generated]
     local open rc=0
     open=$(cmd_unowned unowned --notes "$file" --like "$text") || rc=$?
     [ "$rc" -eq 0 ] || {
-      printf "fm-todo-guard: %s serves a captain ask; link the captain's existing todo with --todo \"<todo text>\" instead of queuing a duplicate objective\n%s\n" \
+      printf "fm-todo-guard: %s serves a captain ask that matches the captain's existing todo below; link it with --todo \"<todo text>\" instead of queuing a duplicate objective\n%s\n" \
         "$task" "$open" >&2
       return 1
     }

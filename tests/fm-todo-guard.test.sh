@@ -396,7 +396,17 @@ assert_contains "$out" "- [~] Fix login" "the refusal did not list the captain's
 assert_not_contains "$out" "write the release note" "the refusal listed an unrelated todo"
 assert_contains "$out" "--todo" "the refusal did not say to link the existing todo"
 [ ! -e "$home/bridge-updates.log" ] || fail "a refused objective still queued an update"
+assert_contains "$out" "matches the captain's existing todo" "the refusal did not say the listed todo is the one it matched"
 pass "objective without --ai-generated refuses to duplicate an unowned todo that is this ask"
+
+# Two shared words that are a small part of a longer ask are not that ask.
+home=$(link_home objective-overlap)
+printf '# Todo\n\n- [~] Prepare version bump for use-ai\n' > "$home/notes.md"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" objective useai-proto-llm "$home/notes.md" \
+  "let's do the next step. we can prepare it to use the deepseek flash model" 2>&1) \
+  || fail "an unowned todo sharing two words with a longer ask refused its objective: $out"
+assert_equals "0aigen1" "$out" "objective did not print the todo id"
+pass "objective without --ai-generated ignores a todo that shares only a few words with a longer ask"
 
 # Todos left unowned by unrelated work do not stop a new captain ask's todo.
 home=$(link_home objective-unrelated)
@@ -415,21 +425,25 @@ assert_equals "$home/notes.md fix-1: Fix the login --by firstmate --task fix-1" 
   "$(cat "$home/bridge-updates.log")" "an objective from a captain ask was marked or changed"
 pass "objective without --ai-generated writes <task>: <text>"
 
-# A captain hold blocked the todo linked to a task; once the hold is answered
-# the todo can stay [!], and the task's own spawn must still resolve it.
+# A spawn's explicit --todo is the operator's word to start the item, so
+# resolve --start also takes a blocked ([!]) or paused ([/]) item, whichever
+# task a captain hold or pause left it linked to; plain resolve does not.
 home=$(link_home resolve-blocked)
-printf '# Todo\n\n- [!] promo plan for H1 2027 <!-- id:0promo -->\n- [ ] answer the vendor\n' > "$home/notes.md"
-printf '{"id:0promo": {"status": null, "task": "promo-h1-2027", "id": "0promo"}}\n' > "$home/bridge-status.json"
-out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" resolve "promo plan" --task promo-h1-2027 --notes "$home/notes.md") \
-  || fail "a blocked todo linked to the task did not resolve for it: $out"
-assert_equals "promo plan for H1 2027 <!-- id:0promo -->" "$out" "resolve did not print the blocked todo linked to the task"
+printf '# Todo\n\n- [!] promo plan for H1 2027 <!-- id:0promo -->\n- [/] tidy the build cache <!-- paused:later -->\n- [x] reclaim the old images\n- [ ] answer the vendor\n' > "$home/notes.md"
+printf '{"id:0promo": {"status": null, "task": "promo-hold", "id": "0promo"}}\n' > "$home/bridge-status.json"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" resolve "promo plan" --start --notes "$home/notes.md") \
+  || fail "resolve --start refused a blocked todo: $out"
+assert_equals "promo plan for H1 2027 <!-- id:0promo -->" "$out" "resolve --start did not print the blocked todo"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" resolve "build cache" --start --notes "$home/notes.md") \
+  || fail "resolve --start refused a paused todo: $out"
+assert_equals "tidy the build cache" "$out" "resolve --start did not print the paused todo without its reason comment"
 rc=0
-out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" resolve "promo plan" --task other-task --notes "$home/notes.md") || rc=$?
-expect_code 1 "$rc" "a blocked todo linked to another task resolved: $out"
+out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" resolve "old images" --start --notes "$home/notes.md") || rc=$?
+expect_code 1 "$rc" "resolve --start took a done todo: $out"
 rc=0
 out=$(run_home "$home" "$ROOT/bin/fm-todo-guard.sh" resolve "promo plan" --notes "$home/notes.md") || rc=$?
-expect_code 1 "$rc" "a blocked todo resolved without a task: $out"
-pass "resolve --task accepts a blocked todo only when it is linked to that task"
+expect_code 1 "$rc" "a blocked todo resolved without --start: $out"
+pass "resolve --start accepts a blocked or paused todo and still refuses a done one"
 
 home=$(link_home link-refuse)
 rc=0

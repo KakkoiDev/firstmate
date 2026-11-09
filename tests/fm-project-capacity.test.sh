@@ -883,18 +883,37 @@ test_todo_blocked_by_an_answered_hold_is_linked_at_spawn() {
   pass "--todo links a todo left blocked by an answered hold on the same task"
 }
 
-test_todo_blocked_for_another_task_is_refused() {
+# A captain hold blocked the todo under the hold's own task; after the answer
+# the item stays [!], linked to that hold, and the work starts as a new task.
+test_todo_blocked_or_paused_for_another_task_is_started() {
   local case_dir home out rc=0
   case_dir=$(make_case todo-blocked-other task-c)
   home="$case_dir/home"
-  write_bridge "$home" '{"id:0promo": {"status": null, "task": "promo-other", "id": "0promo"}}'
+  write_bridge "$home" '{"id:0disk": {"status": null, "task": "disk-hold", "id": "0disk"}}'
   write_todos "$home" "answer the vendor"
-  printf -- '- [!] promo plan for H1 2027 <!-- id:0promo -->\n' >> "$home/notes.md"
+  printf -- '- [!] reclaim Docker and VM images <!-- id:0disk -->\n- [/] tidy the build cache <!-- paused:later -->\n' >> "$home/notes.md"
   out=$(run_spawn "$case_dir" "$home" "$(new_worktree "$case_dir" task-c)" task-c "$case_dir/project" \
-    --mode no-mistakes --yolo off --todo "promo plan" 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "--todo took a blocked todo linked to another task: $out"
+    --mode no-mistakes --yolo off --todo "Docker and VM images" --todo "build cache" 2>&1) || rc=$?
+  expect_code 0 "$rc" "--todo refused a blocked or paused todo it named: $out"
+  assert_equals "task-c	id:0disk --by firstmate
+task-c	tidy the build cache" "$(cat "$home/bridge-links.log")" "the spawn did not link the named blocked and paused todos to the new task"
+  assert_contains "$(cat "$home/state/task-c.meta")" "todo=reclaim Docker and VM images" "the task record does not name the blocked todo"
+  if grep -q 'paused:' "$home/state/task-c.meta"; then fail "the task record kept the paused todo's reason comment"; fi
+  pass "--todo starts a blocked or paused todo it names, whichever task held it"
+}
+
+test_todo_done_is_refused() {
+  local case_dir home out rc=0
+  case_dir=$(make_case todo-done task-c)
+  home="$case_dir/home"
+  write_bridge "$home" '{}'
+  write_todos "$home" "answer the vendor"
+  printf -- '- [x] reclaim Docker and VM images\n' >> "$home/notes.md"
+  out=$(run_spawn "$case_dir" "$home" "$(new_worktree "$case_dir" task-c)" task-c "$case_dir/project" \
+    --mode no-mistakes --yolo off --todo "Docker and VM images" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "--todo took a done todo: $out"
   assert_nothing_launched "$case_dir" task-c
-  pass "--todo still refuses a blocked todo linked to another task"
+  pass "--todo still refuses a done todo"
 }
 
 test_ai_generated_spawn_marks_its_objective() {
@@ -1032,7 +1051,8 @@ test_spawn_without_todo_adds_an_objective_update
 test_spawn_without_todo_refuses_to_duplicate_an_open_todo
 test_spawn_without_todo_ignores_unrelated_unowned_todos
 test_todo_blocked_by_an_answered_hold_is_linked_at_spawn
-test_todo_blocked_for_another_task_is_refused
+test_todo_blocked_or_paused_for_another_task_is_started
+test_todo_done_is_refused
 test_ai_generated_spawn_marks_its_objective
 test_ai_generated_spawn_without_a_session_is_refused
 test_deferred_spawn_links_the_todo_it_made
