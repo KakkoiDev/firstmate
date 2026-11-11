@@ -269,6 +269,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/security-research-scope/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/secondmate-provisioning/SKILL.md",
       "audience": "agent-runtime"
     },
