@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
 # fm-dispatch-resolve.sh - resolve one concrete crewmate or scout dispatch
-# profile from a task brief with typesafe.ai's System One model (Jev), opt-in.
+# profile from a task brief with a configurable model provider, opt-in.
 #
 # Usage:
 #   fm-dispatch-resolve.sh <brief-file> [--project <name>]
 #
-# Opt-in gate: TYPESAFE_API_KEY non-empty in this process environment, else a
-#   TYPESAFE_API_KEY= line in $FM_HOME/.env read with fmx_env_get, the same
-#   accessor as FMX_PAIRING_TOKEN (bin/fm-env-lib.sh). The environment wins.
-#   Absent in both: one "dispatch-resolve: off" line on stderr, nothing on
-#   stdout, exit 0, no network call, so firstmate dispatches exactly as today.
-#   The key lives in one shell variable and reaches curl as a header read from
-#   a file descriptor, never on argv; nothing logs or writes it.
+# Opt-in gate: FM_DISPATCH_PROVIDER and FM_DISPATCH_MODEL select the provider
+#   and model from the environment or $FM_HOME/.env (environment wins). With no
+#   provider set, retain the original typesafe.ai/jev-latest key gate exactly.
+#   OpenRouter requires both its provider selection and a model. The selected
+#   key lives in a non-exported shell variable and reaches curl through fd 3,
+#   never argv, logs, or child environments.
 #
-# What it does when on with at least one rule: one POST to
-#   https://api.typesafe.ai/v1/systemone with the project name and the brief's
+# What it does when on with at least one rule: one POST with the project name and the brief's
 #   `## Captain's intent` and `## Firstmate spec` sections, tagged when it is a
 #   scout brief (the whole brief when it has neither section), after the
 #   operator's words for the turn (fm_jev_turn_words in bin/fm-jev-lib.sh,
@@ -24,8 +22,8 @@
 #   given what the task text and rules leave) as state.session when there is
 #   one, both redacted (fm_jev_redact) first, as state and
 #   ONE Choice question whose options are every rule's `when` from
-#   config/crew-dispatch.json plus one fixed generic none option. Jev returns
-#   the matched rule, a probability per option, and a confidence. Everything
+#   config/crew-dispatch.json plus one fixed generic none option. The provider
+#   returns the matched rule, a probability per option, and a confidence. Everything
 #   after that is jq: the confidence floor (0.6 on the answer confidence, or a
 #   rule's declared `min_confidence` on that rule's probability, falling to the
 #   most probable other option that clears its own floor), the rule's declared
@@ -66,8 +64,9 @@
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
-#   existing unreadable rules file, malformed rules, or missing jq), which is
-#   actionable, never selected around.
+#   existing unreadable rules file, malformed rules, missing jq, an unknown
+#   provider, or OpenRouter without a model), which is actionable, never
+#   selected around.
 #
 # Usage record: every Jev call, answered or failed, appends one record of
 #   question type dispatch-rule through bin/fm-jev-lib.sh, which owns the
@@ -85,7 +84,8 @@
 #   post-answer check still run fresh.
 #
 # Environment:
-#   TYPESAFE_API_KEY is the only resolver-specific environment setting.
+#   FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL, TYPESAFE_API_KEY, and
+#   OPENROUTER_API_KEY are read from the environment or $FM_HOME/.env.
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
@@ -95,6 +95,9 @@ set -u
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
 export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
 unset TYPESAFE_API_KEY
+OPENROUTER_API_KEY_PRIVATE=${OPENROUTER_API_KEY:-}
+export -n OPENROUTER_API_KEY_PRIVATE 2>/dev/null || true
+unset OPENROUTER_API_KEY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -118,6 +121,11 @@ START_MS=$(fm_timing_now_ms)
 
 CONFIDENCE_FLOOR=0.6
 REUSE_SECS=600
+# The typesafe.ai base, timeout, and default model are fm_jev_post's
+# (bin/fm-jev-lib.sh); only OpenRouter's transport lives here.
+TS_MODEL=$FM_JEV_MODEL
+OR_BASE=https://openrouter.ai/api
+OR_TIMEOUT=10
 DEFAULT_WHEN="No listed rule applies to this task."
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
@@ -145,13 +153,38 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- opt-in gate ---------------------------------------------------------------
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-fi
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-  exit 0
-fi
+DISPATCH_PROVIDER=${FM_DISPATCH_PROVIDER:-}
+[ -n "$DISPATCH_PROVIDER" ] || DISPATCH_PROVIDER=$(fmx_env_get FM_DISPATCH_PROVIDER "$FM_HOME/.env")
+DISPATCH_MODEL=${FM_DISPATCH_MODEL:-}
+[ -n "$DISPATCH_MODEL" ] || DISPATCH_MODEL=$(fmx_env_get FM_DISPATCH_MODEL "$FM_HOME/.env")
+case "$DISPATCH_PROVIDER" in
+  '')
+    DISPATCH_PROVIDER=typesafe
+    DISPATCH_MODEL=$TS_MODEL
+    [ -n "$TYPESAFE_API_KEY_PRIVATE" ] || TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+    if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
+      echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
+      exit 0
+    fi
+    ;;
+  typesafe)
+    [ -n "$DISPATCH_MODEL" ] || DISPATCH_MODEL=$TS_MODEL
+    [ -n "$TYPESAFE_API_KEY_PRIVATE" ] || TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+    if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
+      echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
+      exit 0
+    fi
+    ;;
+  openrouter)
+    [ -n "$DISPATCH_MODEL" ] || die "FM_DISPATCH_MODEL required when FM_DISPATCH_PROVIDER=openrouter"
+    [ -n "$OPENROUTER_API_KEY_PRIVATE" ] || OPENROUTER_API_KEY_PRIVATE=$(fmx_env_get OPENROUTER_API_KEY "$FM_HOME/.env")
+    if [ -z "$OPENROUTER_API_KEY_PRIVATE" ]; then
+      echo "dispatch-resolve: off (OPENROUTER_API_KEY absent from the environment and $FM_HOME/.env)" >&2
+      exit 0
+    fi
+    ;;
+  *) die "unknown FM_DISPATCH_PROVIDER: $DISPATCH_PROVIDER (expected typesafe or openrouter)" ;;
+esac
 
 # ---- inputs --------------------------------------------------------------------
 [ -n "$BRIEF" ] || die "brief file required (see --help)"
@@ -372,7 +405,7 @@ fm_jev_turn_slice $(( FM_JEV_STATE_BYTES - $(wc -c < "$TASK_TEXT") - $(wc -c < "
 if ! { fm_jev_redact < "$SESSION_TEXT" > "$RESP_FILE" && cat "$RESP_FILE" > "$SESSION_TEXT" && : > "$RESP_FILE"; }; then
   die "could not redact secrets from the session slice"
 fi
-  REQUEST=$(jq -n --rawfile brief "$TASK_TEXT" --rawfile session "$SESSION_TEXT" --arg project "$PROJECT" --arg model "$FM_JEV_MODEL" \
+  REQUEST=$(jq -n --rawfile brief "$TASK_TEXT" --rawfile session "$SESSION_TEXT" --arg project "$PROJECT" --arg model "$DISPATCH_MODEL" \
     --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
     ($rules[0]) as $cfg |
     ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
@@ -394,11 +427,25 @@ fi
     echo "dispatch-resolve: reused Jev decision $DECISION_ID (same request answered within ${REUSE_SECS}s; no new call)" >&2
   else
     DECISION_ID=$(fm_jev_new_id)
-    fm_jev_post "$REQUEST" "$RESP_FILE"
-    HTTP=$FM_JEV_HTTP LAT_MS=$FM_JEV_LAT_MS
-    if [ "$HTTP" != 200 ]; then
-      record_call error
-      emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
+    if [ "$DISPATCH_PROVIDER" = openrouter ]; then
+      T0=$(fm_timing_now_ms)
+      HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$OR_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
+        -X POST "$OR_BASE/alpha/decisions" -H 'Content-Type: application/json' \
+        -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$OPENROUTER_API_KEY_PRIVATE") \
+        --data-binary @- 2>/dev/null) || HTTP=000
+      T1=$(fm_timing_now_ms)
+      LAT_MS=$(( T1 - T0 ))
+      if [ "$HTTP" != 200 ]; then
+        record_call error
+        emit_error "http $HTTP after ${LAT_MS} ms"
+      fi
+    else
+      fm_jev_post "$REQUEST" "$RESP_FILE"
+      HTTP=$FM_JEV_HTTP LAT_MS=$FM_JEV_LAT_MS
+      if [ "$HTTP" != 200 ]; then
+        record_call error
+        emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
+      fi
     fi
   fi
 jq -e --slurpfile rules "$RULES" '
