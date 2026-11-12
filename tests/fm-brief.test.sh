@@ -1292,7 +1292,7 @@ test_inbox_guidance_explains_marked_body_terminator() {
     id="inbox-$kind"
     case "$kind" in
       no-mistakes)
-        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null \
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" --no-egm test-fixture "$id" some-proj --mode no-mistakes >/dev/null \
           || fail "ship scaffold failed"
         ;;
       scout)
